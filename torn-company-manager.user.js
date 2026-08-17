@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Company Director System
 // @namespace    torn-director-system
-// @version      0.6.0
+// @version      0.7.5
 // @description  Local-only company management dashboard for Torn directors. One script for Torn PDA and PC.
 // @author       you
 // @match        https://www.torn.com/*
