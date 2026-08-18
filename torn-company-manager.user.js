@@ -3,7 +3,7 @@
 // @namespace    torn-director-system
 // @version      0.9.9
 // @description  Local-only company management dashboard for Torn directors. No data ever leaves your browser.
-// @author       you
+// @author       DooBiiE
 // @match        https://www.torn.com/*
 // @grant        GM_xmlhttpRequest
 // @grant        GM_setValue
