@@ -1,2 +1,5 @@
-[{"userId":4237873,"status":"active"}]
-[{"userId":3993294,"status":"active"}]
+[
+  {"userId":4237873,"status":"active"},
+  {"userId":3993294,"status":"active"}
+]
+
