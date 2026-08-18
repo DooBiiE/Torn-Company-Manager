@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Torn Company Director System
-// @namespace    torn-director-system
-// @version      0.9.9
-// @description  Local-only company management dashboard for Torn directors. No data ever leaves your browser.
+// @name         Torn Company Management Suite
+// @namespace    torn-company-management-suite
+// @version      1.0.0
+// @description  Local-only company management dashboard for Torn directors, embedded in the Jobs page. No company data ever leaves your browser; only your Torn User ID is checked against a public license list.
 // @author       DooBiiE
 // @match        https://www.torn.com/*
 // @grant        GM_xmlhttpRequest
@@ -10,35 +10,44 @@
 // @grant        GM_getValue
 // @grant        GM_deleteValue
 // @connect      api.torn.com
+// @connect      raw.githubusercontent.com
 // @run-at       document-idle
 // ==/UserScript==
 
 /**
  * ============================================================================
- * TORN COMPANY DIRECTOR SYSTEM — "Finance/Training/Benchmark Build"
+ * TORN COMPANY MANAGEMENT SUITE
  * ============================================================================
  *
- * WHAT THIS VERSION DOES:
- *   1. Stores your API key ONLY in this browser (Tampermonkey's local storage,
+ * WHAT THIS DOES:
+ *   1. Stores your API key ONLY in this browser (Tampermonkey local storage,
  *      via GM_setValue). It is never sent anywhere except https://api.torn.com.
  *   2. Runs a live "capability diagnostic" against every selection this system
- *      will eventually use, and shows you — with the REAL error code/message
- *      Torn returns — exactly what your current key can and can't access.
- *   3. For whatever succeeds, renders a read-only overview panel and takes a
- *      local snapshot (IndexedDB) so history starts accumulating from today.
- *   4. Everything is tagged with its accuracy classification:
+ *      uses, and records -- with the REAL error code/message Torn returns --
+ *      exactly what your current key can and can't access. The Diagnostics
+ *      tab always shows this; nothing about it gates whether the tab exists.
+ *   3. Checks your own Torn User ID (read from user/basic, EXACT) against a
+ *      public license list hosted on GitHub -- see LICENSE_JSON_URL below.
+ *      Only the numeric User ID is sent in that request; no API key, no
+ *      company data. Everything else in the suite stays fully local.
+ *   4. For whatever the API key can access, renders a read-only dashboard and
+ *      takes a local snapshot (IndexedDB) so history builds up from today.
+ *   5. Everything is tagged with its accuracy classification:
  *        EXACT = straight from a Torn API field this session
  *        DERIVED = computed purely from EXACT values
  *        HISTORICAL = from a locally stored earlier snapshot
  *        BLOCKED = this key/role cannot access this data (shown, not hidden)
  *
  * TABS THAT ARE STUBBED (LOCKED), NOT FAKED:
- *   Finance, Training, Optimize, Benchmark, Stock, Projections all need
- *   director-level data (financials/stock/wages) or a fuller field-name
- *   verification pass than an employee key allows. Rather than mock them up
- *   with invented numbers to match a reference design, they show a plain
- *   "locked until director access + Phase 4 build" state. They'll be built
- *   for real once the Diagnostics tab confirms director access.
+ *   Optimize needs each employee's raw working stats in a role they don't
+ *   currently hold -- Torn does not expose that to a director's key. Rather
+ *   than fake it, it stays locked until an opt-in flow exists.
+ *
+ * REQUIRED API KEY LEVEL:
+ *   Full Access (or a Custom key covering company: profile/employees/
+ *   detailed/stock/applications and user: basic/workstats/log) is needed for
+ *   full functionality. A Public/Minimal key will show BLOCKED on most tabs
+ *   -- the Diagnostics tab always shows exactly which selections work.
  *
  * INSTALL: Tampermonkey/Violentmonkey -> Create new script -> paste this file.
  * ============================================================================
@@ -57,14 +66,23 @@
     ? GM_info.script.version
     : 'unknown';
   const STORAGE_KEY_APIKEY = 'tds_api_key';
-  const STORAGE_KEY_DIAGNOSTICS_COMPLETED = 'tds_diagnostics_completed';
   const STORAGE_KEY_LAST_RUN_AT = 'tds_last_run_at';
-  const STORAGE_KEY_LICENSE_KEY = 'tds_license_key';
   const STORAGE_KEY_THEME = 'tds_theme';
-  const DRAG_CLICK_THRESHOLD_PX = 6; // movement below this = treated as a click, not a drag
+  const STORAGE_KEY_LICENSE_CACHE = 'tds_license_cache';
   const MIN_CALL_INTERVAL_MS = 800; // ~75 req/min ceiling, well under Torn's 100/min cap
   const DB_NAME = 'torn_director_system';
   const DB_VERSION = 1;
+
+  // Public list of licensed Torn User IDs. Only the numeric User ID (read
+  // from user/basic, EXACT) is compared against this -- no API key or
+  // company data is ever sent here. Expected shape (propose this to whoever
+  // maintains the file if it isn't already in this form):
+  //   [ { "userId": 4237873, "status": "active" }, { "userId": 1234567, "status": "expired" } ]
+  // A "status" of anything other than "active"/"expired" (or a User ID not
+  // present in the list at all) is treated as not licensed -- this never
+  // guesses a license into existence.
+  const LICENSE_JSON_URL = 'https://raw.githubusercontent.com/DooBiiE/Torn-Company-Manager/refs/heads/main/licensed-users.json';
+  const LICENSE_CACHE_TTL_MS = 60 * 60 * 1000; // 1h -- avoids hitting GitHub raw on every page load/navigation
 
   const PROBE_PLAN = [
     { section: 'company', selections: 'profile', label: 'Company profile' },
@@ -323,98 +341,107 @@
   // ---------------------------------------------------------------------
   function injectStyles() {
     const css = `
-      /* Embedded Management Suite — intentionally not fixed/overlay UI. */
+      /* Embedded Management Suite -- lives inside Torn's own Jobs page, not
+         an overlay. Structural colours (background/border/text) below are
+         CSS variables with these dark-theme values as fallbacks; detectTornColours()
+         overwrites them at runtime by sampling Torn's own page chrome, so the
+         panel matches whichever skin (light or dark) the player is using.
+         --tds-accent / --tds-accent-dim are the user-selectable theme colour
+         (Settings tab) and are never touched by colour detection. Semantic
+         colours (green/red/amber meaning good/bad/warning) are fixed on
+         purpose and are not part of either system. */
       #tds-panel {
         width: 100%; box-sizing: border-box; margin: 14px 0 18px;
-        background: #0b0d12; color: #d7dae0; border: 1px solid #1c202a;
+        background: var(--tds-bg, #0b0d12); color: var(--tds-fg, #d7dae0);
+        border: 1px solid var(--tds-border, #1c202a);
         border-radius: 10px; overflow: hidden; font: 13px/1.45 -apple-system, 'Segoe UI', sans-serif;
         box-shadow: 0 4px 18px rgba(0,0,0,.22);
         position: relative; z-index: 20;
       }
       #tds-header {
         display: flex; align-items: center; justify-content: space-between; gap: 12px;
-        padding: 12px 14px; background: #0d1017; border-bottom: 1px solid #1c202a;
+        padding: 12px 14px; background: var(--tds-bg-alt, #0d1017); border-bottom: 1px solid var(--tds-border, #1c202a);
       }
-      #tds-header .tds-brand { display: flex; align-items: baseline; gap: 7px; min-width: 0; }
+      #tds-header .tds-brand { display: flex; align-items: baseline; gap: 7px; min-width: 0; flex-wrap: wrap; }
       #tds-header .tds-brand-dot { color: var(--tds-accent, #3ddc84); font-size: 13px; }
       #tds-header .tds-brand-name {
-        color: var(--tds-accent, #3ddc84); font-weight: 800; font-size: 14px; letter-spacing: .05em;
+        color: var(--tds-accent, #3ddc84); font-weight: 800; font-size: 13px; letter-spacing: .04em;
       }
-      #tds-header .tds-brand-version { color: #4a5062; font-size: 10.5px; }
-      #tds-header .tds-brand-subtitle { color: #687080; font-size: 10.5px; margin-left: 4px; }
+      #tds-header .tds-brand-version { color: var(--tds-text-faintest, #4a5062); font-size: 10.5px; }
+      #tds-header .tds-brand-subtitle { color: var(--tds-text-subtle, #687080); font-size: 10.5px; margin-left: 4px; }
       #tds-header-icons { display: flex; gap: 6px; flex-shrink: 0; }
       #tds-header-icons button {
         min-width: 30px; height: 28px; display: flex; align-items: center; justify-content: center;
-        background: transparent; color: #8b93a1; border: 1px solid #232838; border-radius: 6px;
+        background: transparent; color: var(--tds-text-icon, #8b93a1); border: 1px solid var(--tds-border-strong, #232838); border-radius: 6px;
         cursor: pointer; font-size: 12px; padding: 0 8px;
       }
-      #tds-header-icons button:hover { background: #161a22; color: #d7dae0; }
+      #tds-header-icons button:hover { background: var(--tds-bg-hover, #161a22); color: var(--tds-fg, #d7dae0); }
 
       #tds-tabs {
         display: flex; flex-wrap: wrap; gap: 2px; padding: 9px 12px 0;
-        border-bottom: 1px solid #1c202a; background: #0b0d12;
+        border-bottom: 1px solid var(--tds-border, #1c202a); background: var(--tds-bg, #0b0d12);
       }
       .tds-tab {
-        background: transparent; border: none; color: #5c6373; font: 700 10.5px/1 -apple-system, sans-serif;
+        background: transparent; border: none; color: var(--tds-text-dim, #5c6373); font: 700 10.5px/1 -apple-system, sans-serif;
         letter-spacing: .05em; padding: 0 5px 10px; margin-right: 12px; cursor: pointer;
         border-bottom: 2px solid transparent;
       }
-      .tds-tab:hover { color: #9aa0a6; }
+      .tds-tab:hover { color: var(--tds-text-mid, #9aa0a6); }
       .tds-tab.tds-tab-active { color: var(--tds-accent, #3ddc84); border-bottom-color: var(--tds-accent, #3ddc84); }
-      .tds-tab.tds-tab-locked { color: #3a3f4a; cursor: default; }
-      .tds-tab.tds-tab-locked:hover { color: #3a3f4a; }
+      .tds-tab.tds-tab-locked { color: var(--tds-text-disabled, #3a3f4a); cursor: default; }
+      .tds-tab.tds-tab-locked:hover { color: var(--tds-text-disabled, #3a3f4a); }
 
       #tds-body { padding: 14px; box-sizing: border-box; }
       .tds-tabpanel[hidden] { display: none; }
       .tds-section-label {
-        font: 700 10.5px/1 -apple-system, sans-serif; letter-spacing: .08em; color: #565d6d;
+        font: 700 10.5px/1 -apple-system, sans-serif; letter-spacing: .08em; color: var(--tds-text-faint, #565d6d);
         text-transform: uppercase; margin: 16px 0 8px;
       }
       .tds-section-label:first-child { margin-top: 0; }
-      .tds-card { background: #10131a; border: 1px solid #1c202a; border-radius: 8px; padding: 12px 14px; margin-bottom: 10px; }
-      .tds-card-title { color: #8b93a1; font-size: 11.5px; margin-bottom: 6px; }
+      .tds-card { background: var(--tds-bg-card, #10131a); border: 1px solid var(--tds-border, #1c202a); border-radius: 8px; padding: 12px 14px; margin-bottom: 10px; }
+      .tds-card-title { color: var(--tds-text-icon, #8b93a1); font-size: 11.5px; margin-bottom: 6px; }
       .tds-row { display: flex; justify-content: space-between; align-items: center; padding: 3px 0; gap: 10px; }
-      .tds-row-label { color: #9aa0a6; }
-      .tds-row-value { font-weight: 700; color: #e6e8ec; }
+      .tds-row-label { color: var(--tds-text-mid, #9aa0a6); }
+      .tds-row-value { font-weight: 700; color: var(--tds-text-strong, #e6e8ec); }
       .tds-v-good { color: #3ddc84 !important; }
       .tds-v-bad { color: #ff5c5c !important; }
       .tds-v-warn { color: #f5a623 !important; }
-      .tds-v-dim { color: #5c6373 !important; font-weight: 400 !important; }
+      .tds-v-dim { color: var(--tds-text-dim, #5c6373) !important; font-weight: 400 !important; }
       .tds-box { border-radius: 7px; padding: 10px 12px; margin-bottom: 10px; font-size: 12px; line-height: 1.5; }
       .tds-box-info { background: rgba(61,220,132,.07); border: 1px solid rgba(61,220,132,.28); color: #a9e8c1; }
       .tds-box-warn { background: rgba(245,166,35,.09); border: 1px solid rgba(245,166,35,.3); color: #f0c584; }
       .tds-box-danger { background: rgba(255,92,92,.08); border: 1px solid rgba(255,92,92,.3); color: #ffb3b3; }
-      .tds-box-neutral { background: #10131a; border: 1px solid #1c202a; color: #9aa0a6; }
+      .tds-box-neutral { background: var(--tds-bg-card, #10131a); border: 1px solid var(--tds-border, #1c202a); color: var(--tds-text-mid, #9aa0a6); }
       .tds-box strong { color: inherit; }
       .tds-badge { display: inline-flex; align-items: center; font: 700 10px/1 -apple-system, sans-serif; padding: 3px 7px; border-radius: 5px; white-space: nowrap; letter-spacing: .02em; }
       .tds-badge-ok { background: rgba(61,220,132,.14); color: #3ddc84; border: 1px solid rgba(61,220,132,.3); }
       .tds-badge-blocked { background: rgba(255,92,92,.12); color: #ff8b8b; border: 1px solid rgba(255,92,92,.28); }
-      .tds-badge-neutral { background: #191d26; color: #8b93a1; border: 1px solid #232838; }
-      .tds-employee-row { padding: 9px 0; border-bottom: 1px solid #161922; }
+      .tds-badge-neutral { background: var(--tds-bg-hover, #191d26); color: var(--tds-text-icon, #8b93a1); border: 1px solid var(--tds-border-strong, #232838); }
+      .tds-employee-row { padding: 9px 0; border-bottom: 1px solid var(--tds-border-soft, #161922); }
       .tds-employee-row:last-child { border-bottom: none; }
       .tds-employee-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; }
-      .tds-employee-name { font-weight: 700; color: #e6e8ec; font-size: 13px; }
-      .tds-employee-meta { color: #5c6373; font-size: 11px; margin-top: 1px; }
-      .tds-diag-row { display: flex; justify-content: space-between; align-items: flex-start; padding: 8px 0; border-bottom: 1px solid #161922; gap: 10px; }
+      .tds-employee-name { font-weight: 700; color: var(--tds-text-strong, #e6e8ec); font-size: 13px; }
+      .tds-employee-meta { color: var(--tds-text-dim, #5c6373); font-size: 11px; margin-top: 1px; }
+      .tds-diag-row { display: flex; justify-content: space-between; align-items: flex-start; padding: 8px 0; border-bottom: 1px solid var(--tds-border-soft, #161922); gap: 10px; }
       .tds-diag-row:last-child { border-bottom: none; }
-      .tds-diag-label { color: #c7ccd1; font-size: 12px; }
-      .tds-diag-reason { color: #5c6373; font-size: 11px; margin-top: 2px; }
+      .tds-diag-label { color: var(--tds-text-mid2, #c7ccd1); font-size: 12px; }
+      .tds-diag-reason { color: var(--tds-text-dim, #5c6373); font-size: 11px; margin-top: 2px; }
       .tds-btn { background: var(--tds-accent, #3ddc84); color: #06110a; border: none; border-radius: 6px; padding: 8px 12px; font: 700 12px/1 -apple-system, sans-serif; cursor: pointer; letter-spacing: .02em; }
       .tds-btn:hover { filter: brightness(1.08); }
-      .tds-btn-ghost { background: transparent; color: #9aa0a6; border: 1px solid #232838; border-radius: 6px; padding: 8px 12px; font: 600 12px/1 -apple-system, sans-serif; cursor: pointer; }
-      .tds-btn-ghost:hover { background: #161a22; color: #d7dae0; }
-      .tds-input { width: 100%; background: #0b0d12; color: #e6e8ec; border: 1px solid #232838; border-radius: 6px; padding: 8px 9px; box-sizing: border-box; font: 12.5px monospace; }
+      .tds-btn-ghost { background: transparent; color: var(--tds-text-mid, #9aa0a6); border: 1px solid var(--tds-border-strong, #232838); border-radius: 6px; padding: 8px 12px; font: 600 12px/1 -apple-system, sans-serif; cursor: pointer; }
+      .tds-btn-ghost:hover { background: var(--tds-bg-hover, #161a22); color: var(--tds-fg, #d7dae0); }
+      .tds-input { width: 100%; background: var(--tds-bg, #0b0d12); color: var(--tds-text-strong, #e6e8ec); border: 1px solid var(--tds-border-strong, #232838); border-radius: 6px; padding: 8px 9px; box-sizing: border-box; font: 12.5px monospace; }
       .tds-input:focus { outline: none; border-color: var(--tds-accent, #3ddc84); }
       .tds-swatches { display: flex; gap: 8px; margin-top: 8px; }
       .tds-swatch { width: 26px; height: 26px; border-radius: 50%; cursor: pointer; border: 2px solid transparent; }
-      .tds-swatch.tds-swatch-active { border-color: #fff; }
+      .tds-swatch.tds-swatch-active { border-color: var(--tds-fg, #fff); }
       .tds-segmented { display: flex; gap: 4px; margin-bottom: 10px; flex-wrap: wrap; }
-      .tds-segment { flex: 1; min-width: 90px; text-align: center; background: #10131a; color: #8b93a1; border: 1px solid #232838; border-radius: 6px; padding: 8px 6px; font: 700 10.5px/1 -apple-system, sans-serif; letter-spacing: .03em; cursor: pointer; }
-      .tds-segment:hover { background: #161a22; }
+      .tds-segment { flex: 1; min-width: 90px; text-align: center; background: var(--tds-bg-card, #10131a); color: var(--tds-text-icon, #8b93a1); border: 1px solid var(--tds-border-strong, #232838); border-radius: 6px; padding: 8px 6px; font: 700 10.5px/1 -apple-system, sans-serif; letter-spacing: .03em; cursor: pointer; }
+      .tds-segment:hover { background: var(--tds-bg-hover, #161a22); }
       .tds-segment.tds-segment-active { background: var(--tds-accent-dim, rgba(61,220,132,.14)); color: var(--tds-accent, #3ddc84); border-color: var(--tds-accent, #3ddc84); }
       .tds-table { width: 100%; border-collapse: collapse; font-size: 12px; }
-      .tds-table th { text-align: left; color: #565d6d; font-size: 10px; letter-spacing: .05em; text-transform: uppercase; padding: 4px 6px; border-bottom: 1px solid #1c202a; }
-      .tds-table td { padding: 5px 6px; border-bottom: 1px solid #161922; color: #d7dae0; }
+      .tds-table th { text-align: left; color: var(--tds-text-faint, #565d6d); font-size: 10px; letter-spacing: .05em; text-transform: uppercase; padding: 4px 6px; border-bottom: 1px solid var(--tds-border, #1c202a); }
+      .tds-table td { padding: 5px 6px; border-bottom: 1px solid var(--tds-border-soft, #161922); color: var(--tds-fg, #d7dae0); }
       .tds-table tr:last-child td { border-bottom: none; }
       .tds-table td.tds-num { text-align: right; font-variant-numeric: tabular-nums; }
       .tds-spark { display: flex; align-items: flex-end; gap: 4px; height: 46px; margin: 6px 0; }
@@ -422,8 +449,8 @@
       .tds-spark-bar { width: 100%; border-radius: 2px 2px 0 0; min-height: 2px; }
       .tds-spark-bar.tds-bar-pos { background: var(--tds-accent, #3ddc84); }
       .tds-spark-bar.tds-bar-neg { background: #ff5c5c; }
-      .tds-spark-label { font-size: 9px; color: #4a5062; }
-      #tds-footer { display: flex; justify-content: space-between; align-items: center; padding: 8px 12px; border-top: 1px solid #1c202a; background: #0d1017; font-size: 10.5px; color: #4a5062; }
+      .tds-spark-label { font-size: 9px; color: var(--tds-text-faintest, #4a5062); }
+      #tds-footer { display: flex; justify-content: space-between; align-items: center; padding: 8px 12px; border-top: 1px solid var(--tds-border, #1c202a); background: var(--tds-bg-alt, #0d1017); font-size: 10.5px; color: var(--tds-text-faintest, #4a5062); }
       #tds-footer .tds-footer-status { color: var(--tds-accent, #3ddc84); }
       #tds-mount-error { margin: 14px 0; }
 
@@ -443,6 +470,94 @@
     document.head.appendChild(style);
   }
 
+
+  // ---------------------------------------------------------------------
+  // 4b. TORN COLOUR DETECTION -- match the page's own skin, don't guess it
+  // ---------------------------------------------------------------------
+  // Torn ships more than one skin (at least a light default and a dark
+  // theme) and I don't have a verified, current list of their exact hex
+  // values -- guessing would risk a wrong-looking panel on whichever skin
+  // I guessed wrong for. Instead this samples REAL computed colours from
+  // Torn's own page chrome at runtime and derives a matching palette
+  // algorithmically. If detection fails for any reason it silently falls
+  // back to the dark palette hardcoded as the var() defaults in the CSS
+  // above -- so a failure here never breaks the panel, only its skin-match.
+  function parseRgbColor(str) {
+    const m = /rgba?\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)\s*(?:,\s*([\d.]+))?\)/.exec(str || '');
+    if (!m) return null;
+    return { r: +m[1], g: +m[2], b: +m[3], a: m[4] !== undefined ? +m[4] : 1 };
+  }
+
+  function shadeColor(c, amt) {
+    const clamp = (v) => Math.max(0, Math.min(255, v));
+    return { r: clamp(c.r + amt), g: clamp(c.g + amt), b: clamp(c.b + amt) };
+  }
+
+  function rgbToCss(c) {
+    return `rgb(${Math.round(c.r)}, ${Math.round(c.g)}, ${Math.round(c.b)})`;
+  }
+
+  function detectTornColours() {
+    try {
+      const candidates = ['#skin-container', '.content-wrapper', '#mainContainer', '#top-page-links-wrap', 'body'];
+      let probe = null;
+      for (const sel of candidates) {
+        const el = document.querySelector(sel);
+        if (!el) continue;
+        const bg = parseRgbColor(getComputedStyle(el).backgroundColor);
+        if (bg && bg.a > 0 && !(bg.r === 0 && bg.g === 0 && bg.b === 0 && bg.a < 1)) { probe = el; break; }
+      }
+      if (!probe) return;
+
+      const cs = getComputedStyle(probe);
+      const bg = parseRgbColor(cs.backgroundColor);
+      if (!bg) return;
+
+      const luminance = (0.299 * bg.r + 0.587 * bg.g + 0.114 * bg.b) / 255;
+      const dark = luminance < 0.5;
+      const root = document.documentElement;
+
+      if (dark) {
+        // Keep the built-in dark palette (it already reads well on dark
+        // skins) but nudge every shade slightly toward Torn's actual
+        // background tone instead of leaving it a fixed, possibly
+        // mismatched dark navy.
+        const nudge = (fallback) => rgbToCss({
+          r: fallback.r * 0.6 + bg.r * 0.4,
+          g: fallback.g * 0.6 + bg.g * 0.4,
+          b: fallback.b * 0.6 + bg.b * 0.4,
+        });
+        root.style.setProperty('--tds-bg', nudge({ r: 11, g: 13, b: 18 }));
+        root.style.setProperty('--tds-bg-alt', nudge({ r: 13, g: 16, b: 23 }));
+        root.style.setProperty('--tds-bg-card', nudge({ r: 16, g: 19, b: 26 }));
+        root.style.setProperty('--tds-bg-hover', nudge({ r: 22, g: 26, b: 34 }));
+      } else {
+        // Light Torn skin: derive a full light palette FROM the sampled
+        // background rather than forcing the dark defaults onto a light
+        // page, where they'd look like a jarring floating dark box.
+        root.style.setProperty('--tds-bg', rgbToCss(bg));
+        root.style.setProperty('--tds-bg-alt', rgbToCss(shadeColor(bg, -10)));
+        root.style.setProperty('--tds-bg-card', rgbToCss(shadeColor(bg, -5)));
+        root.style.setProperty('--tds-bg-hover', rgbToCss(shadeColor(bg, -14)));
+        root.style.setProperty('--tds-border', rgbToCss(shadeColor(bg, -28)));
+        root.style.setProperty('--tds-border-soft', rgbToCss(shadeColor(bg, -16)));
+        root.style.setProperty('--tds-border-strong', rgbToCss(shadeColor(bg, -38)));
+        root.style.setProperty('--tds-fg', rgbToCss(shadeColor(bg, -110)));
+        root.style.setProperty('--tds-text-strong', rgbToCss(shadeColor(bg, -120)));
+        root.style.setProperty('--tds-text-mid', rgbToCss(shadeColor(bg, -75)));
+        root.style.setProperty('--tds-text-mid2', rgbToCss(shadeColor(bg, -80)));
+        root.style.setProperty('--tds-text-dim', rgbToCss(shadeColor(bg, -55)));
+        root.style.setProperty('--tds-text-faint', rgbToCss(shadeColor(bg, -60)));
+        root.style.setProperty('--tds-text-faintest', rgbToCss(shadeColor(bg, -45)));
+        root.style.setProperty('--tds-text-icon', rgbToCss(shadeColor(bg, -65)));
+        root.style.setProperty('--tds-text-subtle', rgbToCss(shadeColor(bg, -50)));
+        root.style.setProperty('--tds-text-disabled', rgbToCss(shadeColor(bg, -30)));
+      }
+    } catch (err) {
+      console.warn('[TDS] Torn colour detection skipped:', err);
+    }
+  }
+
   function applyTheme(panelRoot, name) {
     const theme = THEME_PRESETS[name] || THEME_PRESETS.green;
     panelRoot.style.setProperty('--tds-accent', theme.accent);
@@ -460,151 +575,6 @@
     panel: null,
     benchmark: { tier: 'same', cache: {} }, // cache keyed by categoryId -> { timestamp, data }
   };
-
-  // ---------------------------------------------------------------------
-  // 5a. DRAGGABLE ELEMENTS — position persisted locally per browser.
-  //     Shared by the toggle bubble and the panel (dragged by its header).
-  // ---------------------------------------------------------------------
-  function clampToViewport(left, top, el) {
-    // offsetWidth/Height are 0 while the panel is display:none (e.g. before
-    // first open) — fall back to the CSS-computed width/height, which is
-    // still resolvable even when not rendered, so first placement clamps
-    // correctly instead of assuming a wrong (too-narrow) size.
-    const w = el.offsetWidth || parseFloat(getComputedStyle(el).width) || 150;
-    const h = el.offsetHeight || parseFloat(getComputedStyle(el).height) || 36;
-    const maxLeft = Math.max(0, window.innerWidth - w - 4);
-    const maxTop = Math.max(0, window.innerHeight - h - 4);
-    return {
-      left: Math.min(Math.max(4, left), maxLeft),
-      top: Math.min(Math.max(4, top), maxTop),
-    };
-  }
-
-  function placeToggle(toggle) {
-    const saved = GM_getValue(STORAGE_KEY_TOGGLE_POS, null);
-    let left, top;
-    if (saved && typeof saved.left === 'number' && typeof saved.top === 'number') {
-      ({ left, top } = saved);
-    } else {
-      // Default spot: bottom-right, clear of Torn's own chat bubbles
-      // which usually live bottom-left.
-      left = window.innerWidth - 166;
-      top = window.innerHeight - 60;
-    }
-    const clamped = clampToViewport(left, top, toggle);
-    toggle.style.left = `${clamped.left}px`;
-    toggle.style.top = `${clamped.top}px`;
-    toggle.style.right = 'auto';
-    toggle.style.bottom = 'auto';
-  }
-
-  function placePanel(panel) {
-    const saved = GM_getValue(STORAGE_KEY_PANEL_POS, null);
-    let left, top;
-    if (saved && typeof saved.left === 'number' && typeof saved.top === 'number') {
-      ({ left, top } = saved);
-    } else {
-      // Default spot: matches the original top:40 / right:16 layout.
-      left = window.innerWidth - (panel.offsetWidth || 420) - 16;
-      top = 40;
-    }
-    const clamped = clampToViewport(left, top, panel);
-    panel.style.left = `${clamped.left}px`;
-    panel.style.top = `${clamped.top}px`;
-    panel.style.right = 'auto';
-  }
-
-  /**
-   * Generic drag wiring: pointerdown/move/up on `handleEl`, moving `moveEl`.
-   * `onDragEnd(rect)` fires only on a real drag (past the click threshold),
-   * so callers can persist position and suppress the trailing click.
-   * `shouldIgnore(e)` lets a handle exclude sub-elements (e.g. header icon
-   * buttons) from starting a drag.
-   */
-  function wireDrag(handleEl, moveEl, { onDragEnd, shouldIgnore, dragClass } = {}) {
-    let dragging = false;
-    let startX = 0, startY = 0;
-    let originLeft = 0, originTop = 0;
-    let moved = 0;
-
-    handleEl.addEventListener('pointerdown', (e) => {
-      if (shouldIgnore && shouldIgnore(e)) return;
-      dragging = true;
-      moved = 0;
-      startX = e.clientX;
-      startY = e.clientY;
-      const rect = moveEl.getBoundingClientRect();
-      originLeft = rect.left;
-      originTop = rect.top;
-      if (dragClass) { handleEl.classList.add(dragClass); moveEl.classList.add(dragClass); }
-      handleEl.setPointerCapture(e.pointerId);
-    });
-
-    handleEl.addEventListener('pointermove', (e) => {
-      if (!dragging) return;
-      const dx = e.clientX - startX;
-      const dy = e.clientY - startY;
-      moved = Math.max(moved, Math.abs(dx), Math.abs(dy));
-      const clamped = clampToViewport(originLeft + dx, originTop + dy, moveEl);
-      moveEl.style.left = `${clamped.left}px`;
-      moveEl.style.top = `${clamped.top}px`;
-      moveEl.style.right = 'auto';
-      moveEl.style.bottom = 'auto';
-    });
-
-    function endDrag(e) {
-      if (!dragging) return;
-      dragging = false;
-      if (dragClass) { handleEl.classList.remove(dragClass); moveEl.classList.remove(dragClass); }
-      if (moved > DRAG_CLICK_THRESHOLD_PX) {
-        const rect = moveEl.getBoundingClientRect();
-        onDragEnd?.(rect, true);
-      } else {
-        onDragEnd?.(null, false);
-      }
-    }
-
-    handleEl.addEventListener('pointerup', endDrag);
-    handleEl.addEventListener('pointercancel', endDrag);
-  }
-
-  function makeToggleDraggable(toggle) {
-    wireDrag(toggle, toggle, {
-      dragClass: 'tds-dragging',
-      onDragEnd: (rect, didDrag) => {
-        if (!didDrag) return;
-        GM_setValue(STORAGE_KEY_TOGGLE_POS, { left: rect.left, top: rect.top });
-        // Suppress the click that fires right after release so dragging
-        // the bubble doesn't also toggle the panel open/closed.
-        toggle.dataset.justDragged = '1';
-      },
-    });
-
-    window.addEventListener('resize', () => {
-      const rect = toggle.getBoundingClientRect();
-      const clamped = clampToViewport(rect.left, rect.top, toggle);
-      toggle.style.left = `${clamped.left}px`;
-      toggle.style.top = `${clamped.top}px`;
-    });
-  }
-
-  function makePanelDraggable(panel, header) {
-    wireDrag(header, panel, {
-      dragClass: 'tds-dragging',
-      shouldIgnore: (e) => !!e.target.closest('button'),
-      onDragEnd: (rect, didDrag) => {
-        if (!didDrag) return;
-        GM_setValue(STORAGE_KEY_PANEL_POS, { left: rect.left, top: rect.top });
-      },
-    });
-
-    window.addEventListener('resize', () => {
-      const rect = panel.getBoundingClientRect();
-      const clamped = clampToViewport(rect.left, rect.top, panel);
-      panel.style.left = `${clamped.left}px`;
-      panel.style.top = `${clamped.top}px`;
-    });
-  }
 
   function isJobsPage() {
     return /(?:^|\/)companies\.php$/i.test(window.location.pathname);
@@ -635,12 +605,12 @@
   function buildPanel(mount) {
     const panel = document.createElement('section');
     panel.id = 'tds-panel';
-    panel.setAttribute('aria-label', 'Torn Company Director Management Suite');
+    panel.setAttribute('aria-label', 'Torn Company Management Suite');
     panel.innerHTML = `
       <div id="tds-header">
         <div class="tds-brand">
           <span class="tds-brand-dot">\u25cb</span>
-          <span class="tds-brand-name">MANAGEMENT SUITE</span>
+          <span class="tds-brand-name">TORN COMPANY MANAGEMENT SUITE</span>
           <span class="tds-brand-version">v${TDS_VERSION}</span>
           <span class="tds-brand-subtitle">Company Director Dashboard</span>
         </div>
@@ -668,7 +638,7 @@
         <div class="tds-tabpanel" data-tabpanel="diagnostics" hidden></div>
       </div>
       <div id="tds-footer">
-        <span>Local-only company dashboard</span>
+        <span>Torn Company Management Suite v${TDS_VERSION}</span>
         <span class="tds-footer-status" id="tds-footer-status">Last run: Never</span>
       </div>
     `;
@@ -721,11 +691,16 @@
   function renderSettingsTab(panel) {
     const el = panel.querySelector('[data-tabpanel="settings"]');
     const currentTheme = GM_getValue(STORAGE_KEY_THEME, 'green');
-    const savedLicenseKey = GM_getValue(STORAGE_KEY_LICENSE_KEY, '');
 
     el.innerHTML = `
       <div class="tds-section-label">API Key</div>
       <div class="tds-box tds-box-neutral">Stored only in this browser (Tampermonkey local storage). Never sent anywhere except api.torn.com.</div>
+      <div class="tds-box tds-box-warn">
+        <strong>Required access level:</strong> Full Access (or a Custom key covering
+        <code>company: profile, employees, detailed, stock, applications</code> and
+        <code>user: basic, workstats, log</code>). A Public or Minimal key will show
+        BLOCKED on most tabs \u2014 check the Diagnostics tab for exactly what your key can reach.
+      </div>
       <input class="tds-input" id="tds-keyinput" type="text" placeholder="Paste API key here" />
       <div style="margin-top:8px; display:flex; gap:8px;">
         <button class="tds-btn" id="tds-savekey">Save key</button>
@@ -737,30 +712,31 @@
       <div class="tds-section-label">Diagnostics</div>
       <div class="tds-box tds-box-neutral">
         Diagnostics are automatically run once and remembered across Torn page changes and browser refreshes.
-        Run them again manually whenever you want to refresh the capability check.
+        Run them again manually whenever you want to refresh the capability check. The Diagnostics tab itself
+        is always available \u2014 nothing about it is gated.
       </div>
       <button class="tds-btn-ghost" id="tds-rerun-diagnostics">Run Diagnostics Again</button>
 
       <div class="tds-section-label">License</div>
       <div class="tds-card">
-        <div class="tds-card-title">License Key</div>
-        <input class="tds-input" id="tds-license-input" type="text" placeholder="XXXX-XXXX-XXXX-XXXX" autocomplete="off" />
-        <div style="margin-top:8px; display:flex; gap:8px;">
-          <button class="tds-btn" id="tds-activate-license">Activate License</button>
-        </div>
-        <div class="tds-row" style="margin-top:8px;">
-          <span class="tds-row-label">Status</span>
-          <span class="tds-row-value" id="tds-license-status"></span>
+        <div class="tds-row"><span class="tds-row-label">Torn User ID</span><span class="tds-row-value" id="tds-license-userid">\u2014</span></div>
+        <div class="tds-row"><span class="tds-row-label">Status</span><span class="tds-row-value" id="tds-license-status-value">\u2014</span></div>
+        <div class="tds-row"><span class="tds-row-label">Last checked</span><span class="tds-row-value" id="tds-license-checked">\u2014</span></div>
+        <div class="tds-row" id="tds-license-reason-row" style="display:none;"><span class="tds-row-label">Detail</span><span class="tds-row-value tds-v-dim" id="tds-license-reason" style="font-weight:400;"></span></div>
+        <div style="margin-top:8px;">
+          <button class="tds-btn-ghost" id="tds-recheck-license">Recheck license</button>
         </div>
       </div>
       <div class="tds-box tds-box-neutral">
-        License keys are stored locally. No key is treated as valid until a real validation mechanism is connected.
-        The client contains no private signing secret.
+        Checked against a public list keyed by your Torn User ID, refreshed at most every
+        ${LICENSE_CACHE_TTL_MS / 3600000}h (cached locally in between). Only your numeric User ID is sent for
+        this check \u2014 no API key, no company data, nothing else about you. Source list:
+        <code style="word-break:break-all;">${LICENSE_JSON_URL}</code>
       </div>
 
       <div class="tds-section-label">Color Theme</div>
       <div class="tds-card">
-        <div class="tds-card-title">Accent color (affects highlights, tabs, buttons — not the red/green/amber meaning colors)</div>
+        <div class="tds-card-title">Accent color (affects highlights, tabs, buttons \u2014 not the red/green/amber meaning colors)</div>
         <div class="tds-swatches" id="tds-swatches"></div>
       </div>
     `;
@@ -791,24 +767,10 @@
       }
     });
 
-    const licenseInput = el.querySelector('#tds-license-input');
-    const licenseStatus = el.querySelector('#tds-license-status');
-    licenseInput.value = savedLicenseKey;
-
-    function updateLicenseStatus() {
-      const current = GM_getValue(STORAGE_KEY_LICENSE_KEY, '');
-      licenseStatus.textContent = current
-        ? 'Stored — validation not configured'
-        : 'Not activated';
-      licenseStatus.className = 'tds-row-value tds-v-warn';
-    }
-
-    el.querySelector('#tds-activate-license').addEventListener('click', () => {
-      const key = licenseInput.value.trim().toUpperCase();
-      GM_setValue(STORAGE_KEY_LICENSE_KEY, key);
-      updateLicenseStatus();
+    el.querySelector('#tds-recheck-license').addEventListener('click', () => {
+      checkLicense(panel, { force: true }).catch((err) => console.error('[TDS] License recheck failed:', err));
     });
-    updateLicenseStatus();
+    renderLicenseStatusInSettings(panel);
 
     const swatchWrap = el.querySelector('#tds-swatches');
     Object.entries(THEME_PRESETS).forEach(([name, theme]) => {
@@ -953,6 +915,180 @@
   function escapeHtml(str) {
     return str.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   }
+
+  // ---------------------------------------------------------------------
+  // 5c. LICENSE CHECK -- Torn User ID against a public GitHub-hosted list.
+  //     Fully separate from the Torn API: uses raw.githubusercontent.com,
+  //     sends only the numeric User ID (already public within Torn itself),
+  //     and never touches the API key or any company data.
+  // ---------------------------------------------------------------------
+  const LICENSE_GATED_TABS = ['overview', 'finance', 'training', 'benchmark'];
+
+  function findOwnUserId(results) {
+    const basic = findRaw(results, 'user', 'basic');
+    if (!basic) return null;
+    const key = Object.keys(basic).find((k) =>
+      /^(player_id|user_id|id)$/i.test(k) && (typeof basic[k] === 'number' || typeof basic[k] === 'string'));
+    if (!key) return null;
+    const n = Number(basic[key]);
+    return Number.isFinite(n) ? n : null;
+  }
+
+  function fetchLicenseList() {
+    return new Promise((resolve, reject) => {
+      GM_xmlhttpRequest({
+        method: 'GET',
+        url: LICENSE_JSON_URL,
+        timeout: 15000,
+        onload: (res) => {
+          let parsed;
+          try {
+            parsed = JSON.parse(res.responseText);
+          } catch (e) {
+            reject({
+              reason: `licensed-users.json is not valid JSON yet. Expected an array like `
+                + `[{"userId":4237873,"status":"active"}]. Current content starts with: `
+                + `"${String(res.responseText).slice(0, 80)}"`,
+            });
+            return;
+          }
+          const list = Array.isArray(parsed) ? parsed : (Array.isArray(parsed?.users) ? parsed.users : null);
+          if (!list) {
+            reject({ reason: 'licensed-users.json parsed as JSON but isn\u2019t an array of {userId, status} entries yet.' });
+            return;
+          }
+          resolve(list);
+        },
+        onerror: () => reject({ reason: 'Network error contacting raw.githubusercontent.com' }),
+        ontimeout: () => reject({ reason: 'Timed out contacting raw.githubusercontent.com' }),
+      });
+    });
+  }
+
+  function licenseStatusMeta(status) {
+    switch (status) {
+      case 'active': return { label: 'ACTIVE', cls: 'tds-v-good' };
+      case 'expired': return { label: 'EXPIRED', cls: 'tds-v-bad' };
+      case 'unlicensed': return { label: 'NOT LICENSED', cls: 'tds-v-bad' };
+      default: return { label: 'UNKNOWN', cls: 'tds-v-warn' };
+    }
+  }
+
+  async function checkLicense(panel, { force = false } = {}) {
+    const results = state.lastResults;
+    const userId = results ? findOwnUserId(results) : null;
+
+    if (!userId) {
+      state.license = {
+        status: 'unknown',
+        reason: 'Torn User ID not available yet \u2014 run Diagnostics with an API key first (needs user/basic).',
+        checkedAt: Date.now(),
+        userId: null,
+      };
+      applyLicenseGate(panel);
+      return;
+    }
+
+    const cached = GM_getValue(STORAGE_KEY_LICENSE_CACHE, null);
+    if (!force && cached && cached.userId === userId && (Date.now() - cached.checkedAt) < LICENSE_CACHE_TTL_MS) {
+      state.license = cached;
+      applyLicenseGate(panel);
+      return;
+    }
+
+    try {
+      const list = await fetchLicenseList();
+      const entry = list.find((row) => Number(row.userId ?? row.user_id ?? row.id) === userId);
+      const rawStatus = String(entry?.status ?? entry?.flag ?? entry?.state ?? '').toLowerCase();
+      const status = !entry ? 'unlicensed'
+        : rawStatus === 'active' ? 'active'
+        : rawStatus === 'expired' ? 'expired'
+        : 'unknown';
+      state.license = { status, checkedAt: Date.now(), userId, source: 'github' };
+      if (status === 'unknown' && entry) {
+        state.license.reason = `Entry found but status field ("${entry.status ?? entry.flag ?? entry.state}") wasn\u2019t "active" or "expired".`;
+      }
+    } catch (err) {
+      state.license = {
+        status: 'unknown',
+        reason: err.reason || 'License check failed.',
+        checkedAt: Date.now(),
+        userId,
+        source: 'github-error',
+      };
+    }
+
+    GM_setValue(STORAGE_KEY_LICENSE_CACHE, state.license);
+    applyLicenseGate(panel);
+  }
+
+  function renderLicenseStatusInSettings(panel) {
+    const el = panel.querySelector('[data-tabpanel="settings"]');
+    if (!el) return;
+    const idEl = el.querySelector('#tds-license-userid');
+    const statusEl = el.querySelector('#tds-license-status-value');
+    const checkedEl = el.querySelector('#tds-license-checked');
+    const reasonRow = el.querySelector('#tds-license-reason-row');
+    const reasonEl = el.querySelector('#tds-license-reason');
+    if (!idEl || !statusEl || !checkedEl) return;
+
+    const license = state.license;
+    if (!license) {
+      idEl.textContent = '\u2014';
+      statusEl.textContent = 'Not checked yet';
+      statusEl.className = 'tds-row-value tds-v-dim';
+      checkedEl.textContent = '\u2014';
+      if (reasonRow) reasonRow.style.display = 'none';
+      return;
+    }
+
+    idEl.textContent = license.userId ?? '\u2014';
+    const meta = licenseStatusMeta(license.status);
+    statusEl.textContent = meta.label;
+    statusEl.className = `tds-row-value ${meta.cls}`;
+    checkedEl.textContent = license.checkedAt ? formatTimestampRelative(license.checkedAt) : '\u2014';
+
+    if (license.reason && reasonRow && reasonEl) {
+      reasonRow.style.display = '';
+      reasonEl.textContent = license.reason;
+    } else if (reasonRow) {
+      reasonRow.style.display = 'none';
+    }
+  }
+
+  function applyLicenseGate(panel) {
+    const license = state.license || { status: 'unknown' };
+    const active = license.status === 'active';
+
+    LICENSE_GATED_TABS.forEach((tab) => {
+      const btn = panel.querySelector(`.tds-tab[data-tab="${tab}"]`);
+      if (!btn) return;
+      btn.classList.toggle('tds-tab-locked', !active);
+      if (!active) btn.title = 'Requires an active license \u2014 see Settings';
+      else btn.removeAttribute('title');
+    });
+
+    if (!active) {
+      const meta = licenseStatusMeta(license.status);
+      const msg = `
+        <div class="tds-box tds-box-warn">
+          <strong>License required.</strong> Status: <span class="${meta.cls}">${meta.label}</span>${license.reason ? ` \u2014 ${escapeHtml(license.reason)}` : ''}.
+          Go to Settings for details.
+        </div>`;
+      LICENSE_GATED_TABS.forEach((tab) => {
+        const panelEl = panel.querySelector(`[data-tabpanel="${tab}"]`);
+        if (panelEl) panelEl.innerHTML = msg;
+      });
+
+      const activeTabBtn = panel.querySelector('.tds-tab-active');
+      if (activeTabBtn && LICENSE_GATED_TABS.includes(activeTabBtn.dataset.tab)) {
+        switchTab(panel, 'settings');
+      }
+    }
+
+    renderLicenseStatusInSettings(panel);
+  }
+
 
   // ---------------------------------------------------------------------
   // 5b. SHARED HELPERS for Finance / Training / Benchmark tabs
@@ -1466,7 +1602,6 @@
       state.lastVerdict = verdict;
       state.lastRunAt = Number(latest.timestamp) || Number(GM_getValue(STORAGE_KEY_LAST_RUN_AT, 0)) || null;
 
-      GM_setValue(STORAGE_KEY_DIAGNOSTICS_COMPLETED, true);
       if (state.lastRunAt) GM_setValue(STORAGE_KEY_LAST_RUN_AT, state.lastRunAt);
 
       renderOverviewTab(panel, results, verdict);
@@ -1475,6 +1610,7 @@
       renderTrainingTab(panel);
       renderBenchmarkTab(panel);
       startFooterTicker(panel);
+      await checkLicense(panel);
       return true;
     } catch (err) {
       console.warn('[TDS] Could not load persisted diagnostics:', err);
@@ -1486,7 +1622,6 @@
     if (state.diagnosticRunning) return;
 
     if (force) {
-      GM_setValue(STORAGE_KEY_DIAGNOSTICS_COMPLETED, false);
       GM_deleteValue(STORAGE_KEY_LAST_RUN_AT);
       try {
         // Remove only the diagnostic capability records. Historical snapshots
@@ -1505,7 +1640,7 @@
     }
 
     state.diagnosticRunning = true;
-    panel.querySelector('#tds-footer-status').textContent = 'Running diagnostic…';
+    panel.querySelector('#tds-footer-status').textContent = 'Running diagnostic\u2026';
 
     try {
       const results = await runDiagnostic();
@@ -1516,9 +1651,6 @@
       state.lastVerdict = verdict;
       state.lastRunAt = Date.now();
 
-      // The diagnostic record is already persisted by runDiagnostic(). Mark the
-      // completed flag only after the whole diagnostic flow has succeeded.
-      GM_setValue(STORAGE_KEY_DIAGNOSTICS_COMPLETED, true);
       GM_setValue(STORAGE_KEY_LAST_RUN_AT, state.lastRunAt);
 
       renderOverviewTab(panel, results, verdict);
@@ -1527,16 +1659,22 @@
       renderTrainingTab(panel);
       renderBenchmarkTab(panel);
       startFooterTicker(panel);
+      await checkLicense(panel, { force });
     } finally {
       state.diagnosticRunning = false;
     }
   }
 
   // ---------------------------------------------------------------------
-  // 6. BOOT — the Management Suite lives only inside Torn's Jobs page.
+  // 6. BOOT \u2014 the Management Suite lives only inside Torn's Jobs page.
   // Torn uses joblist.php with hash routes for the company/employment views.
   // We therefore watch route/DOM changes so the suite survives Torn's SPA-style
   // navigation without creating duplicate panels.
+  //
+  // Startup no longer relies on a separate "diagnostics completed" flag \u2014
+  // whether a diagnostic has run is read directly from the persisted
+  // IndexedDB record (the actual source of truth), which is simpler and
+  // can't drift out of sync with what's really stored.
   // ---------------------------------------------------------------------
   let jobsBootTimer = null;
   let jobsObserver = null;
@@ -1552,19 +1690,13 @@
     const mount = findJobsMount();
     if (!mount) return;
 
+    detectTornColours();
     const panel = buildPanel(mount);
 
     // Hydrate the UI from the last persisted diagnostic first. This means a
     // Torn navigation/refresh does not trigger another API diagnostic.
     const hydrated = await loadPersistedDiagnostic(panel);
     if (hydrated) return;
-
-    const diagnosticsCompleted = GM_getValue(STORAGE_KEY_DIAGNOSTICS_COMPLETED, false);
-    if (diagnosticsCompleted) {
-      state.lastRunAt = Number(GM_getValue(STORAGE_KEY_LAST_RUN_AT, 0)) || null;
-      updateFooter(panel);
-      return;
-    }
 
     if (GM_getValue(STORAGE_KEY_APIKEY, '')) {
       try {
