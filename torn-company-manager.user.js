@@ -1743,4 +1743,4 @@
       startJobsNavigationWatcher();
     });
   }
-})();Checked against a public list keyed by your Torn User ID, refreshed at most every 1h (cached locally in between). Only your numeric User ID is sent for this check — no API key, no company data, nothing else about you.
+})();
