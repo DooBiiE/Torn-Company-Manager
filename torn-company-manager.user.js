@@ -730,8 +730,7 @@
       <div class="tds-box tds-box-neutral">
         Checked against a public list keyed by your Torn User ID, refreshed at most every
         ${LICENSE_CACHE_TTL_MS / 3600000}h (cached locally in between). Only your numeric User ID is sent for
-        this check \u2014 no API key, no company data, nothing else about you. Source list:
-        <code style="word-break:break-all;">${LICENSE_JSON_URL}</code>
+        this check \u2014 no API key, no company data, nothing else about you.
       </div>
 
       <div class="tds-section-label">Color Theme</div>
