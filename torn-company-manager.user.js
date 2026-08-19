@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Company Management Suite
 // @namespace    torn-company-management-suite
-// @version      1.3.17
+// @version      1.3.18
 // @description  Local-only company management dashboard for Torn directors, embedded in the Jobs page. No company data ever leaves your browser; only your Torn User ID is checked against a public license list.
 // @author       DooBiiE
 // @match        https://www.torn.com/*
@@ -67,7 +67,7 @@
   // TornPDA does not always expose the legacy GM_info object that desktop
   // userscript managers provide. Try both common metadata APIs, then use the
   // release version as a PDA-safe fallback so the UI never shows vunknown.
-  const TDS_VERSION_FALLBACK = '1.3.17';
+  const TDS_VERSION_FALLBACK = '1.3.18';
   const TDS_VERSION =
     (typeof GM_info !== 'undefined' && GM_info?.script?.version) ||
     (typeof GM !== 'undefined' && GM?.info?.script?.version) ||
@@ -3405,7 +3405,7 @@
 
         const cached = own.typeId !== null ? state.benchmark.cache[String(own.typeId)] : null;
         if (cached) {
-          renderBenchmarkResults(panel, cached.data, own);
+          renderBenchmarkResults(panel, cached.data, own).catch((err) => console.error('[TDS] Compare render failed:', err));
         } else {
           runBenchmark(panel);
         }
@@ -3422,7 +3422,7 @@
 
     const cached = state.benchmark.cache[String(own.typeId)];
     if (cached && Date.now() - cached.timestamp < BENCHMARK_CACHE_TTL_MS) {
-      renderBenchmarkResults(panel, cached.data, own);
+      renderBenchmarkResults(panel, cached.data, own).catch((err) => console.error('[TDS] Compare render failed:', err));
       return;
     }
 
@@ -3450,7 +3450,7 @@
     const cacheKey = String(own.typeId);
     const cached = state.benchmark.cache[cacheKey];
     if (!force && cached && Date.now() - cached.timestamp < BENCHMARK_CACHE_TTL_MS) {
-      renderBenchmarkResults(panel, cached.data, own);
+      await renderBenchmarkResults(panel, cached.data, own).catch((err) => console.error('[TDS] Compare render failed:', err));
       return;
     }
 
@@ -3459,7 +3459,7 @@
     try {
       const data = await fetchBenchmarkCompanies(own.typeId, 0);
       state.benchmark.cache[cacheKey] = { timestamp: Date.now(), data };
-      renderBenchmarkResults(panel, data, own);
+      await renderBenchmarkResults(panel, data, own);
     } catch (err) {
       if (!resultsEl) return;
 
@@ -3470,6 +3470,130 @@
       resultsEl.innerHTML =
         `<div class="tds-box tds-box-danger"><strong>Compare fetch failed:</strong> Torn error ${err.code ?? ''}: ${escapeHtml(String(err.reason || 'unknown'))}.${permissionHint}</div>`;
     }
+  }
+
+  function parseCompareCsvLine(line) {
+    const values = [];
+    let current = '';
+    let quoted = false;
+
+    for (let i = 0; i < line.length; i += 1) {
+      const ch = line[i];
+
+      if (ch === '"') {
+        if (quoted && line[i + 1] === '"') {
+          current += '"';
+          i += 1;
+        } else {
+          quoted = !quoted;
+        }
+      } else if (ch === ',' && !quoted) {
+        values.push(current);
+        current = '';
+      } else {
+        current += ch;
+      }
+    }
+
+    values.push(current);
+    return values;
+  }
+
+  function normalizeCompareCsvHeader(value) {
+    return String(value || '')
+      .replace(/^\uFEFF/, '')
+      .trim()
+      .toLowerCase()
+      .replace(/[\s-]+/g, '_');
+  }
+
+  function parseCompanySnapshotCsv(csvText) {
+    const lines = String(csvText || '')
+      .split(/\r?\n/)
+      .filter((line) => line.trim());
+
+    if (lines.length < 2) return [];
+
+    const headers = parseCompareCsvLine(lines[0]).map(normalizeCompareCsvHeader);
+    const rows = [];
+
+    for (let i = 1; i < lines.length; i += 1) {
+      const cells = parseCompareCsvLine(lines[i]);
+      const row = {};
+      headers.forEach((header, index) => {
+        row[header] = cells[index] ?? '';
+      });
+      rows.push(row);
+    }
+
+    return rows;
+  }
+
+  function snapshotNumeric(row, names) {
+    for (const name of names) {
+      if (!row || !Object.prototype.hasOwnProperty.call(row, name)) continue;
+      const raw = row[name];
+      if (raw === '' || raw === null || raw === undefined) continue;
+
+      const value = Number(String(raw).replace(/[$,\s]/g, ''));
+      if (Number.isFinite(value)) return value;
+    }
+    return null;
+  }
+
+  function buildSnapshotFinancialMap(csvText) {
+    const map = new Map();
+
+    for (const row of parseCompanySnapshotCsv(csvText)) {
+      const id = snapshotNumeric(row, ['id', 'company_id', 'companyid']);
+      if (id === null) continue;
+
+      map.set(String(id), {
+        dailyIncome: snapshotNumeric(row, ['daily_income', 'dailyincome']),
+        weeklyIncome: snapshotNumeric(row, ['weekly_income', 'weeklyincome']),
+        dailyCustomers: snapshotNumeric(row, ['daily_customers', 'dailycustomers']),
+        weeklyCustomers: snapshotNumeric(row, ['weekly_customers', 'weeklycustomers']),
+      });
+    }
+
+    return map;
+  }
+
+  async function getCompareSnapshotFinancialMap({ force = false } = {}) {
+    const cached = state.benchmark.snapshot;
+    const ttl = 30 * 60 * 1000;
+
+    if (!force && cached && Date.now() - cached.timestamp < ttl) {
+      return cached.map;
+    }
+
+    const csv = await ApiClient.callV2Text('company/snapshot');
+    const map = buildSnapshotFinancialMap(csv);
+
+    state.benchmark.snapshot = {
+      timestamp: Date.now(),
+      map,
+    };
+
+    return map;
+  }
+
+  function mergeSnapshotFinancials(rows, snapshotMap) {
+    if (!snapshotMap || !snapshotMap.size) return rows;
+
+    return rows.map((row) => {
+      if (row.id === null) return row;
+      const snap = snapshotMap.get(String(row.id));
+      if (!snap) return row;
+
+      return {
+        ...row,
+        dailyIncome: row.dailyIncome ?? snap.dailyIncome,
+        weeklyIncome: row.weeklyIncome ?? snap.weeklyIncome,
+        dailyCustomers: row.dailyCustomers ?? snap.dailyCustomers,
+        weeklyCustomers: row.weeklyCustomers ?? snap.weeklyCustomers,
+      };
+    });
   }
 
   function averageNumeric(values) {
@@ -3507,9 +3631,12 @@
     return income / customers;
   }
 
-  function renderBenchmarkResults(panel, data, ownId, ownRating) {
+  async function renderBenchmarkResults(panel, data, own) {
     const el = panel.querySelector('[data-tabpanel="benchmark"] #tds-bench-results');
     if (!el) return;
+
+    const ownId = own?.id ?? null;
+    const ownRating = own?.rating ?? null;
 
     let rows = [];
     if (Array.isArray(data)) {
@@ -3528,7 +3655,7 @@
       return;
     }
 
-    const normalized = rows.map((row) => ({
+    let normalized = rows.map((row) => ({
       raw: row,
       id: numericValue(compareField(row, ['id', 'company_id', 'companyId'], /^id$|company.*id/i)),
       name: compareField(row, ['name', 'company_name', 'companyName'], /^name$|company.*name/i),
@@ -3538,6 +3665,27 @@
       dailyCustomers: numericValue(compareField(row, ['daily_customers', 'dailyCustomers'], /daily.*customer/i)),
       weeklyCustomers: numericValue(compareField(row, ['weekly_customers', 'weeklyCustomers'], /weekly.*customer/i)),
     }));
+
+    let snapshotUsed = false;
+    let snapshotError = null;
+
+    const needsSnapshot = normalized.some((row) =>
+      row.dailyIncome === null ||
+      row.weeklyIncome === null ||
+      row.dailyCustomers === null ||
+      row.weeklyCustomers === null
+    );
+
+    if (needsSnapshot) {
+      try {
+        const snapshotMap = await getCompareSnapshotFinancialMap();
+        normalized = mergeSnapshotFinancials(normalized, snapshotMap);
+        snapshotUsed = true;
+      } catch (err) {
+        snapshotError = err;
+        console.warn('[TDS] Compare Snapshot enrichment failed:', err);
+      }
+    }
 
     const tier = state.benchmark.tier || 'same';
     let filtered = normalized.filter((row) => {
@@ -3641,6 +3789,26 @@
         });
         html += `</div>`;
       }
+    }
+
+    const financialFieldCount = [
+      hasDailyIncome,
+      hasWeeklyIncome,
+      hasDailyCustomers,
+      hasWeeklyCustomers,
+    ].filter(Boolean).length;
+
+    if (snapshotUsed && financialFieldCount > 0) {
+      html += `<div class="tds-box tds-box-info">
+        <strong>Company Snapshot financials active.</strong>
+        Missing income/customer values from the company-list response were filled from Torn's daily Snapshot by Company ID.
+      </div>`;
+    } else if (snapshotError && financialFieldCount === 0) {
+      html += `<div class="tds-box tds-box-warn">
+        <strong>Snapshot financial enrichment unavailable.</strong>
+        ${escapeHtml(String(snapshotError.reason || snapshotError.message || 'Unknown error'))}
+        Company comparison still works without invented financial values.
+      </div>`;
     }
 
     html += `<div class="tds-section-label">Comparison table</div>`;
