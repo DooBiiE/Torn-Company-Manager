@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Company Management Suite
 // @namespace    torn-company-management-suite
-// @version      1.1.4
+// @version      1.1.5
 // @description  Local-only company management dashboard for Torn directors, embedded in the Jobs page. No company data ever leaves your browser; only your Torn User ID is checked against a public license list.
 // @author       you
 // @match        https://www.torn.com/*
@@ -84,15 +84,37 @@
   const LICENSE_JSON_URL = 'https://raw.githubusercontent.com/DooBiiE/Torn-Company-Manager/refs/heads/main/licensed-users.json';
   const LICENSE_CACHE_TTL_MS = 60 * 60 * 1000; // 1h -- avoids hitting GitHub raw on every page load/navigation
 
-  // NOTE on custom keys: two earlier attempts tried to deep-link Torn's
-  // preferences.php with pre-filled selections, based on outdated forum
-  // posts -- a real screenshot showed that page now only has a name field
-  // and the 4 preset levels, and any extra URL params just produced "Wrong
-  // format". Torn's actual working Custom Key builder lives on
-  // https://www.torn.com/api.html (bottom of the page) and builds its own
-  // key-creation link client-side from checkbox state -- there is no
-  // documented way to pre-fill it from an external URL, so Settings just
-  // links there and the director ticks the boxes themselves.
+  // CUSTOM API KEY
+  // Torn supports an official custom-key creation URL. The fragment below
+  // pre-selects exactly the permissions this suite uses, then Torn handles
+  // the actual key creation on its own Settings page.
+  //
+  // Required selections for this suite:
+  //   company: profile, employees, detailed, stock, applications
+  //   user:    basic, workstats, log
+  //   torn:    companies
+  //
+  // IMPORTANT: this does not create or expose the secret key itself. It only
+  // opens Torn's own key-generation flow with the required selections and
+  // application name pre-filled. The user remains on Torn's site throughout
+  // key creation and must then paste the generated key into this script.
+  const CUSTOM_KEY_TITLE = 'Torn Company Management Suite';
+  const CUSTOM_KEY_SELECTIONS = {
+    company: ['profile', 'employees', 'detailed', 'stock', 'applications'],
+    user: ['basic', 'workstats', 'log'],
+    torn: ['companies'],
+  };
+
+  function buildCustomKeyUrl() {
+    const parts = [
+      'https://www.torn.com/preferences.php#tab=api?step=addNewKey',
+      `company=${CUSTOM_KEY_SELECTIONS.company.join(',')}`,
+      `user=${CUSTOM_KEY_SELECTIONS.user.join(',')}`,
+      `torn=${CUSTOM_KEY_SELECTIONS.torn.join(',')}`,
+      `title=${encodeURIComponent(CUSTOM_KEY_TITLE)}`,
+    ];
+    return parts.join('&');
+  }
 
   const PROBE_PLAN = [
     { section: 'company', selections: 'profile', label: 'Company profile' },
@@ -735,13 +757,17 @@
         Company financials/stock/applications only return real data if you're the company's director.
       </div>
       <div class="tds-box tds-box-neutral">
-        Prefer a minimal-scope key instead? Torn's own docs page has a real, working Custom Key builder near
-        the bottom \u2014 tick <strong>Company: Profile, Employees, Detailed, Stock, Applications</strong> and
-        <strong>User: Basic, Workstats, Log</strong>, name it, and its own "generate" link creates the key back
-        on your Settings page. Torn's docs note custom keys should still be treated as full-access-level risk,
-        so share them with the same care.
+        <strong>Create the API key for this program.</strong><br>
+        This opens Torn's official custom-key generator with the permissions used by
+        <strong>Torn Company Management Suite</strong> already selected:
+        <strong>Company: Profile, Employees, Detailed, Stock, Applications</strong>;
+        <strong>User: Basic, Workstats, Log</strong>;
+        <strong>Torn: Companies</strong>.<br><br>
+        Torn will handle the actual key creation. Review the selections on Torn's page,
+        generate the key, then paste the new key into the box below. Custom keys should be
+        treated as sensitive credentials.
       </div>
-      <button class="tds-btn-ghost" id="tds-open-api-docs">Open Torn API Docs (Custom Keys) \u2197</button>
+      <button class="tds-btn" id="tds-create-api-key">Create Custom API Key ↗</button>
       <input class="tds-input" id="tds-keyinput" type="text" placeholder="Paste API key here" style="margin-top:8px;" />
       <div style="margin-top:8px; display:flex; gap:8px;">
         <button class="tds-btn" id="tds-savekey">Save key</button>
@@ -784,11 +810,13 @@
     const keyInput = el.querySelector('#tds-keyinput');
     keyInput.value = GM_getValue(STORAGE_KEY_APIKEY, '');
 
-    // Plain outbound link to Torn's own, unmodified docs page — no guessed
-    // query parameters this time, since that's exactly what broke last time.
-    // The real Custom Key builder on that page runs entirely on Torn's side.
-    el.querySelector('#tds-open-api-docs').addEventListener('click', () => {
-      window.open('https://www.torn.com/api.html', '_blank', 'noopener');
+    // Open Torn's official custom-key creation flow with this suite's
+    // required selections and title pre-filled. Torn performs the actual
+    // key generation; this script never sees the generated key until the
+    // user deliberately pastes it into the input below.
+    el.querySelector('#tds-create-api-key').addEventListener('click', () => {
+      const url = buildCustomKeyUrl();
+      window.open(url, '_blank', 'noopener');
     });
 
     el.querySelector('#tds-savekey').addEventListener('click', async () => {
