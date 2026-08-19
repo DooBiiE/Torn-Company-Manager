@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Company Management Suite
 // @namespace    torn-company-management-suite
-// @version      1.3.18
+// @version      1.3.19
 // @description  Local-only company management dashboard for Torn directors, embedded in the Jobs page. No company data ever leaves your browser; only your Torn User ID is checked against a public license list.
 // @author       DooBiiE
 // @match        https://www.torn.com/*
@@ -67,7 +67,7 @@
   // TornPDA does not always expose the legacy GM_info object that desktop
   // userscript managers provide. Try both common metadata APIs, then use the
   // release version as a PDA-safe fallback so the UI never shows vunknown.
-  const TDS_VERSION_FALLBACK = '1.3.18';
+  const TDS_VERSION_FALLBACK = '1.3.19';
   const TDS_VERSION =
     (typeof GM_info !== 'undefined' && GM_info?.script?.version) ||
     (typeof GM !== 'undefined' && GM?.info?.script?.version) ||
@@ -3688,16 +3688,26 @@
     }
 
     const tier = state.benchmark.tier || 'same';
+    const rowsWithRating = normalized.filter((row) => row.rating !== null);
+    let ratingFallback = false;
+
     let filtered = normalized.filter((row) => {
       if (tier === 'all') return true;
-      if (row.rating === null) return true;
-      if (tier === 'same') return ownRating !== null ? row.rating === ownRating : true;
+
+      // If Torn did not return a rating for a row, exclude it from an explicit
+      // rating-band filter rather than silently mixing unknown ratings in.
+      if (row.rating === null) return false;
+
+      if (tier === 'same') return ownRating !== null ? row.rating === ownRating : false;
       if (tier === 'mid') return row.rating >= 3 && row.rating <= 5;
       if (tier === 'top') return row.rating >= 8 && row.rating <= 10;
       return true;
     });
 
-    if (!filtered.length) filtered = normalized;
+    if (tier !== 'all' && filtered.length === 0) {
+      filtered = normalized;
+      ratingFallback = true;
+    }
 
     const hasWeeklyIncome = filtered.some((r) => r.weeklyIncome !== null);
     const hasDailyIncome = filtered.some((r) => r.dailyIncome !== null);
@@ -3729,7 +3739,17 @@
       .sort((a, b) => b.value - a.value);
     const avgWeeklyRpc = averageNumeric(weeklyRpcRows.map((x) => x.value));
 
+    const tierLabel =
+      tier === 'same'
+        ? (ownRating !== null ? `Same Rating (${ownRating}★)` : 'Same Rating')
+        : tier === 'mid'
+          ? '3–5★'
+          : tier === 'top'
+            ? '8–10★'
+            : 'All Ratings';
+
     let html = `<div class="tds-card">`;
+    html += `<div class="tds-row"><span class="tds-row-label">Selected rating</span><span class="tds-row-value">${escapeHtml(tierLabel)}</span></div>`;
     html += `<div class="tds-row"><span class="tds-row-label">Companies returned</span><span class="tds-row-value">${formatNumber(sorted.length)}</span></div>`;
     if (ownIndex >= 0 && metric) {
       html += `<div class="tds-row"><span class="tds-row-label">Your rank by ${metricLabel}</span><span class="tds-row-value">#${ownIndex + 1} / ${sorted.length}</span></div>`;
@@ -3791,6 +3811,15 @@
       }
     }
 
+    if (ratingFallback) {
+      html += `<div class="tds-box tds-box-warn">
+        <strong>${escapeHtml(tierLabel)} could not be matched from this returned company list.</strong>
+        ${rowsWithRating.length
+          ? 'No returned company matched that rating band, so all returned companies are shown instead.'
+          : 'Torn did not include usable rating values in this response, so all returned companies are shown instead.'}
+      </div>`;
+    }
+
     const financialFieldCount = [
       hasDailyIncome,
       hasWeeklyIncome,
@@ -3815,8 +3844,8 @@
     html += `<div style="overflow-x:auto;"><table class="tds-table tds-compare-table"><thead><tr>
       <th>#</th><th>Company</th><th>★</th>
       ${hasDailyIncome ? '<th>Daily Income</th>' : ''}
-      ${hasWeeklyIncome ? '<th>Weekly Income</th>' : ''}
       ${hasDailyCustomers ? '<th>Daily Customers</th>' : ''}
+      ${hasWeeklyIncome ? '<th>Weekly Income</th>' : ''}
       ${hasWeeklyCustomers ? '<th>Weekly Customers</th>' : ''}
     </tr></thead><tbody>`;
 
@@ -3827,8 +3856,8 @@
         <td>${escapeHtml(String(row.name ?? `#${row.id ?? '?'}`))}${isYou ? ' (you)' : ''}</td>
         <td>${row.rating !== null ? `${row.rating}★` : '—'}</td>
         ${hasDailyIncome ? `<td>${row.dailyIncome !== null ? formatMoney(row.dailyIncome) : '—'}</td>` : ''}
-        ${hasWeeklyIncome ? `<td>${row.weeklyIncome !== null ? formatMoney(row.weeklyIncome) : '—'}</td>` : ''}
         ${hasDailyCustomers ? `<td>${row.dailyCustomers !== null ? formatNumber(row.dailyCustomers) : '—'}</td>` : ''}
+        ${hasWeeklyIncome ? `<td>${row.weeklyIncome !== null ? formatMoney(row.weeklyIncome) : '—'}</td>` : ''}
         ${hasWeeklyCustomers ? `<td>${row.weeklyCustomers !== null ? formatNumber(row.weeklyCustomers) : '—'}</td>` : ''}
       </tr>`;
     });
