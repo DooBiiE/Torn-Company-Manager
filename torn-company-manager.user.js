@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Company Management Suite
 // @namespace    torn-company-management-suite
-// @version      1.3.40
+// @version      1.3.41
 // @description  Local-only company management dashboard for Torn directors, embedded in the Jobs page. No company data ever leaves your browser; only your Torn User ID is checked against a public license list.
 // @author       DooBiiE
 // @match        https://www.torn.com/*
@@ -67,7 +67,7 @@
   // TornPDA does not always expose the legacy GM_info object that desktop
   // userscript managers provide. Try both common metadata APIs, then use the
   // release version as a PDA-safe fallback so the UI never shows vunknown.
-  const TDS_VERSION_FALLBACK = '1.3.40';
+  const TDS_VERSION_FALLBACK = '1.3.41';
   const TDS_VERSION =
     (typeof GM_info !== 'undefined' && GM_info?.script?.version) ||
     (typeof GM !== 'undefined' && GM?.info?.script?.version) ||
@@ -86,12 +86,18 @@
 
   // Public list of licensed Torn User IDs. Only the numeric User ID (read
   // from user/basic, EXACT) is compared against this -- no API key or
-  // company data is ever sent here. Expected shape (propose this to whoever
-  // maintains the file if it isn't already in this form):
-  //   [ { "userId": 4237873, "status": "active" }, { "userId": 1234567, "status": "expired" } ]
-  // A "status" of anything other than "active"/"expired" (or a User ID not
-  // present in the list at all) is treated as not licensed -- this never
-  // guesses a license into existence.
+  // company data is ever sent here.
+  //
+  // Preferred licence formats:
+  //   { "userId": 4237873, "licenseType": "term", "startsAt": "2026-08-19", "durationDays": 180 }
+  //   { "userId": 1234567, "licenseType": "perpetual" }
+  //
+  // durationDays is literal calendar days. For administration, 30 days may
+  // be treated as "1 month"; the script never performs calendar-month arithmetic.
+  //
+  // Backward-compatible legacy entries are still accepted:
+  //   { "userId": 4237873, "status": "active" }
+  //   { "userId": 1234567, "status": "expired" }
   const LICENSE_JSON_URL = 'https://raw.githubusercontent.com/DooBiiE/Torn-Company-Manager/refs/heads/main/licensed-users.json';
   const LICENSE_CACHE_TTL_MS = 60 * 60 * 1000; // 1h -- avoids hitting GitHub raw on every page load/navigation
 
@@ -1202,6 +1208,10 @@
       <div class="tds-card">
         <div class="tds-row"><span class="tds-row-label">Torn User ID</span><span class="tds-row-value" id="tds-license-userid">\u2014</span></div>
         <div class="tds-row"><span class="tds-row-label">Status</span><span class="tds-row-value" id="tds-license-status-value">\u2014</span></div>
+        <div class="tds-row"><span class="tds-row-label">License Type</span><span class="tds-row-value" id="tds-license-type">\u2014</span></div>
+        <div class="tds-row"><span class="tds-row-label">Started</span><span class="tds-row-value" id="tds-license-started">\u2014</span></div>
+        <div class="tds-row"><span class="tds-row-label">Expires</span><span class="tds-row-value" id="tds-license-expires">\u2014</span></div>
+        <div class="tds-row"><span class="tds-row-label">Time Remaining</span><span class="tds-row-value" id="tds-license-remaining">\u2014</span></div>
         <div class="tds-row"><span class="tds-row-label">Last checked</span><span class="tds-row-value" id="tds-license-checked">\u2014</span></div>
         <div class="tds-row" id="tds-license-reason-row" style="display:none;"><span class="tds-row-label">Detail</span><span class="tds-row-value tds-v-dim" id="tds-license-reason" style="font-weight:400;"></span></div>
         <div style="margin-top:8px;">
@@ -1578,10 +1588,121 @@
     });
   }
 
+  function parseLicenseDate(value) {
+    if (!value) return null;
+    const raw = String(value).trim();
+    const match = raw.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (!match) return null;
+
+    const ms = Date.UTC(
+      Number(match[1]),
+      Number(match[2]) - 1,
+      Number(match[3]),
+      0, 0, 0, 0
+    );
+
+    return Number.isFinite(ms) ? ms : null;
+  }
+
+  function formatLicenseDate(ms) {
+    if (!Number.isFinite(ms)) return '\u2014';
+    return new Date(ms).toLocaleDateString('en-GB', {
+      day: '2-digit',
+      month: 'short',
+      year: 'numeric',
+      timeZone: 'UTC',
+    });
+  }
+
+  function formatLicenseRemaining(ms) {
+    if (!Number.isFinite(ms)) return '\u2014';
+    if (ms <= 0) return 'Expired';
+
+    const totalDays = Math.ceil(ms / 86400000);
+    const months30 = Math.floor(totalDays / 30);
+    const days = totalDays % 30;
+
+    if (months30 > 0 && days > 0) {
+      return `${months30} x 30-day month${months30 === 1 ? '' : 's'} + ${days} day${days === 1 ? '' : 's'}`;
+    }
+    if (months30 > 0) {
+      return `${months30} x 30-day month${months30 === 1 ? '' : 's'}`;
+    }
+    return `${days} day${days === 1 ? '' : 's'}`;
+  }
+
+  function evaluateLicenseEntry(entry, now = Date.now()) {
+    if (!entry || typeof entry !== 'object') {
+      return { status: 'unlicensed', licenseType: null };
+    }
+
+    const type = String(entry.licenseType ?? entry.license_type ?? '').trim().toLowerCase();
+
+    if (type === 'perpetual' || type === 'lifetime') {
+      return {
+        status: 'active',
+        licenseType: 'perpetual',
+        startsAt: parseLicenseDate(entry.startsAt ?? entry.starts_at),
+        expiresAt: null,
+        durationDays: null,
+      };
+    }
+
+    if (type === 'term' || type === 'fixed' || type === 'timed') {
+      const startsAt = parseLicenseDate(entry.startsAt ?? entry.starts_at);
+      const durationDays = Number(entry.durationDays ?? entry.duration_days);
+
+      if (!Number.isFinite(startsAt) || !Number.isInteger(durationDays) || durationDays <= 0) {
+        return {
+          status: 'unknown',
+          licenseType: 'term',
+          startsAt,
+          expiresAt: null,
+          durationDays: Number.isFinite(durationDays) ? durationDays : null,
+          reason: 'Term licence requires startsAt (YYYY-MM-DD) and a positive integer durationDays.',
+        };
+      }
+
+      const expiresAt = startsAt + (durationDays * 86400000);
+      const status = now < startsAt
+        ? 'pending'
+        : now < expiresAt
+          ? 'active'
+          : 'expired';
+
+      return {
+        status,
+        licenseType: 'term',
+        startsAt,
+        expiresAt,
+        durationDays,
+      };
+    }
+
+    const rawStatus = String(entry.status ?? entry.flag ?? entry.state ?? '').toLowerCase();
+
+    if (rawStatus === 'active' || rawStatus === 'expired') {
+      return {
+        status: rawStatus,
+        licenseType: 'legacy',
+        startsAt: null,
+        expiresAt: null,
+        durationDays: null,
+      };
+    }
+
+    return {
+      status: 'unknown',
+      licenseType: type || null,
+      reason: 'Licence entry is missing a recognised licenseType or legacy status.',
+    };
+  }
+
   function licenseStatusMeta(status) {
     switch (status) {
       case 'active': return { label: 'ACTIVE', cls: 'tds-v-good' };
       case 'expired': return { label: 'EXPIRED', cls: 'tds-v-bad' };
+      case 'pending': return { label: 'NOT STARTED', cls: 'tds-v-warn' };
       case 'unlicensed': return { label: 'NOT LICENSED', cls: 'tds-v-bad' };
       default: return { label: 'UNKNOWN', cls: 'tds-v-warn' };
     }
@@ -1612,14 +1733,22 @@
     try {
       const list = await fetchLicenseList();
       const entry = list.find((row) => Number(row.userId ?? row.user_id ?? row.id) === userId);
-      const rawStatus = String(entry?.status ?? entry?.flag ?? entry?.state ?? '').toLowerCase();
-      const status = !entry ? 'unlicensed'
-        : rawStatus === 'active' ? 'active'
-        : rawStatus === 'expired' ? 'expired'
-        : 'unknown';
-      state.license = { status, checkedAt: Date.now(), userId, source: 'github' };
-      if (status === 'unknown' && entry) {
-        state.license.reason = `Entry found but status field ("${entry.status ?? entry.flag ?? entry.state}") wasn\u2019t "active" or "expired".`;
+
+      if (!entry) {
+        state.license = {
+          status: 'unlicensed',
+          checkedAt: Date.now(),
+          userId,
+          source: 'github',
+        };
+      } else {
+        const evaluated = evaluateLicenseEntry(entry, Date.now());
+        state.license = {
+          ...evaluated,
+          checkedAt: Date.now(),
+          userId,
+          source: 'github',
+        };
       }
     } catch (err) {
       state.license = {
@@ -1641,6 +1770,10 @@
     const idEl = el.querySelector('#tds-license-userid');
     const statusEl = el.querySelector('#tds-license-status-value');
     const checkedEl = el.querySelector('#tds-license-checked');
+    const typeEl = el.querySelector('#tds-license-type');
+    const startedEl = el.querySelector('#tds-license-started');
+    const expiresEl = el.querySelector('#tds-license-expires');
+    const remainingEl = el.querySelector('#tds-license-remaining');
     const reasonRow = el.querySelector('#tds-license-reason-row');
     const reasonEl = el.querySelector('#tds-license-reason');
     if (!idEl || !statusEl || !checkedEl) return;
@@ -1651,6 +1784,10 @@
       statusEl.textContent = 'Not checked yet';
       statusEl.className = 'tds-row-value tds-v-dim';
       checkedEl.textContent = '\u2014';
+      if (typeEl) typeEl.textContent = '\u2014';
+      if (startedEl) startedEl.textContent = '\u2014';
+      if (expiresEl) expiresEl.textContent = '\u2014';
+      if (remainingEl) remainingEl.textContent = '\u2014';
       if (reasonRow) reasonRow.style.display = 'none';
       return;
     }
@@ -1660,6 +1797,42 @@
     statusEl.textContent = meta.label;
     statusEl.className = `tds-row-value ${meta.cls}`;
     checkedEl.textContent = license.checkedAt ? formatTimestampRelative(license.checkedAt) : '\u2014';
+
+    if (typeEl) {
+      typeEl.textContent =
+        license.licenseType === 'perpetual'
+          ? 'PERPETUAL'
+          : license.licenseType === 'term'
+            ? `${formatNumber(license.durationDays || 0)} DAY TERM`
+            : license.licenseType === 'legacy'
+              ? 'LEGACY'
+              : '\u2014';
+    }
+
+    if (startedEl) {
+      startedEl.textContent =
+        license.licenseType === 'term' || (license.licenseType === 'perpetual' && license.startsAt)
+          ? formatLicenseDate(license.startsAt)
+          : '\u2014';
+    }
+
+    if (expiresEl) {
+      expiresEl.textContent =
+        license.licenseType === 'perpetual'
+          ? 'Never'
+          : license.licenseType === 'term'
+            ? formatLicenseDate(license.expiresAt)
+            : '\u2014';
+    }
+
+    if (remainingEl) {
+      remainingEl.textContent =
+        license.licenseType === 'perpetual'
+          ? 'Perpetual'
+          : license.licenseType === 'term'
+            ? formatLicenseRemaining((license.expiresAt || 0) - Date.now())
+            : '\u2014';
+    }
 
     if (license.reason && reasonRow && reasonEl) {
       reasonRow.style.display = '';
