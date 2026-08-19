@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Company Management Suite
 // @namespace    torn-company-management-suite
-// @version      1.1.3
+// @version      1.1.4
 // @description  Local-only company management dashboard for Torn directors, embedded in the Jobs page. No company data ever leaves your browser; only your Torn User ID is checked against a public license list.
 // @author       you
 // @match        https://www.torn.com/*
@@ -84,15 +84,15 @@
   const LICENSE_JSON_URL = 'https://raw.githubusercontent.com/DooBiiE/Torn-Company-Manager/refs/heads/main/licensed-users.json';
   const LICENSE_CACHE_TTL_MS = 60 * 60 * 1000; // 1h -- avoids hitting GitHub raw on every page load/navigation
 
-  // NOTE: an earlier version of this file tried to deep-link into a "Custom
-  // Key Builder" with pre-filled selections, based on forum posts describing
-  // one. A real screenshot of Torn's current API Keys page (Settings ->
-  // API Keys) shows only a name field and a 4-level preset dropdown (Public
-  // Only / Minimal Access / Limited Access / Full Access) -- no granular
-  // selection UI exists there anymore, and any extra URL params just
-  // produce a "Wrong format" error. That feature has been removed rather
-  // than patched a third time. See the API Key section in Settings for the
-  // plain-preset guidance that replaced it.
+  // NOTE on custom keys: two earlier attempts tried to deep-link Torn's
+  // preferences.php with pre-filled selections, based on outdated forum
+  // posts -- a real screenshot showed that page now only has a name field
+  // and the 4 preset levels, and any extra URL params just produced "Wrong
+  // format". Torn's actual working Custom Key builder lives on
+  // https://www.torn.com/api.html (bottom of the page) and builds its own
+  // key-creation link client-side from checkbox state -- there is no
+  // documented way to pre-fill it from an external URL, so Settings just
+  // links there and the director ticks the boxes themselves.
 
   const PROBE_PLAN = [
     { section: 'company', selections: 'profile', label: 'Company profile' },
@@ -730,13 +730,18 @@
         </ul>
       </div>
       <div class="tds-box tds-box-neutral">
-        Torn's current API Keys page (Settings \u2192 API Keys) only offers a name field and the 4 preset levels
-        (Public Only / Minimal Access / Limited Access / Full Access) \u2014 there's no working custom-selection
-        builder reachable from here to link to. Based on the table above: <strong>pick Limited Access</strong>
-        for everything except training history, or <strong>Full Access</strong> if you also want the Training
-        tab's Rotational/debt mode. Either way, company financials/stock/applications only return real data
-        if you're the company's director \u2014 no preset changes that.
+        Pick <strong>Limited Access</strong> for everything except training history, or <strong>Full
+        Access</strong> if you also want the Training tab's Rotational/debt mode.<br>
+        Company financials/stock/applications only return real data if you're the company's director.
       </div>
+      <div class="tds-box tds-box-neutral">
+        Prefer a minimal-scope key instead? Torn's own docs page has a real, working Custom Key builder near
+        the bottom \u2014 tick <strong>Company: Profile, Employees, Detailed, Stock, Applications</strong> and
+        <strong>User: Basic, Workstats, Log</strong>, name it, and its own "generate" link creates the key back
+        on your Settings page. Torn's docs note custom keys should still be treated as full-access-level risk,
+        so share them with the same care.
+      </div>
+      <button class="tds-btn-ghost" id="tds-open-api-docs">Open Torn API Docs (Custom Keys) \u2197</button>
       <input class="tds-input" id="tds-keyinput" type="text" placeholder="Paste API key here" style="margin-top:8px;" />
       <div style="margin-top:8px; display:flex; gap:8px;">
         <button class="tds-btn" id="tds-savekey">Save key</button>
@@ -778,6 +783,13 @@
 
     const keyInput = el.querySelector('#tds-keyinput');
     keyInput.value = GM_getValue(STORAGE_KEY_APIKEY, '');
+
+    // Plain outbound link to Torn's own, unmodified docs page — no guessed
+    // query parameters this time, since that's exactly what broke last time.
+    // The real Custom Key builder on that page runs entirely on Torn's side.
+    el.querySelector('#tds-open-api-docs').addEventListener('click', () => {
+      window.open('https://www.torn.com/api.html', '_blank', 'noopener');
+    });
 
     el.querySelector('#tds-savekey').addEventListener('click', async () => {
       const key = keyInput.value.trim();
