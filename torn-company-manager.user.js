@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Company Management Suite
 // @namespace    torn-company-management-suite
-// @version      1.3.16
+// @version      1.3.17
 // @description  Local-only company management dashboard for Torn directors, embedded in the Jobs page. No company data ever leaves your browser; only your Torn User ID is checked against a public license list.
 // @author       DooBiiE
 // @match        https://www.torn.com/*
@@ -67,7 +67,7 @@
   // TornPDA does not always expose the legacy GM_info object that desktop
   // userscript managers provide. Try both common metadata APIs, then use the
   // release version as a PDA-safe fallback so the UI never shows vunknown.
-  const TDS_VERSION_FALLBACK = '1.3.16';
+  const TDS_VERSION_FALLBACK = '1.3.17';
   const TDS_VERSION =
     (typeof GM_info !== 'undefined' && GM_info?.script?.version) ||
     (typeof GM !== 'undefined' && GM?.info?.script?.version) ||
@@ -205,36 +205,59 @@
       const key = GM_getValue(STORAGE_KEY_APIKEY, '');
       if (!key) return Promise.reject({ blocked: true, reason: 'No API key configured yet.' });
 
-      // Torn API v2 / Swagger uses header authentication. Do NOT append the
-      // secret API key to the query string here; doing so can return error 2
-      // ("Incorrect key") even though the same key works with our v1 calls.
       const params = new URLSearchParams({ ...extraParams });
       const cleanPath = String(path || '').replace(/^\/+/, '');
       const query = params.toString();
       const url = `${API_BASE}/v2/${cleanPath}${query ? `?${query}` : ''}`;
+      const headers = {
+        Authorization: `ApiKey ${key}`,
+      };
+
+      function handleResponse(res, resolve, reject) {
+        let json;
+        try {
+          json = JSON.parse(String(res?.responseText || ''));
+        } catch (e) {
+          reject({
+            blocked: true,
+            reason: `Response was not valid JSON (HTTP ${res?.status ?? 'unknown'}).`
+          });
+          return;
+        }
+
+        if (json.error) {
+          reject({
+            blocked: true,
+            code: json.error.code,
+            reason: json.error.error || json.error.message
+          });
+          return;
+        }
+
+        resolve(json);
+      }
 
       return new Promise((resolve, reject) => {
+        // TornPDA exposes a native HTTP bridge which explicitly supports
+        // custom request headers. Use it for API v2 so Authorization survives
+        // the WebView/native boundary. Desktop userscript managers keep using
+        // GM_xmlhttpRequest below.
+        if (typeof PDA_httpGet === 'function') {
+          PDA_httpGet(url, headers)
+            .then((res) => handleResponse(res, resolve, reject))
+            .catch((err) => reject({
+              blocked: true,
+              reason: `TornPDA HTTP error: ${err?.message || String(err)}`
+            }));
+          return;
+        }
+
         GM_xmlhttpRequest({
           method: 'GET',
           url,
-          headers: {
-            Authorization: `ApiKey ${key}`,
-          },
+          headers,
           timeout: 15000,
-          onload: (res) => {
-            let json;
-            try {
-              json = JSON.parse(res.responseText);
-            } catch (e) {
-              reject({ blocked: true, reason: 'Response was not valid JSON — Torn API may be down.' });
-              return;
-            }
-            if (json.error) {
-              reject({ blocked: true, code: json.error.code, reason: json.error.error || json.error.message });
-              return;
-            }
-            resolve(json);
-          },
+          onload: (res) => handleResponse(res, resolve, reject),
           onerror: () => reject({ blocked: true, reason: 'Network error contacting api.torn.com' }),
           ontimeout: () => reject({ blocked: true, reason: 'Request to api.torn.com timed out' }),
         });
@@ -262,35 +285,49 @@
       const cleanPath = String(path || '').replace(/^\/+/, '');
       const query = params.toString();
       const url = `${API_BASE}/v2/${cleanPath}${query ? `?${query}` : ''}`;
+      const headers = {
+        Authorization: `ApiKey ${key}`,
+        Accept: 'text/csv, text/plain, */*',
+      };
+
+      function handleTextResponse(res, resolve, reject) {
+        const body = String(res?.responseText || '');
+        const trimmed = body.trim();
+
+        if (trimmed.startsWith('{')) {
+          try {
+            const json = JSON.parse(trimmed);
+            if (json.error) {
+              reject({
+                blocked: true,
+                code: json.error.code,
+                reason: json.error.error || json.error.message || 'Torn API error',
+              });
+              return;
+            }
+          } catch (_) {}
+        }
+
+        resolve(body);
+      }
 
       return new Promise((resolve, reject) => {
+        if (typeof PDA_httpGet === 'function') {
+          PDA_httpGet(url, headers)
+            .then((res) => handleTextResponse(res, resolve, reject))
+            .catch((err) => reject({
+              blocked: true,
+              reason: `TornPDA HTTP error: ${err?.message || String(err)}`
+            }));
+          return;
+        }
+
         GM_xmlhttpRequest({
           method: 'GET',
           url,
-          headers: {
-            Authorization: `ApiKey ${key}`,
-            Accept: 'text/csv, text/plain, */*',
-          },
+          headers,
           timeout: 20000,
-          onload: (res) => {
-            const body = String(res.responseText || '');
-            // Snapshot errors may still arrive as JSON even though success is CSV.
-            const trimmed = body.trim();
-            if (trimmed.startsWith('{')) {
-              try {
-                const json = JSON.parse(trimmed);
-                if (json.error) {
-                  reject({
-                    blocked: true,
-                    code: json.error.code,
-                    reason: json.error.error || json.error.message || 'Torn API error',
-                  });
-                  return;
-                }
-              } catch (_) {}
-            }
-            resolve(body);
-          },
+          onload: (res) => handleTextResponse(res, resolve, reject),
           onerror: () => reject({ blocked: true, reason: 'Network error contacting api.torn.com' }),
           ontimeout: () => reject({ blocked: true, reason: 'Request to api.torn.com timed out' }),
         });
