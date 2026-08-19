@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Company Management Suite
 // @namespace    torn-company-management-suite
-// @version      1.2.7
+// @version      1.2.9
 // @description  Local-only company management dashboard for Torn directors, embedded in the Jobs page. No company data ever leaves your browser; only your Torn User ID is checked against a public license list.
 // @author       DooBiiE
 // @match        https://www.torn.com/*
@@ -67,7 +67,7 @@
   // TornPDA does not always expose the legacy GM_info object that desktop
   // userscript managers provide. Try both common metadata APIs, then use the
   // release version as a PDA-safe fallback so the UI never shows vunknown.
-  const TDS_VERSION_FALLBACK = '1.2.7';
+  const TDS_VERSION_FALLBACK = '1.2.9';
   const TDS_VERSION =
     (typeof GM_info !== 'undefined' && GM_info?.script?.version) ||
     (typeof GM !== 'undefined' && GM?.info?.script?.version) ||
@@ -107,7 +107,7 @@
   // key creation and must then paste the generated key into this script.
   const CUSTOM_KEY_TITLE = 'Torn Company Management Suite';
   const CUSTOM_KEY_SELECTIONS = {
-    company: ['profile', 'employees', 'detailed', 'stock', 'news', 'applications', 'companies', 'search'],
+    company: ['profile', 'employees', 'detailed', 'stock', 'news', 'applications', 'companies', 'search', 'snapshot'],
     user: ['basic', 'workstats', 'log'],
     torn: ['companies'],
   };
@@ -254,7 +254,63 @@
       return result;
     }
 
-    return { call, callV2 };
+    function rawCallV2Text(path, extraParams = {}) {
+      const key = GM_getValue(STORAGE_KEY_APIKEY, '');
+      if (!key) return Promise.reject({ blocked: true, reason: 'No API key configured yet.' });
+
+      const params = new URLSearchParams({ ...extraParams });
+      const cleanPath = String(path || '').replace(/^\/+/, '');
+      const query = params.toString();
+      const url = `${API_BASE}/v2/${cleanPath}${query ? `?${query}` : ''}`;
+
+      return new Promise((resolve, reject) => {
+        GM_xmlhttpRequest({
+          method: 'GET',
+          url,
+          headers: {
+            Authorization: `ApiKey ${key}`,
+            Accept: 'text/csv, text/plain, */*',
+          },
+          timeout: 20000,
+          onload: (res) => {
+            const body = String(res.responseText || '');
+            // Snapshot errors may still arrive as JSON even though success is CSV.
+            const trimmed = body.trim();
+            if (trimmed.startsWith('{')) {
+              try {
+                const json = JSON.parse(trimmed);
+                if (json.error) {
+                  reject({
+                    blocked: true,
+                    code: json.error.code,
+                    reason: json.error.error || json.error.message || 'Torn API error',
+                  });
+                  return;
+                }
+              } catch (_) {}
+            }
+            resolve(body);
+          },
+          onerror: () => reject({ blocked: true, reason: 'Network error contacting api.torn.com' }),
+          ontimeout: () => reject({ blocked: true, reason: 'Request to api.torn.com timed out' }),
+        });
+      });
+    }
+
+    function callV2Text(path, extraParams = {}) {
+      const run = () => {
+        const wait = Math.max(0, MIN_CALL_INTERVAL_MS - (Date.now() - lastCallAt));
+        return new Promise((resolve) => setTimeout(resolve, wait)).then(() => {
+          lastCallAt = Date.now();
+          return rawCallV2Text(path, extraParams);
+        });
+      };
+      const result = queue.then(run, run);
+      queue = result.then(() => {}, () => {});
+      return result;
+    }
+
+    return { call, callV2, callV2Text };
   })();
 
   // ---------------------------------------------------------------------
@@ -692,7 +748,7 @@
     lastRunAt: null,
     diagnosticRunning: false,
     panel: null,
-    benchmark: { tier: 'same', cache: {} }, // cache keyed by categoryId -> { timestamp, data }
+    benchmark: { tier: 'same', cache: {}, snapshot: null }, // cache keyed by categoryId -> { timestamp, data }
     stock: { loading: false, newsCache: null, newsCacheAt: 0 },
   };
 
@@ -831,7 +887,7 @@
         <strong>Create the API key for this program.</strong><br>
         This opens Torn's official custom-key generator with the permissions used by
         <strong>Torn Company Management Suite</strong> already selected:
-        <strong>Company: Profile, Employees, Detailed, Stock, News, Applications, Companies, Search</strong>;
+        <strong>Company: Profile, Employees, Detailed, Stock, News, Applications, Companies, Search, Snapshot</strong>;
         <strong>User: Basic, Workstats, Log</strong>;
         <strong>Torn: Companies</strong>.<br><br>
         Torn will handle the actual key creation. Review the selections on Torn's page,
@@ -2674,6 +2730,127 @@
     return 'All Ratings';
   }
 
+
+  function parseCsvLine(line) {
+    const out = [];
+    let value = '';
+    let quoted = false;
+
+    for (let i = 0; i < line.length; i += 1) {
+      const ch = line[i];
+      if (ch === '"') {
+        if (quoted && line[i + 1] === '"') {
+          value += '"';
+          i += 1;
+        } else {
+          quoted = !quoted;
+        }
+      } else if (ch === ',' && !quoted) {
+        out.push(value);
+        value = '';
+      } else {
+        value += ch;
+      }
+    }
+    out.push(value);
+    return out;
+  }
+
+  function normalizeCsvHeader(value) {
+    return String(value || '')
+      .trim()
+      .toLowerCase()
+      .replace(/^\uFEFF/, '')
+      .replace(/[\s-]+/g, '_');
+  }
+
+  function parseCompanySnapshotCsv(csvText) {
+    const lines = String(csvText || '')
+      .split(/\r?\n/)
+      .filter((line) => line.trim().length > 0);
+
+    if (lines.length < 2) return [];
+
+    const headers = parseCsvLine(lines[0]).map(normalizeCsvHeader);
+    const rows = [];
+
+    for (let i = 1; i < lines.length; i += 1) {
+      const values = parseCsvLine(lines[i]);
+      const row = {};
+      headers.forEach((header, index) => {
+        row[header] = values[index] ?? '';
+      });
+      rows.push(row);
+    }
+
+    return rows;
+  }
+
+  function snapshotNumber(row, names) {
+    for (const name of names) {
+      if (!Object.prototype.hasOwnProperty.call(row, name)) continue;
+      const raw = row[name];
+      if (raw === '' || raw === null || raw === undefined) continue;
+      const cleaned = String(raw).replace(/[$,\s]/g, '');
+      const n = Number(cleaned);
+      if (Number.isFinite(n)) return n;
+    }
+    return null;
+  }
+
+  function snapshotCompanyId(row) {
+    return snapshotNumber(row, ['id', 'company_id', 'companyid']);
+  }
+
+  async function getCompanySnapshotMap({ force = false } = {}) {
+    const cached = state.benchmark.snapshot;
+    // Snapshot changes only daily; 30 minutes is conservative and avoids
+    // repeatedly downloading the all-company CSV while switching filters.
+    const ttl = 30 * 60 * 1000;
+    if (!force && cached && Date.now() - cached.timestamp < ttl) {
+      return cached.map;
+    }
+
+    const csv = await ApiClient.callV2Text('company/snapshot');
+    const rows = parseCompanySnapshotCsv(csv);
+    const map = new Map();
+
+    for (const row of rows) {
+      const id = snapshotCompanyId(row);
+      if (id === null) continue;
+      map.set(String(id), {
+        dailyIncome: snapshotNumber(row, ['daily_income', 'dailyincome']),
+        weeklyIncome: snapshotNumber(row, ['weekly_income', 'weeklyincome']),
+        dailyCustomers: snapshotNumber(row, ['daily_customers', 'dailycustomers']),
+        weeklyCustomers: snapshotNumber(row, ['weekly_customers', 'weeklycustomers']),
+      });
+    }
+
+    state.benchmark.snapshot = {
+      timestamp: Date.now(),
+      map,
+    };
+    return map;
+  }
+
+  function mergeCompareFinancials(rows, snapshotMap) {
+    if (!snapshotMap || !snapshotMap.size) return rows;
+
+    return rows.map((row) => {
+      if (row.id === null) return row;
+      const snap = snapshotMap.get(String(row.id));
+      if (!snap) return row;
+
+      return {
+        ...row,
+        dailyIncome: row.dailyIncome ?? snap.dailyIncome,
+        weeklyIncome: row.weeklyIncome ?? snap.weeklyIncome,
+        dailyCustomers: row.dailyCustomers ?? snap.dailyCustomers,
+        weeklyCustomers: row.weeklyCustomers ?? snap.weeklyCustomers,
+      };
+    });
+  }
+
   function renderBenchmarkTab(panel) {
     const el = panel.querySelector('[data-tabpanel="benchmark"]');
     const results = state.lastResults;
@@ -2800,12 +2977,52 @@
     }
   }
 
-  function renderBenchmarkResults(panel, data, own, tier) {
+
+  function averageNumeric(values) {
+    const nums = values.filter((v) => typeof v === 'number' && Number.isFinite(v));
+    if (!nums.length) return null;
+    return nums.reduce((sum, value) => sum + value, 0) / nums.length;
+  }
+
+  function medianNumeric(values) {
+    const nums = values
+      .filter((v) => typeof v === 'number' && Number.isFinite(v))
+      .sort((a, b) => a - b);
+    if (!nums.length) return null;
+    const mid = Math.floor(nums.length / 2);
+    return nums.length % 2
+      ? nums[mid]
+      : (nums[mid - 1] + nums[mid]) / 2;
+  }
+
+  function percentageDifference(value, baseline) {
+    if (typeof value !== 'number' || typeof baseline !== 'number' || baseline === 0) return null;
+    return ((value - baseline) / baseline) * 100;
+  }
+
+  function formatSignedPercent(value, digits = 1) {
+    if (typeof value !== 'number' || !Number.isFinite(value)) return '—';
+    return `${value > 0 ? '+' : ''}${value.toFixed(digits)}%`;
+  }
+
+  function formatPercentile(rank, total) {
+    if (!rank || !total || total < 1) return '—';
+    if (total === 1) return '100th';
+    const percentile = Math.round(((total - rank) / (total - 1)) * 100);
+    return `${percentile}th percentile`;
+  }
+
+  function revenuePerCustomer(income, customers) {
+    if (typeof income !== 'number' || typeof customers !== 'number' || customers <= 0) return null;
+    return income / customers;
+  }
+
+  async function renderBenchmarkResults(panel, data, own, tier) {
     const el = panel.querySelector('[data-tabpanel="benchmark"] #tds-bench-results');
     if (!el) return;
 
     const rawRows = extractCompareCompanies(data);
-    const rows = rawRows.map(normalizeCompareCompany);
+    let rows = rawRows.map(normalizeCompareCompany);
 
     if (!rows.length) {
       el.innerHTML = `
@@ -2816,6 +3033,29 @@
         </div>
         <div class="tds-box tds-box-neutral">Torn returned no companies matching this search filter.</div>`;
       return;
+    }
+
+    // company/search is ideal for locating/filtering companies, but Torn may
+    // omit financial fields from its returned row shape. In that case enrich
+    // the same company IDs from the daily company/snapshot CSV.
+    const needsSnapshot = rows.some((row) =>
+      row.dailyIncome === null ||
+      row.weeklyIncome === null ||
+      row.dailyCustomers === null ||
+      row.weeklyCustomers === null
+    );
+
+    let snapshotUsed = false;
+    let snapshotError = null;
+    if (needsSnapshot) {
+      try {
+        const snapshotMap = await getCompanySnapshotMap();
+        rows = mergeCompareFinancials(rows, snapshotMap);
+        snapshotUsed = true;
+      } catch (err) {
+        snapshotError = err;
+        console.warn('[TDS] Compare snapshot financial enrichment failed:', err);
+      }
     }
 
     // The search endpoint is already filtered server-side. This secondary
@@ -2860,6 +3100,81 @@
           row.id !== null && String(row.id) === String(own.id)
         )
       : -1;
+    const ownRow = ownIndex >= 0 ? sorted[ownIndex] : null;
+
+    const weeklyIncomeValues = usableRows.map((r) => r.weeklyIncome);
+    const dailyIncomeValues = usableRows.map((r) => r.dailyIncome);
+    const weeklyCustomerValues = usableRows.map((r) => r.weeklyCustomers);
+    const dailyCustomerValues = usableRows.map((r) => r.dailyCustomers);
+
+    const avgWeeklyIncome = averageNumeric(weeklyIncomeValues);
+    const medianWeeklyIncome = medianNumeric(weeklyIncomeValues);
+    const avgDailyIncome = averageNumeric(dailyIncomeValues);
+    const medianDailyIncome = medianNumeric(dailyIncomeValues);
+    const avgWeeklyCustomers = averageNumeric(weeklyCustomerValues);
+    const medianWeeklyCustomers = medianNumeric(weeklyCustomerValues);
+    const avgDailyCustomers = averageNumeric(dailyCustomerValues);
+    const medianDailyCustomers = medianNumeric(dailyCustomerValues);
+
+    const totalWeeklyIncome = weeklyIncomeValues
+      .filter((v) => typeof v === 'number' && Number.isFinite(v))
+      .reduce((sum, v) => sum + v, 0);
+
+    const ownWeeklyIncome = ownRow?.weeklyIncome ?? null;
+    const ownDailyIncome = ownRow?.dailyIncome ?? null;
+    const ownWeeklyCustomers = ownRow?.weeklyCustomers ?? null;
+    const ownDailyCustomers = ownRow?.dailyCustomers ?? null;
+
+    const incomeAbove = ownIndex > 0 ? sorted[ownIndex - 1]?.[metric] ?? null : null;
+    const incomeLeader = sorted.length ? sorted[0]?.[metric] ?? null : null;
+    const ownMetricValue = ownRow && metric ? ownRow[metric] : null;
+
+    const gapToAbove =
+      typeof incomeAbove === 'number' && typeof ownMetricValue === 'number'
+        ? Math.max(0, incomeAbove - ownMetricValue)
+        : null;
+    const gapToLeader =
+      typeof incomeLeader === 'number' && typeof ownMetricValue === 'number'
+        ? Math.max(0, incomeLeader - ownMetricValue)
+        : null;
+
+    const ownWeeklyRpc = revenuePerCustomer(ownWeeklyIncome, ownWeeklyCustomers);
+    const ownDailyRpc = revenuePerCustomer(ownDailyIncome, ownDailyCustomers);
+
+    const weeklyRpcRows = usableRows
+      .map((r) => ({
+        row: r,
+        value: revenuePerCustomer(r.weeklyIncome, r.weeklyCustomers),
+      }))
+      .filter((x) => typeof x.value === 'number')
+      .sort((a, b) => b.value - a.value);
+
+    const dailyRpcRows = usableRows
+      .map((r) => ({
+        row: r,
+        value: revenuePerCustomer(r.dailyIncome, r.dailyCustomers),
+      }))
+      .filter((x) => typeof x.value === 'number')
+      .sort((a, b) => b.value - a.value);
+
+    const avgWeeklyRpc = averageNumeric(weeklyRpcRows.map((x) => x.value));
+    const medianWeeklyRpc = medianNumeric(weeklyRpcRows.map((x) => x.value));
+    const avgDailyRpc = averageNumeric(dailyRpcRows.map((x) => x.value));
+
+    const ownWeeklyRpcIndex = own.id !== null
+      ? weeklyRpcRows.findIndex((x) =>
+          x.row.id !== null && String(x.row.id) === String(own.id)
+        )
+      : -1;
+
+    const weeklyCustomerRankRows = usableRows
+      .filter((r) => typeof r.weeklyCustomers === 'number')
+      .sort((a, b) => b.weeklyCustomers - a.weeklyCustomers);
+    const ownWeeklyCustomerIndex = own.id !== null
+      ? weeklyCustomerRankRows.findIndex((r) =>
+          r.id !== null && String(r.id) === String(own.id)
+        )
+      : -1;
 
     let html = `<div class="tds-card">`;
     html += `<div class="tds-row"><span class="tds-row-label">Company type</span><span class="tds-row-value">${escapeHtml(String(own.typeName || own.typeId))}${own.typeName ? ` (${escapeHtml(String(own.typeId))})` : ''}</span></div>`;
@@ -2867,10 +3182,82 @@
     html += `<div class="tds-row"><span class="tds-row-label">Companies returned</span><span class="tds-row-value">${formatNumber(sorted.length)}</span></div>`;
 
     if (ownIndex >= 0 && metric) {
-      html += `<div class="tds-row"><span class="tds-row-label">Your rank by ${metricLabel}</span><span class="tds-row-value">#${ownIndex + 1} / ${sorted.length}</span></div>`;
+      html += `<div class="tds-row"><span class="tds-row-label">Your rank by ${metricLabel}</span><span class="tds-row-value">#${ownIndex + 1} / ${sorted.length} · ${formatPercentile(ownIndex + 1, sorted.length)}</span></div>`;
     }
 
     html += `</div>`;
+
+    if (hasWeeklyIncome || hasDailyIncome) {
+      html += `<div class="tds-section-label">Income performance</div><div class="tds-card">`;
+
+      if (hasWeeklyIncome) {
+        html += `<div class="tds-row"><span class="tds-row-label">Average weekly income</span><span class="tds-row-value">${avgWeeklyIncome !== null ? formatMoney(avgWeeklyIncome) : '—'}</span></div>`;
+        html += `<div class="tds-row"><span class="tds-row-label">Median weekly income</span><span class="tds-row-value">${medianWeeklyIncome !== null ? formatMoney(medianWeeklyIncome) : '—'}</span></div>`;
+        if (ownWeeklyIncome !== null) {
+          html += `<div class="tds-row"><span class="tds-row-label">Your weekly income vs average</span><span class="tds-row-value">${formatSignedPercent(percentageDifference(ownWeeklyIncome, avgWeeklyIncome))}</span></div>`;
+          html += `<div class="tds-row"><span class="tds-row-label">Your weekly income vs median</span><span class="tds-row-value">${formatSignedPercent(percentageDifference(ownWeeklyIncome, medianWeeklyIncome))}</span></div>`;
+          if (totalWeeklyIncome > 0) {
+            html += `<div class="tds-row"><span class="tds-row-label">Share of returned weekly income</span><span class="tds-row-value">${((ownWeeklyIncome / totalWeeklyIncome) * 100).toFixed(2)}%</span></div>`;
+          }
+        }
+      }
+
+      if (hasDailyIncome) {
+        html += `<div class="tds-row"><span class="tds-row-label">Average daily income</span><span class="tds-row-value">${avgDailyIncome !== null ? formatMoney(avgDailyIncome) : '—'}</span></div>`;
+        html += `<div class="tds-row"><span class="tds-row-label">Median daily income</span><span class="tds-row-value">${medianDailyIncome !== null ? formatMoney(medianDailyIncome) : '—'}</span></div>`;
+      }
+
+      if (ownIndex >= 0 && metric) {
+        html += `<div class="tds-row"><span class="tds-row-label">Gap to company above you</span><span class="tds-row-value">${gapToAbove !== null ? (gapToAbove === 0 ? 'You are #1' : formatMoney(gapToAbove)) : '—'}</span></div>`;
+        html += `<div class="tds-row"><span class="tds-row-label">Gap to #1</span><span class="tds-row-value">${gapToLeader !== null ? (gapToLeader === 0 ? 'You are #1' : formatMoney(gapToLeader)) : '—'}</span></div>`;
+      }
+
+      html += `</div>`;
+    }
+
+    if (hasWeeklyCustomers || hasDailyCustomers) {
+      html += `<div class="tds-section-label">Customer performance</div><div class="tds-card">`;
+
+      if (hasWeeklyCustomers) {
+        html += `<div class="tds-row"><span class="tds-row-label">Average weekly customers</span><span class="tds-row-value">${avgWeeklyCustomers !== null ? formatNumber(Math.round(avgWeeklyCustomers)) : '—'}</span></div>`;
+        html += `<div class="tds-row"><span class="tds-row-label">Median weekly customers</span><span class="tds-row-value">${medianWeeklyCustomers !== null ? formatNumber(Math.round(medianWeeklyCustomers)) : '—'}</span></div>`;
+        if (ownWeeklyCustomerIndex >= 0) {
+          html += `<div class="tds-row"><span class="tds-row-label">Your weekly-customer rank</span><span class="tds-row-value">#${ownWeeklyCustomerIndex + 1} / ${weeklyCustomerRankRows.length}</span></div>`;
+        }
+      }
+
+      if (hasDailyCustomers) {
+        html += `<div class="tds-row"><span class="tds-row-label">Average daily customers</span><span class="tds-row-value">${avgDailyCustomers !== null ? formatNumber(Math.round(avgDailyCustomers)) : '—'}</span></div>`;
+        html += `<div class="tds-row"><span class="tds-row-label">Median daily customers</span><span class="tds-row-value">${medianDailyCustomers !== null ? formatNumber(Math.round(medianDailyCustomers)) : '—'}</span></div>`;
+      }
+
+      html += `</div>`;
+    }
+
+    if ((hasWeeklyIncome && hasWeeklyCustomers) || (hasDailyIncome && hasDailyCustomers)) {
+      html += `<div class="tds-section-label">Revenue efficiency</div><div class="tds-card">`;
+
+      if (hasWeeklyIncome && hasWeeklyCustomers) {
+        html += `<div class="tds-row"><span class="tds-row-label">Average weekly revenue / customer</span><span class="tds-row-value">${avgWeeklyRpc !== null ? formatMoney(avgWeeklyRpc) : '—'}</span></div>`;
+        html += `<div class="tds-row"><span class="tds-row-label">Median weekly revenue / customer</span><span class="tds-row-value">${medianWeeklyRpc !== null ? formatMoney(medianWeeklyRpc) : '—'}</span></div>`;
+        if (ownWeeklyRpc !== null) {
+          html += `<div class="tds-row"><span class="tds-row-label">Your weekly revenue / customer</span><span class="tds-row-value">${formatMoney(ownWeeklyRpc)}</span></div>`;
+          html += `<div class="tds-row"><span class="tds-row-label">Your efficiency vs average</span><span class="tds-row-value">${formatSignedPercent(percentageDifference(ownWeeklyRpc, avgWeeklyRpc))}</span></div>`;
+        }
+        if (ownWeeklyRpcIndex >= 0) {
+          html += `<div class="tds-row"><span class="tds-row-label">Revenue / customer rank</span><span class="tds-row-value">#${ownWeeklyRpcIndex + 1} / ${weeklyRpcRows.length}</span></div>`;
+        }
+      }
+
+      if (hasDailyIncome && hasDailyCustomers && ownDailyRpc !== null) {
+        html += `<div class="tds-row"><span class="tds-row-label">Your daily revenue / customer</span><span class="tds-row-value">${formatMoney(ownDailyRpc)}</span></div>`;
+        if (avgDailyRpc !== null) {
+          html += `<div class="tds-row"><span class="tds-row-label">Daily efficiency vs average</span><span class="tds-row-value">${formatSignedPercent(percentageDifference(ownDailyRpc, avgDailyRpc))}</span></div>`;
+        }
+      }
+
+      html += `</div>`;
+    }
 
     const availableFinancialFields = [
       hasDailyIncome ? 'Daily income' : null,
@@ -2881,18 +3268,28 @@
 
     if (!availableFinancialFields.length) {
       html += `<div class="tds-box tds-box-warn">
-        Torn returned the companies, but this response did not contain daily/weekly income or customer figures.
-        Compare will still show company/rating data rather than inventing financial values.
+        Torn returned the companies, but no financial/customer figures could be matched for these rows.
+        ${snapshotError
+          ? `The Company Snapshot fallback also failed: ${escapeHtml(String(snapshotError.reason || 'unknown error'))}.`
+          : 'Compare will not invent financial values.'}
       </div>`;
     } else {
       html += `<div class="tds-box tds-box-info">
-        Financial fields available from Torn in this response: <strong>${escapeHtml(availableFinancialFields.join(', '))}</strong>.
+        Financial fields available: <strong>${escapeHtml(availableFinancialFields.join(', '))}</strong>.
+        ${snapshotUsed ? 'Missing search values were filled from Torn’s daily Company Snapshot.' : 'These values were supplied directly by Torn’s company search response.'}
       </div>`;
     }
 
-    if (rows.length >= 100) {
+    if (sorted.length > 25 || rows.length >= 100) {
       html += `<div class="tds-box tds-box-warn">
-        This search returned 100 companies, which is Torn's per-request limit. Additional matching companies may exist on later pages.
+        Showing <strong>${Math.min(25, sorted.length)} companies</strong> in this table. Summary statistics above use all <strong>${formatNumber(sorted.length)}</strong> companies returned by Torn.
+      </div>`;
+    }
+
+    if (ownIndex >= 25 && ownRow) {
+      html += `<div class="tds-box tds-box-info">
+        Your company ranks <strong>#${ownIndex + 1}</strong>, so it falls outside the Top 25 table below.
+        Your figures are still included in all summary statistics.
       </div>`;
     }
 
