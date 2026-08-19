@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Company Management Suite
 // @namespace    torn-company-management-suite
-// @version      1.2.9
+// @version      1.2.6
 // @description  Local-only company management dashboard for Torn directors, embedded in the Jobs page. No company data ever leaves your browser; only your Torn User ID is checked against a public license list.
 // @author       DooBiiE
 // @match        https://www.torn.com/*
@@ -67,7 +67,7 @@
   // TornPDA does not always expose the legacy GM_info object that desktop
   // userscript managers provide. Try both common metadata APIs, then use the
   // release version as a PDA-safe fallback so the UI never shows vunknown.
-  const TDS_VERSION_FALLBACK = '1.2.9';
+  const TDS_VERSION_FALLBACK = '1.2.6';
   const TDS_VERSION =
     (typeof GM_info !== 'undefined' && GM_info?.script?.version) ||
     (typeof GM !== 'undefined' && GM?.info?.script?.version) ||
@@ -107,7 +107,7 @@
   // key creation and must then paste the generated key into this script.
   const CUSTOM_KEY_TITLE = 'Torn Company Management Suite';
   const CUSTOM_KEY_SELECTIONS = {
-    company: ['profile', 'employees', 'detailed', 'stock', 'news', 'applications', 'companies', 'search', 'snapshot'],
+    company: ['profile', 'employees', 'detailed', 'stock', 'news', 'applications', 'companies'],
     user: ['basic', 'workstats', 'log'],
     torn: ['companies'],
   };
@@ -254,63 +254,7 @@
       return result;
     }
 
-    function rawCallV2Text(path, extraParams = {}) {
-      const key = GM_getValue(STORAGE_KEY_APIKEY, '');
-      if (!key) return Promise.reject({ blocked: true, reason: 'No API key configured yet.' });
-
-      const params = new URLSearchParams({ ...extraParams });
-      const cleanPath = String(path || '').replace(/^\/+/, '');
-      const query = params.toString();
-      const url = `${API_BASE}/v2/${cleanPath}${query ? `?${query}` : ''}`;
-
-      return new Promise((resolve, reject) => {
-        GM_xmlhttpRequest({
-          method: 'GET',
-          url,
-          headers: {
-            Authorization: `ApiKey ${key}`,
-            Accept: 'text/csv, text/plain, */*',
-          },
-          timeout: 20000,
-          onload: (res) => {
-            const body = String(res.responseText || '');
-            // Snapshot errors may still arrive as JSON even though success is CSV.
-            const trimmed = body.trim();
-            if (trimmed.startsWith('{')) {
-              try {
-                const json = JSON.parse(trimmed);
-                if (json.error) {
-                  reject({
-                    blocked: true,
-                    code: json.error.code,
-                    reason: json.error.error || json.error.message || 'Torn API error',
-                  });
-                  return;
-                }
-              } catch (_) {}
-            }
-            resolve(body);
-          },
-          onerror: () => reject({ blocked: true, reason: 'Network error contacting api.torn.com' }),
-          ontimeout: () => reject({ blocked: true, reason: 'Request to api.torn.com timed out' }),
-        });
-      });
-    }
-
-    function callV2Text(path, extraParams = {}) {
-      const run = () => {
-        const wait = Math.max(0, MIN_CALL_INTERVAL_MS - (Date.now() - lastCallAt));
-        return new Promise((resolve) => setTimeout(resolve, wait)).then(() => {
-          lastCallAt = Date.now();
-          return rawCallV2Text(path, extraParams);
-        });
-      };
-      const result = queue.then(run, run);
-      queue = result.then(() => {}, () => {});
-      return result;
-    }
-
-    return { call, callV2, callV2Text };
+    return { call, callV2 };
   })();
 
   // ---------------------------------------------------------------------
@@ -613,12 +557,6 @@
         padding-bottom: 8px;
       }
       .tds-optimize-table tbody tr:last-child td { border-bottom: none; }
-      .tds-compare-table th,
-      .tds-compare-table td {
-        text-align: center !important;
-        vertical-align: middle;
-      }
-      .tds-compare-table td.tds-num { text-align: center !important; }
       .tds-spark { display: flex; align-items: flex-end; gap: 4px; height: 46px; margin: 6px 0; }
       .tds-spark-col { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 3px; }
       .tds-spark-bar { width: 100%; border-radius: 2px 2px 0 0; min-height: 2px; }
@@ -748,7 +686,7 @@
     lastRunAt: null,
     diagnosticRunning: false,
     panel: null,
-    benchmark: { tier: 'same', cache: {}, snapshot: null }, // cache keyed by categoryId -> { timestamp, data }
+    benchmark: { tier: 'same', cache: {} }, // cache keyed by categoryId -> { timestamp, data }
     stock: { loading: false, newsCache: null, newsCacheAt: 0 },
   };
 
@@ -887,7 +825,7 @@
         <strong>Create the API key for this program.</strong><br>
         This opens Torn's official custom-key generator with the permissions used by
         <strong>Torn Company Management Suite</strong> already selected:
-        <strong>Company: Profile, Employees, Detailed, Stock, News, Applications, Companies, Search, Snapshot</strong>;
+        <strong>Company: Profile, Employees, Detailed, Stock, News, Applications, Companies</strong>;
         <strong>User: Basic, Workstats, Log</strong>;
         <strong>Torn: Companies</strong>.<br><br>
         Torn will handle the actual key creation. Review the selections on Torn's page,
@@ -2548,6 +2486,9 @@
       return { id: null, typeId: null, typeName: null, rating: null };
     }
 
+    // Prefer direct/wrapped company fields before doing a broad recursive
+    // search; this avoids accidentally treating a director/player ID as the
+    // company ID when Torn returns nested objects.
     const candidates = [profile];
     for (const key of ['company', 'profile', 'data']) {
       if (profile[key] && typeof profile[key] === 'object' && !Array.isArray(profile[key])) {
@@ -2592,27 +2533,11 @@
     return { id, typeId, typeName, rating };
   }
 
-  function buildCompareFilters(typeId, tier, ownRating) {
-    const filters = [`type:Equal:${typeId}`];
-
-    if (tier === 'same' && ownRating !== null) {
-      filters.push(`rating:=:${ownRating}`);
-    } else if (tier === 'mid') {
-      filters.push('rating:>=:3', 'rating:<=:5');
-    } else if (tier === 'top') {
-      filters.push('rating:>=:8', 'rating:<=:10');
-    }
-
-    return filters.join(',');
-  }
-
-  async function fetchBenchmarkCompanies(typeId, tier, ownRating, offset = 0) {
-    // company/search is the correct v2 endpoint for Compare because Torn
-    // explicitly exposes filtering by company type, rating, daily/weekly
-    // income and daily/weekly customers here.
-    const filters = buildCompareFilters(typeId, tier, ownRating);
-    return ApiClient.callV2('company/search', {
-      filters,
+  async function fetchBenchmarkCompanies(typeId, offset = 0) {
+    // Current Torn API v2 exposes a dedicated endpoint:
+    //   /v2/company/{typeId}/companies
+    // so we do not guess category/cat query parameters anymore.
+    return ApiClient.callV2(`company/${encodeURIComponent(typeId)}/companies`, {
       limit: 100,
       offset,
       striptags: 'true',
@@ -2622,25 +2547,21 @@
   function extractCompareCompanies(data) {
     if (!data || typeof data !== 'object') return [];
 
-    for (const key of ['companies', 'company_search', 'results', 'data']) {
-      const value = data[key];
-      if (Array.isArray(value)) return value;
-      if (value && typeof value === 'object' && !Array.isArray(value)) {
-        const values = Object.values(value).filter((x) => x && typeof x === 'object');
-        if (values.length) return values;
-      }
+    if (Array.isArray(data.companies)) return data.companies;
+    if (data.companies && typeof data.companies === 'object') {
+      return Object.values(data.companies).filter((x) => x && typeof x === 'object');
     }
 
+    // Defensive fallback for schema wrappers.
     const seen = new WeakSet();
     let found = null;
-
     function walk(value) {
       if (found || !value || typeof value !== 'object' || seen.has(value)) return;
       seen.add(value);
 
       if (Array.isArray(value) && value.length && value.every((x) => x && typeof x === 'object')) {
         const keys = new Set(value.flatMap((x) => Object.keys(x)));
-        if ([...keys].some((k) => /company|name|daily.*income|weekly.*income|rating/i.test(k))) {
+        if ([...keys].some((k) => /company|name|daily.*income|weekly.*income/i.test(k))) {
           found = value;
           return;
         }
@@ -2651,204 +2572,22 @@
         if (found) return;
       }
     }
-
     walk(data);
     return found || [];
   }
 
   function compareField(row, names, pattern = null) {
     if (!row || typeof row !== 'object') return null;
-
     for (const name of names) {
-      if (Object.prototype.hasOwnProperty.call(row, name) &&
-          row[name] !== null &&
-          row[name] !== undefined) {
+      if (Object.prototype.hasOwnProperty.call(row, name) && row[name] !== null && row[name] !== undefined) {
         return row[name];
       }
     }
-
     if (pattern) {
-      const entry = Object.entries(row).find(([k, v]) =>
-        pattern.test(k) && v !== null && v !== undefined
-      );
+      const entry = Object.entries(row).find(([k, v]) => pattern.test(k) && v !== null && v !== undefined);
       if (entry) return entry[1];
     }
-
     return null;
-  }
-
-  function normalizeCompareCompany(row) {
-    return {
-      raw: row,
-      id: numericValue(compareField(
-        row,
-        ['id', 'company_id', 'companyId'],
-        /^id$|company.*id/i
-      )),
-      name: compareField(
-        row,
-        ['name', 'company_name', 'companyName'],
-        /^name$|company.*name/i
-      ),
-      rating: numericValue(compareField(
-        row,
-        ['rating', 'stars', 'star_rating', 'starRating'],
-        /^rating$|^stars$|star.*rating/i
-      )),
-      dailyIncome: numericValue(compareField(
-        row,
-        ['daily_income', 'dailyIncome'],
-        /daily.*income/i
-      )),
-      weeklyIncome: numericValue(compareField(
-        row,
-        ['weekly_income', 'weeklyIncome'],
-        /weekly.*income/i
-      )),
-      dailyCustomers: numericValue(compareField(
-        row,
-        ['daily_customers', 'dailyCustomers'],
-        /daily.*customer/i
-      )),
-      weeklyCustomers: numericValue(compareField(
-        row,
-        ['weekly_customers', 'weeklyCustomers'],
-        /weekly.*customer/i
-      )),
-      employees: numericValue(compareField(
-        row,
-        ['employees', 'employees_current', 'employeesCurrent'],
-        /^employees$|employees.*current/i
-      )),
-    };
-  }
-
-  function compareTierLabel(tier, ownRating) {
-    if (tier === 'same') return ownRating !== null ? `Same Rating (${ownRating}★)` : 'Same Rating';
-    if (tier === 'mid') return '3–5★';
-    if (tier === 'top') return '8–10★';
-    return 'All Ratings';
-  }
-
-
-  function parseCsvLine(line) {
-    const out = [];
-    let value = '';
-    let quoted = false;
-
-    for (let i = 0; i < line.length; i += 1) {
-      const ch = line[i];
-      if (ch === '"') {
-        if (quoted && line[i + 1] === '"') {
-          value += '"';
-          i += 1;
-        } else {
-          quoted = !quoted;
-        }
-      } else if (ch === ',' && !quoted) {
-        out.push(value);
-        value = '';
-      } else {
-        value += ch;
-      }
-    }
-    out.push(value);
-    return out;
-  }
-
-  function normalizeCsvHeader(value) {
-    return String(value || '')
-      .trim()
-      .toLowerCase()
-      .replace(/^\uFEFF/, '')
-      .replace(/[\s-]+/g, '_');
-  }
-
-  function parseCompanySnapshotCsv(csvText) {
-    const lines = String(csvText || '')
-      .split(/\r?\n/)
-      .filter((line) => line.trim().length > 0);
-
-    if (lines.length < 2) return [];
-
-    const headers = parseCsvLine(lines[0]).map(normalizeCsvHeader);
-    const rows = [];
-
-    for (let i = 1; i < lines.length; i += 1) {
-      const values = parseCsvLine(lines[i]);
-      const row = {};
-      headers.forEach((header, index) => {
-        row[header] = values[index] ?? '';
-      });
-      rows.push(row);
-    }
-
-    return rows;
-  }
-
-  function snapshotNumber(row, names) {
-    for (const name of names) {
-      if (!Object.prototype.hasOwnProperty.call(row, name)) continue;
-      const raw = row[name];
-      if (raw === '' || raw === null || raw === undefined) continue;
-      const cleaned = String(raw).replace(/[$,\s]/g, '');
-      const n = Number(cleaned);
-      if (Number.isFinite(n)) return n;
-    }
-    return null;
-  }
-
-  function snapshotCompanyId(row) {
-    return snapshotNumber(row, ['id', 'company_id', 'companyid']);
-  }
-
-  async function getCompanySnapshotMap({ force = false } = {}) {
-    const cached = state.benchmark.snapshot;
-    // Snapshot changes only daily; 30 minutes is conservative and avoids
-    // repeatedly downloading the all-company CSV while switching filters.
-    const ttl = 30 * 60 * 1000;
-    if (!force && cached && Date.now() - cached.timestamp < ttl) {
-      return cached.map;
-    }
-
-    const csv = await ApiClient.callV2Text('company/snapshot');
-    const rows = parseCompanySnapshotCsv(csv);
-    const map = new Map();
-
-    for (const row of rows) {
-      const id = snapshotCompanyId(row);
-      if (id === null) continue;
-      map.set(String(id), {
-        dailyIncome: snapshotNumber(row, ['daily_income', 'dailyincome']),
-        weeklyIncome: snapshotNumber(row, ['weekly_income', 'weeklyincome']),
-        dailyCustomers: snapshotNumber(row, ['daily_customers', 'dailycustomers']),
-        weeklyCustomers: snapshotNumber(row, ['weekly_customers', 'weeklycustomers']),
-      });
-    }
-
-    state.benchmark.snapshot = {
-      timestamp: Date.now(),
-      map,
-    };
-    return map;
-  }
-
-  function mergeCompareFinancials(rows, snapshotMap) {
-    if (!snapshotMap || !snapshotMap.size) return rows;
-
-    return rows.map((row) => {
-      if (row.id === null) return row;
-      const snap = snapshotMap.get(String(row.id));
-      if (!snap) return row;
-
-      return {
-        ...row,
-        dailyIncome: row.dailyIncome ?? snap.dailyIncome,
-        weeklyIncome: row.weeklyIncome ?? snap.weeklyIncome,
-        dailyCustomers: row.dailyCustomers ?? snap.dailyCustomers,
-        weeklyCustomers: row.weeklyCustomers ?? snap.weeklyCustomers,
-      };
-    });
   }
 
   function renderBenchmarkTab(panel) {
@@ -2865,9 +2604,9 @@
 
     let html = `
       <div class="tds-box tds-box-neutral">
-        Compare uses Torn API v2's <code>/company/search</code> endpoint so company type,
-        star rating and financial/customer comparison fields come from the same search response.
-        This comparison does not require director access.
+        Compare uses Torn API v2's dedicated <code>/company/{typeId}/companies</code> endpoint.
+        It automatically detects your company type and compares you only with companies of that same type.
+        This is public/global-cached company data and does not require you to be the director.
       </div>
 
       <div class="tds-card">
@@ -2875,9 +2614,7 @@
           <span class="tds-row-label">Detected company type</span>
           <span class="tds-row-value">${typeLabel}</span>
         </div>
-        ${own.rating !== null
-          ? `<div class="tds-row"><span class="tds-row-label">Your rating</span><span class="tds-row-value">${escapeHtml(String(own.rating))}★</span></div>`
-          : ''}
+        ${own.rating !== null ? `<div class="tds-row"><span class="tds-row-label">Your rating</span><span class="tds-row-value">${escapeHtml(String(own.rating))}★</span></div>` : ''}
       </div>
 
       <div class="tds-segmented">
@@ -2890,38 +2627,43 @@
       <button class="tds-btn" id="tds-bench-reload">↻ Refresh Compare</button>
       <div id="tds-bench-results" style="margin-top:10px;"></div>
     `;
-
     el.innerHTML = html;
 
     el.querySelectorAll('[data-tier]').forEach((seg) => {
       seg.addEventListener('click', () => {
         state.benchmark.tier = seg.dataset.tier;
 
+        // Update the visible selected button immediately instead of waiting
+        // for the whole tab to be rebuilt.
         el.querySelectorAll('[data-tier]').forEach((button) => {
           button.classList.toggle('tds-segment-active', button === seg);
         });
 
-        runBenchmark(panel);
+        const cached = own.typeId !== null ? state.benchmark.cache[String(own.typeId)] : null;
+        if (cached) {
+          renderBenchmarkResults(panel, cached.data, own);
+        } else {
+          runBenchmark(panel);
+        }
       });
     });
 
-    el.querySelector('#tds-bench-reload').addEventListener('click', () =>
-      runBenchmark(panel, { force: true })
-    );
+    el.querySelector('#tds-bench-reload').addEventListener('click', () => runBenchmark(panel, { force: true }));
 
     if (own.typeId === null) {
       el.querySelector('#tds-bench-results').innerHTML =
-        `<div class="tds-box tds-box-warn">I couldn't detect your company type ID from company/profile, so Compare cannot build the Torn search filter.</div>`;
+        `<div class="tds-box tds-box-warn">I couldn't detect your company type ID from the current company/profile response. Run Diagnostics again; if this still appears, send me the Company profile fields shown in Diagnostics and I can map the live response shape.</div>`;
       return;
     }
 
-    if (state.benchmark.tier === 'same' && own.rating === null) {
-      state.benchmark.tier = 'all';
-      el.querySelectorAll('[data-tier]').forEach((button) => {
-        button.classList.toggle('tds-segment-active', button.dataset.tier === 'all');
-      });
+    const cached = state.benchmark.cache[String(own.typeId)];
+    if (cached && Date.now() - cached.timestamp < BENCHMARK_CACHE_TTL_MS) {
+      renderBenchmarkResults(panel, cached.data, own);
+      return;
     }
 
+    // Auto-load Compare when the tab is rendered. The cache prevents this
+    // from repeatedly consuming API requests when switching tabs/tiers.
     setTimeout(() => runBenchmark(panel), 0);
   }
 
@@ -2936,40 +2678,29 @@
 
     if (own.typeId === null) {
       if (resultsEl) {
-        resultsEl.innerHTML =
-          `<div class="tds-box tds-box-warn">Company type could not be detected.</div>`;
+        resultsEl.innerHTML = `<div class="tds-box tds-box-warn">Company type could not be detected, so Compare cannot choose the correct Torn company-type endpoint.</div>`;
       }
       return;
     }
 
-    const tier = state.benchmark.tier || 'same';
-    const cacheKey = `${own.typeId}:${tier}:${tier === 'same' ? own.rating ?? 'unknown' : ''}`;
+    const cacheKey = String(own.typeId);
     const cached = state.benchmark.cache[cacheKey];
-
-    if (!force &&
-        cached &&
-        Date.now() - cached.timestamp < BENCHMARK_CACHE_TTL_MS) {
-      renderBenchmarkResults(panel, cached.data, own, tier);
+    if (!force && cached && Date.now() - cached.timestamp < BENCHMARK_CACHE_TTL_MS) {
+      renderBenchmarkResults(panel, cached.data, own);
       return;
     }
 
-    if (resultsEl) {
-      resultsEl.innerHTML =
-        `<div class="tds-box tds-box-neutral">Fetching ${escapeHtml(String(own.typeName || `company type ${own.typeId}`))} — ${escapeHtml(compareTierLabel(tier, own.rating))}…</div>`;
-    }
+    if (resultsEl) resultsEl.innerHTML = `<div class="tds-box tds-box-neutral">Fetching ${escapeHtml(String(own.typeName || `company type ${own.typeId}`))} companies…</div>`;
 
     try {
-      const data = await fetchBenchmarkCompanies(own.typeId, tier, own.rating, 0);
-      state.benchmark.cache[cacheKey] = {
-        timestamp: Date.now(),
-        data,
-      };
-      renderBenchmarkResults(panel, data, own, tier);
+      const data = await fetchBenchmarkCompanies(own.typeId, 0);
+      state.benchmark.cache[cacheKey] = { timestamp: Date.now(), data };
+      renderBenchmarkResults(panel, data, own);
     } catch (err) {
       if (!resultsEl) return;
 
       const permissionHint = err.code === 16
-        ? `<br><br><strong>Custom-key note:</strong> your current key may not include Company → Search. Generate the updated Custom API Key from Settings once.`
+        ? `<br><br><strong>Custom-key note:</strong> your current key does not include the Company → Companies selection. Open Settings → Create Custom API Key and generate the updated key, which now includes it.`
         : '';
 
       resultsEl.innerHTML =
@@ -2977,347 +2708,120 @@
     }
   }
 
-
-  function averageNumeric(values) {
-    const nums = values.filter((v) => typeof v === 'number' && Number.isFinite(v));
-    if (!nums.length) return null;
-    return nums.reduce((sum, value) => sum + value, 0) / nums.length;
-  }
-
-  function medianNumeric(values) {
-    const nums = values
-      .filter((v) => typeof v === 'number' && Number.isFinite(v))
-      .sort((a, b) => a - b);
-    if (!nums.length) return null;
-    const mid = Math.floor(nums.length / 2);
-    return nums.length % 2
-      ? nums[mid]
-      : (nums[mid - 1] + nums[mid]) / 2;
-  }
-
-  function percentageDifference(value, baseline) {
-    if (typeof value !== 'number' || typeof baseline !== 'number' || baseline === 0) return null;
-    return ((value - baseline) / baseline) * 100;
-  }
-
-  function formatSignedPercent(value, digits = 1) {
-    if (typeof value !== 'number' || !Number.isFinite(value)) return '—';
-    return `${value > 0 ? '+' : ''}${value.toFixed(digits)}%`;
-  }
-
-  function formatPercentile(rank, total) {
-    if (!rank || !total || total < 1) return '—';
-    if (total === 1) return '100th';
-    const percentile = Math.round(((total - rank) / (total - 1)) * 100);
-    return `${percentile}th percentile`;
-  }
-
-  function revenuePerCustomer(income, customers) {
-    if (typeof income !== 'number' || typeof customers !== 'number' || customers <= 0) return null;
-    return income / customers;
-  }
-
-  async function renderBenchmarkResults(panel, data, own, tier) {
+  function renderBenchmarkResults(panel, data, own) {
     const el = panel.querySelector('[data-tabpanel="benchmark"] #tds-bench-results');
     if (!el) return;
 
-    const rawRows = extractCompareCompanies(data);
-    let rows = rawRows.map(normalizeCompareCompany);
-
+    const rows = extractCompareCompanies(data);
     if (!rows.length) {
-      el.innerHTML = `
-        <div class="tds-card">
-          <div class="tds-row"><span class="tds-row-label">Company type</span><span class="tds-row-value">${escapeHtml(String(own.typeName || own.typeId))}</span></div>
-          <div class="tds-row"><span class="tds-row-label">Selected rating</span><span class="tds-row-value">${escapeHtml(compareTierLabel(tier, own.rating))}</span></div>
-          <div class="tds-row"><span class="tds-row-label">Companies returned</span><span class="tds-row-value">0</span></div>
-        </div>
-        <div class="tds-box tds-box-neutral">Torn returned no companies matching this search filter.</div>`;
+      el.innerHTML = `<div class="tds-box tds-box-warn">Torn returned no companies for detected company type ${escapeHtml(String(own.typeName || own.typeId))}. Response fields: ${escapeHtml(Object.keys(data || {}).join(', ') || 'none')}.</div>`;
       return;
     }
 
-    // company/search is ideal for locating/filtering companies, but Torn may
-    // omit financial fields from its returned row shape. In that case enrich
-    // the same company IDs from the daily company/snapshot CSV.
-    const needsSnapshot = rows.some((row) =>
-      row.dailyIncome === null ||
-      row.weeklyIncome === null ||
-      row.dailyCustomers === null ||
-      row.weeklyCustomers === null
-    );
+    const normalized = rows.map((row) => ({
+      raw: row,
+      id: numericValue(compareField(row, ['id', 'company_id', 'companyId'], /^id$|company.*id/i)),
+      name: compareField(row, ['name', 'company_name', 'companyName'], /^name$|company.*name/i),
+      rating: numericValue(compareField(row, ['rating', 'stars', 'star_rating'], /rating|stars/i)),
+      dailyIncome: numericValue(compareField(row, ['daily_income', 'dailyIncome'], /daily.*income/i)),
+      weeklyIncome: numericValue(compareField(row, ['weekly_income', 'weeklyIncome'], /weekly.*income/i)),
+      dailyCustomers: numericValue(compareField(row, ['daily_customers', 'dailyCustomers'], /daily.*customer/i)),
+      weeklyCustomers: numericValue(compareField(row, ['weekly_customers', 'weeklyCustomers'], /weekly.*customer/i)),
+      employees: numericValue(compareField(row, ['employees', 'employees_current', 'employeesCurrent'], /^employees$|employees.*current/i)),
+    }));
 
-    let snapshotUsed = false;
-    let snapshotError = null;
-    if (needsSnapshot) {
-      try {
-        const snapshotMap = await getCompanySnapshotMap();
-        rows = mergeCompareFinancials(rows, snapshotMap);
-        snapshotUsed = true;
-      } catch (err) {
-        snapshotError = err;
-        console.warn('[TDS] Compare snapshot financial enrichment failed:', err);
-      }
-    }
+    const tier = state.benchmark.tier || 'same';
 
-    // The search endpoint is already filtered server-side. This secondary
-    // check protects the UI if Torn ever returns an out-of-band row.
-    const filtered = rows.filter((row) => {
+    // If Torn returned our own company in this page, trust the rating from
+    // that same endpoint over any similarly named field found in profile.
+    const ownReturnedRow = own.id !== null
+      ? normalized.find((row) => row.id !== null && String(row.id) === String(own.id))
+      : null;
+    const effectiveOwnRating =
+      ownReturnedRow && ownReturnedRow.rating !== null
+        ? ownReturnedRow.rating
+        : own.rating;
+
+    const hasRatingData = normalized.some((row) => row.rating !== null);
+    let sameRatingFallback = false;
+
+    let filtered = normalized.filter((row) => {
       if (tier === 'all') return true;
-      if (row.rating === null) return true;
+      if (tier === 'mid') return row.rating !== null && row.rating >= 3 && row.rating <= 5;
+      if (tier === 'top') return row.rating !== null && row.rating >= 8 && row.rating <= 10;
       if (tier === 'same') {
-        return own.rating === null || row.rating === own.rating;
+        if (effectiveOwnRating === null || !hasRatingData) return false;
+        return row.rating !== null && Math.abs(row.rating - effectiveOwnRating) < 0.001;
       }
-      if (tier === 'mid') return row.rating >= 3 && row.rating <= 5;
-      if (tier === 'top') return row.rating >= 8 && row.rating <= 10;
       return true;
     });
 
-    const usableRows = filtered.length ? filtered : rows;
+    // Never leave Same Rating looking broken. If the endpoint/page does not
+    // expose enough rating information to form a match, show the fetched
+    // companies and explain why rather than presenting an empty table.
+    if (tier === 'same' && filtered.length === 0) {
+      filtered = normalized;
+      sameRatingFallback = true;
+    }
 
-    const hasDailyIncome = usableRows.some((r) => r.dailyIncome !== null);
-    const hasWeeklyIncome = usableRows.some((r) => r.weeklyIncome !== null);
-    const hasDailyCustomers = usableRows.some((r) => r.dailyCustomers !== null);
-    const hasWeeklyCustomers = usableRows.some((r) => r.weeklyCustomers !== null);
+    // Prefer weekly income for a less noisy comparison; fall back to daily.
+    const metric = filtered.some((r) => r.weeklyIncome !== null) ? 'weeklyIncome' : 'dailyIncome';
+    const metricLabel = metric === 'weeklyIncome' ? 'Weekly Income' : 'Daily Income';
 
-    const metric = hasWeeklyIncome
-      ? 'weeklyIncome'
-      : hasDailyIncome
-        ? 'dailyIncome'
-        : null;
-
-    const metricLabel = metric === 'weeklyIncome'
-      ? 'Weekly Income'
-      : metric === 'dailyIncome'
-        ? 'Daily Income'
-        : 'Company';
-
-    const sorted = [...usableRows].sort((a, b) => {
-      if (!metric) return String(a.name || '').localeCompare(String(b.name || ''));
-      return (b[metric] ?? -1) - (a[metric] ?? -1);
-    });
-
+    const sorted = [...filtered].sort((a, b) => (b[metric] ?? -1) - (a[metric] ?? -1));
     const ownIndex = own.id !== null
-      ? sorted.findIndex((row) =>
-          row.id !== null && String(row.id) === String(own.id)
-        )
-      : -1;
-    const ownRow = ownIndex >= 0 ? sorted[ownIndex] : null;
-
-    const weeklyIncomeValues = usableRows.map((r) => r.weeklyIncome);
-    const dailyIncomeValues = usableRows.map((r) => r.dailyIncome);
-    const weeklyCustomerValues = usableRows.map((r) => r.weeklyCustomers);
-    const dailyCustomerValues = usableRows.map((r) => r.dailyCustomers);
-
-    const avgWeeklyIncome = averageNumeric(weeklyIncomeValues);
-    const medianWeeklyIncome = medianNumeric(weeklyIncomeValues);
-    const avgDailyIncome = averageNumeric(dailyIncomeValues);
-    const medianDailyIncome = medianNumeric(dailyIncomeValues);
-    const avgWeeklyCustomers = averageNumeric(weeklyCustomerValues);
-    const medianWeeklyCustomers = medianNumeric(weeklyCustomerValues);
-    const avgDailyCustomers = averageNumeric(dailyCustomerValues);
-    const medianDailyCustomers = medianNumeric(dailyCustomerValues);
-
-    const totalWeeklyIncome = weeklyIncomeValues
-      .filter((v) => typeof v === 'number' && Number.isFinite(v))
-      .reduce((sum, v) => sum + v, 0);
-
-    const ownWeeklyIncome = ownRow?.weeklyIncome ?? null;
-    const ownDailyIncome = ownRow?.dailyIncome ?? null;
-    const ownWeeklyCustomers = ownRow?.weeklyCustomers ?? null;
-    const ownDailyCustomers = ownRow?.dailyCustomers ?? null;
-
-    const incomeAbove = ownIndex > 0 ? sorted[ownIndex - 1]?.[metric] ?? null : null;
-    const incomeLeader = sorted.length ? sorted[0]?.[metric] ?? null : null;
-    const ownMetricValue = ownRow && metric ? ownRow[metric] : null;
-
-    const gapToAbove =
-      typeof incomeAbove === 'number' && typeof ownMetricValue === 'number'
-        ? Math.max(0, incomeAbove - ownMetricValue)
-        : null;
-    const gapToLeader =
-      typeof incomeLeader === 'number' && typeof ownMetricValue === 'number'
-        ? Math.max(0, incomeLeader - ownMetricValue)
-        : null;
-
-    const ownWeeklyRpc = revenuePerCustomer(ownWeeklyIncome, ownWeeklyCustomers);
-    const ownDailyRpc = revenuePerCustomer(ownDailyIncome, ownDailyCustomers);
-
-    const weeklyRpcRows = usableRows
-      .map((r) => ({
-        row: r,
-        value: revenuePerCustomer(r.weeklyIncome, r.weeklyCustomers),
-      }))
-      .filter((x) => typeof x.value === 'number')
-      .sort((a, b) => b.value - a.value);
-
-    const dailyRpcRows = usableRows
-      .map((r) => ({
-        row: r,
-        value: revenuePerCustomer(r.dailyIncome, r.dailyCustomers),
-      }))
-      .filter((x) => typeof x.value === 'number')
-      .sort((a, b) => b.value - a.value);
-
-    const avgWeeklyRpc = averageNumeric(weeklyRpcRows.map((x) => x.value));
-    const medianWeeklyRpc = medianNumeric(weeklyRpcRows.map((x) => x.value));
-    const avgDailyRpc = averageNumeric(dailyRpcRows.map((x) => x.value));
-
-    const ownWeeklyRpcIndex = own.id !== null
-      ? weeklyRpcRows.findIndex((x) =>
-          x.row.id !== null && String(x.row.id) === String(own.id)
-        )
-      : -1;
-
-    const weeklyCustomerRankRows = usableRows
-      .filter((r) => typeof r.weeklyCustomers === 'number')
-      .sort((a, b) => b.weeklyCustomers - a.weeklyCustomers);
-    const ownWeeklyCustomerIndex = own.id !== null
-      ? weeklyCustomerRankRows.findIndex((r) =>
-          r.id !== null && String(r.id) === String(own.id)
-        )
+      ? sorted.findIndex((row) => row.id !== null && String(row.id) === String(own.id))
       : -1;
 
     let html = `<div class="tds-card">`;
     html += `<div class="tds-row"><span class="tds-row-label">Company type</span><span class="tds-row-value">${escapeHtml(String(own.typeName || own.typeId))}${own.typeName ? ` (${escapeHtml(String(own.typeId))})` : ''}</span></div>`;
-    html += `<div class="tds-row"><span class="tds-row-label">Selected rating</span><span class="tds-row-value">${escapeHtml(compareTierLabel(tier, own.rating))}</span></div>`;
-    html += `<div class="tds-row"><span class="tds-row-label">Companies returned</span><span class="tds-row-value">${formatNumber(sorted.length)}</span></div>`;
-
-    if (ownIndex >= 0 && metric) {
-      html += `<div class="tds-row"><span class="tds-row-label">Your rank by ${metricLabel}</span><span class="tds-row-value">#${ownIndex + 1} / ${sorted.length} · ${formatPercentile(ownIndex + 1, sorted.length)}</span></div>`;
+    html += `<div class="tds-row"><span class="tds-row-label">Companies fetched</span><span class="tds-row-value">${formatNumber(rows.length)}</span></div>`;
+    if (effectiveOwnRating !== null) {
+      html += `<div class="tds-row"><span class="tds-row-label">Detected rating for comparison</span><span class="tds-row-value">${escapeHtml(String(effectiveOwnRating))}★</span></div>`;
     }
-
+    html += `<div class="tds-row"><span class="tds-row-label">Matching selected rating</span><span class="tds-row-value">${sameRatingFallback ? 'Unavailable in this fetch' : formatNumber(filtered.length)}</span></div>`;
+    if (ownIndex >= 0) {
+      html += `<div class="tds-row"><span class="tds-row-label">Your rank by ${metricLabel}</span><span class="tds-row-value">#${ownIndex + 1} / ${sorted.length}</span></div>`;
+    }
     html += `</div>`;
 
-    if (hasWeeklyIncome || hasDailyIncome) {
-      html += `<div class="tds-section-label">Income performance</div><div class="tds-card">`;
-
-      if (hasWeeklyIncome) {
-        html += `<div class="tds-row"><span class="tds-row-label">Average weekly income</span><span class="tds-row-value">${avgWeeklyIncome !== null ? formatMoney(avgWeeklyIncome) : '—'}</span></div>`;
-        html += `<div class="tds-row"><span class="tds-row-label">Median weekly income</span><span class="tds-row-value">${medianWeeklyIncome !== null ? formatMoney(medianWeeklyIncome) : '—'}</span></div>`;
-        if (ownWeeklyIncome !== null) {
-          html += `<div class="tds-row"><span class="tds-row-label">Your weekly income vs average</span><span class="tds-row-value">${formatSignedPercent(percentageDifference(ownWeeklyIncome, avgWeeklyIncome))}</span></div>`;
-          html += `<div class="tds-row"><span class="tds-row-label">Your weekly income vs median</span><span class="tds-row-value">${formatSignedPercent(percentageDifference(ownWeeklyIncome, medianWeeklyIncome))}</span></div>`;
-          if (totalWeeklyIncome > 0) {
-            html += `<div class="tds-row"><span class="tds-row-label">Share of returned weekly income</span><span class="tds-row-value">${((ownWeeklyIncome / totalWeeklyIncome) * 100).toFixed(2)}%</span></div>`;
-          }
-        }
-      }
-
-      if (hasDailyIncome) {
-        html += `<div class="tds-row"><span class="tds-row-label">Average daily income</span><span class="tds-row-value">${avgDailyIncome !== null ? formatMoney(avgDailyIncome) : '—'}</span></div>`;
-        html += `<div class="tds-row"><span class="tds-row-label">Median daily income</span><span class="tds-row-value">${medianDailyIncome !== null ? formatMoney(medianDailyIncome) : '—'}</span></div>`;
-      }
-
-      if (ownIndex >= 0 && metric) {
-        html += `<div class="tds-row"><span class="tds-row-label">Gap to company above you</span><span class="tds-row-value">${gapToAbove !== null ? (gapToAbove === 0 ? 'You are #1' : formatMoney(gapToAbove)) : '—'}</span></div>`;
-        html += `<div class="tds-row"><span class="tds-row-label">Gap to #1</span><span class="tds-row-value">${gapToLeader !== null ? (gapToLeader === 0 ? 'You are #1' : formatMoney(gapToLeader)) : '—'}</span></div>`;
-      }
-
-      html += `</div>`;
-    }
-
-    if (hasWeeklyCustomers || hasDailyCustomers) {
-      html += `<div class="tds-section-label">Customer performance</div><div class="tds-card">`;
-
-      if (hasWeeklyCustomers) {
-        html += `<div class="tds-row"><span class="tds-row-label">Average weekly customers</span><span class="tds-row-value">${avgWeeklyCustomers !== null ? formatNumber(Math.round(avgWeeklyCustomers)) : '—'}</span></div>`;
-        html += `<div class="tds-row"><span class="tds-row-label">Median weekly customers</span><span class="tds-row-value">${medianWeeklyCustomers !== null ? formatNumber(Math.round(medianWeeklyCustomers)) : '—'}</span></div>`;
-        if (ownWeeklyCustomerIndex >= 0) {
-          html += `<div class="tds-row"><span class="tds-row-label">Your weekly-customer rank</span><span class="tds-row-value">#${ownWeeklyCustomerIndex + 1} / ${weeklyCustomerRankRows.length}</span></div>`;
-        }
-      }
-
-      if (hasDailyCustomers) {
-        html += `<div class="tds-row"><span class="tds-row-label">Average daily customers</span><span class="tds-row-value">${avgDailyCustomers !== null ? formatNumber(Math.round(avgDailyCustomers)) : '—'}</span></div>`;
-        html += `<div class="tds-row"><span class="tds-row-label">Median daily customers</span><span class="tds-row-value">${medianDailyCustomers !== null ? formatNumber(Math.round(medianDailyCustomers)) : '—'}</span></div>`;
-      }
-
-      html += `</div>`;
-    }
-
-    if ((hasWeeklyIncome && hasWeeklyCustomers) || (hasDailyIncome && hasDailyCustomers)) {
-      html += `<div class="tds-section-label">Revenue efficiency</div><div class="tds-card">`;
-
-      if (hasWeeklyIncome && hasWeeklyCustomers) {
-        html += `<div class="tds-row"><span class="tds-row-label">Average weekly revenue / customer</span><span class="tds-row-value">${avgWeeklyRpc !== null ? formatMoney(avgWeeklyRpc) : '—'}</span></div>`;
-        html += `<div class="tds-row"><span class="tds-row-label">Median weekly revenue / customer</span><span class="tds-row-value">${medianWeeklyRpc !== null ? formatMoney(medianWeeklyRpc) : '—'}</span></div>`;
-        if (ownWeeklyRpc !== null) {
-          html += `<div class="tds-row"><span class="tds-row-label">Your weekly revenue / customer</span><span class="tds-row-value">${formatMoney(ownWeeklyRpc)}</span></div>`;
-          html += `<div class="tds-row"><span class="tds-row-label">Your efficiency vs average</span><span class="tds-row-value">${formatSignedPercent(percentageDifference(ownWeeklyRpc, avgWeeklyRpc))}</span></div>`;
-        }
-        if (ownWeeklyRpcIndex >= 0) {
-          html += `<div class="tds-row"><span class="tds-row-label">Revenue / customer rank</span><span class="tds-row-value">#${ownWeeklyRpcIndex + 1} / ${weeklyRpcRows.length}</span></div>`;
-        }
-      }
-
-      if (hasDailyIncome && hasDailyCustomers && ownDailyRpc !== null) {
-        html += `<div class="tds-row"><span class="tds-row-label">Your daily revenue / customer</span><span class="tds-row-value">${formatMoney(ownDailyRpc)}</span></div>`;
-        if (avgDailyRpc !== null) {
-          html += `<div class="tds-row"><span class="tds-row-label">Daily efficiency vs average</span><span class="tds-row-value">${formatSignedPercent(percentageDifference(ownDailyRpc, avgDailyRpc))}</span></div>`;
-        }
-      }
-
-      html += `</div>`;
-    }
-
-    const availableFinancialFields = [
-      hasDailyIncome ? 'Daily income' : null,
-      hasWeeklyIncome ? 'Weekly income' : null,
-      hasDailyCustomers ? 'Daily customers' : null,
-      hasWeeklyCustomers ? 'Weekly customers' : null,
-    ].filter(Boolean);
-
-    if (!availableFinancialFields.length) {
+    if (sameRatingFallback) {
       html += `<div class="tds-box tds-box-warn">
-        Torn returned the companies, but no financial/customer figures could be matched for these rows.
-        ${snapshotError
-          ? `The Company Snapshot fallback also failed: ${escapeHtml(String(snapshotError.reason || 'unknown error'))}.`
-          : 'Compare will not invent financial values.'}
-      </div>`;
-    } else {
-      html += `<div class="tds-box tds-box-info">
-        Financial fields available: <strong>${escapeHtml(availableFinancialFields.join(', '))}</strong>.
-        ${snapshotUsed ? 'Missing search values were filled from Torn’s daily Company Snapshot.' : 'These values were supplied directly by Torn’s company search response.'}
+        <strong>Same Rating could not be matched from this response.</strong>
+        ${!hasRatingData
+          ? 'The companies returned by Torn did not expose a usable rating field in this fetch.'
+          : effectiveOwnRating === null
+            ? 'Your own company rating could not be identified reliably.'
+            : `No company in this fetched page had the detected ${escapeHtml(String(effectiveOwnRating))}★ rating.`}
+        Showing <strong>ALL RATINGS</strong> instead so the Compare tab remains useful.
       </div>`;
     }
 
-    if (sorted.length > 25 || rows.length >= 100) {
-      html += `<div class="tds-box tds-box-warn">
-        Showing <strong>${Math.min(25, sorted.length)} companies</strong> in this table. Summary statistics above use all <strong>${formatNumber(sorted.length)}</strong> companies returned by Torn.
-      </div>`;
+    if (rows.length >= 100) {
+      html += `<div class="tds-box tds-box-warn">Torn returns up to 100 companies per request for this endpoint. This view compares the first 100 returned for your company type, so very large company categories may contain additional companies outside this fetch.</div>`;
     }
 
-    if (ownIndex >= 25 && ownRow) {
-      html += `<div class="tds-box tds-box-info">
-        Your company ranks <strong>#${ownIndex + 1}</strong>, so it falls outside the Top 25 table below.
-        Your figures are still included in all summary statistics.
-      </div>`;
+    if (!sorted.length) {
+      html += `<div class="tds-box tds-box-neutral">No companies in this fetch matched the selected rating band. Try <strong>ALL RATINGS</strong>.</div>`;
+      el.innerHTML = html;
+      return;
     }
 
-    html += `<div class="tds-section-label">Top ${Math.min(25, sorted.length)}${metric ? ` — ${metricLabel}` : ''}</div>`;
-    html += `<div style="overflow-x:auto;"><table class="tds-table tds-compare-table"><thead><tr>
-      <th>#</th>
-      <th>Company</th>
-      <th>★</th>
-      ${hasDailyIncome ? '<th>Daily Income</th>' : ''}
-      ${hasWeeklyIncome ? '<th>Weekly Income</th>' : ''}
-      ${hasDailyCustomers ? '<th>Daily Customers</th>' : ''}
-      ${hasWeeklyCustomers ? '<th>Weekly Customers</th>' : ''}
+    html += `<div class="tds-section-label">Top ${Math.min(15, sorted.length)} — ${metricLabel}</div>`;
+    html += `<div style="overflow-x:auto;"><table class="tds-table"><thead><tr>
+      <th>#</th><th>Company</th><th>★</th><th>Daily Income</th><th>Weekly Income</th><th>Daily Customers</th><th>Weekly Customers</th>
     </tr></thead><tbody>`;
 
-    sorted.slice(0, 25).forEach((row, i) => {
-      const isYou =
-        own.id !== null &&
-        row.id !== null &&
-        String(row.id) === String(own.id);
-
+    sorted.slice(0, 15).forEach((row, i) => {
+      const isYou = own.id !== null && row.id !== null && String(row.id) === String(own.id);
       html += `<tr style="${isYou ? 'color:var(--tds-accent,#3ddc84);font-weight:700;' : ''}">
         <td>${i + 1}</td>
         <td>${escapeHtml(String(row.name ?? `#${row.id ?? '?'}`))}${isYou ? ' (you)' : ''}</td>
-        <td>${row.rating !== null ? `${escapeHtml(String(row.rating))}★` : '—'}</td>
-        ${hasDailyIncome ? `<td class="tds-num">${row.dailyIncome !== null ? formatMoney(row.dailyIncome) : '—'}</td>` : ''}
-        ${hasWeeklyIncome ? `<td class="tds-num">${row.weeklyIncome !== null ? formatMoney(row.weeklyIncome) : '—'}</td>` : ''}
-        ${hasDailyCustomers ? `<td class="tds-num">${row.dailyCustomers !== null ? formatNumber(row.dailyCustomers) : '—'}</td>` : ''}
-        ${hasWeeklyCustomers ? `<td class="tds-num">${row.weeklyCustomers !== null ? formatNumber(row.weeklyCustomers) : '—'}</td>` : ''}
+        <td>${row.rating !== null ? escapeHtml(String(row.rating)) : '—'}</td>
+        <td class="tds-num">${row.dailyIncome !== null ? formatMoney(row.dailyIncome) : '—'}</td>
+        <td class="tds-num">${row.weeklyIncome !== null ? formatMoney(row.weeklyIncome) : '—'}</td>
+        <td class="tds-num">${row.dailyCustomers !== null ? formatNumber(row.dailyCustomers) : '—'}</td>
+        <td class="tds-num">${row.weeklyCustomers !== null ? formatNumber(row.weeklyCustomers) : '—'}</td>
       </tr>`;
     });
 
