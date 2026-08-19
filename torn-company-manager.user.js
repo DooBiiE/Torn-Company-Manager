@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Company Management Suite
 // @namespace    torn-company-management-suite
-// @version      1.3.20
+// @version      1.3.21
 // @description  Local-only company management dashboard for Torn directors, embedded in the Jobs page. No company data ever leaves your browser; only your Torn User ID is checked against a public license list.
 // @author       DooBiiE
 // @match        https://www.torn.com/*
@@ -67,7 +67,7 @@
   // TornPDA does not always expose the legacy GM_info object that desktop
   // userscript managers provide. Try both common metadata APIs, then use the
   // release version as a PDA-safe fallback so the UI never shows vunknown.
-  const TDS_VERSION_FALLBACK = '1.3.20';
+  const TDS_VERSION_FALLBACK = '1.3.21';
   const TDS_VERSION =
     (typeof GM_info !== 'undefined' && GM_info?.script?.version) ||
     (typeof GM !== 'undefined' && GM?.info?.script?.version) ||
@@ -654,6 +654,15 @@
       .tds-compare-table td {
         text-align: center !important;
         vertical-align: middle;
+      }
+      .tds-compare-table thead th {
+        border-bottom: none !important;
+      }
+      .tds-compare-table tbody tr.company-data-row td {
+        border-top: none !important;
+        border-bottom: 2px solid rgba(255,255,255,0.22) !important;
+        padding-top: 10px;
+        padding-bottom: 10px;
       }
       .tds-compare-table td.tds-num { text-align: center !important; }
       .tds-training-debt-table th,
@@ -3394,9 +3403,7 @@
 
     let html = `
       <div class="tds-box tds-box-neutral">
-        Compare is temporarily using the <strong>v1.2.6 PDA-known-good</strong> <code>/company/{typeId}/companies</code> implementation.
-        It automatically detects your company type and compares you only with companies of that same type.
-        This is public/global-cached company data and does not require you to be the director.
+                Compare automatically detects your company type and compares it with other companies of the same type. Rating filters are applied through Torn's company search data, and available financial/customer figures are enriched from the Company Snapshot.
       </div>
 
       <div class="tds-card">
@@ -3864,7 +3871,7 @@
 
     sorted.slice(0, 25).forEach((row, i) => {
       const isYou = ownId !== null && row.id !== null && String(row.id) === String(ownId);
-      html += `<tr style="${isYou ? 'color:var(--tds-accent,#3ddc84);font-weight:700;' : ''}">
+      html += `<tr class="company-data-row" style="${isYou ? 'color:var(--tds-accent,#3ddc84);font-weight:700;' : ''}">
         <td>${i + 1}</td>
         <td>${escapeHtml(String(row.name ?? `#${row.id ?? '?'}`))}${isYou ? ' (you)' : ''}</td>
         <td>${row.rating !== null ? `${row.rating}★` : '—'}</td>
