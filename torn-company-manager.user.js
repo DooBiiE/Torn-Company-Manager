@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Company Management Suite
 // @namespace    torn-company-management-suite
-// @version      1.3.15
+// @version      1.3.16
 // @description  Local-only company management dashboard for Torn directors, embedded in the Jobs page. No company data ever leaves your browser; only your Torn User ID is checked against a public license list.
 // @author       DooBiiE
 // @match        https://www.torn.com/*
@@ -67,7 +67,7 @@
   // TornPDA does not always expose the legacy GM_info object that desktop
   // userscript managers provide. Try both common metadata APIs, then use the
   // release version as a PDA-safe fallback so the UI never shows vunknown.
-  const TDS_VERSION_FALLBACK = '1.3.15';
+  const TDS_VERSION_FALLBACK = '1.3.16';
   const TDS_VERSION =
     (typeof GM_info !== 'undefined' && GM_info?.script?.version) ||
     (typeof GM !== 'undefined' && GM?.info?.script?.version) ||
@@ -3435,13 +3435,59 @@
     }
   }
 
-  function renderBenchmarkResults(panel, data, own) {
+  function averageNumeric(values) {
+    const nums = values.filter((v) => typeof v === 'number' && Number.isFinite(v));
+    if (!nums.length) return null;
+    return nums.reduce((sum, value) => sum + value, 0) / nums.length;
+  }
+
+  function medianNumeric(values) {
+    const nums = values
+      .filter((v) => typeof v === 'number' && Number.isFinite(v))
+      .sort((a, b) => a - b);
+    if (!nums.length) return null;
+    const mid = Math.floor(nums.length / 2);
+    return nums.length % 2 ? nums[mid] : (nums[mid - 1] + nums[mid]) / 2;
+  }
+
+  function percentDiff(value, baseline) {
+    if (typeof value !== 'number' || typeof baseline !== 'number' || baseline === 0) return null;
+    return ((value - baseline) / baseline) * 100;
+  }
+
+  function signedPercent(value) {
+    if (typeof value !== 'number' || !Number.isFinite(value)) return '—';
+    return `${value > 0 ? '+' : ''}${value.toFixed(1)}%`;
+  }
+
+  function compareClass(value, baseline) {
+    if (typeof value !== 'number' || typeof baseline !== 'number') return '';
+    return value >= baseline ? 'tds-v-good' : 'tds-v-bad';
+  }
+
+  function revenuePerCustomer(income, customers) {
+    if (typeof income !== 'number' || typeof customers !== 'number' || customers <= 0) return null;
+    return income / customers;
+  }
+
+  function renderBenchmarkResults(panel, data, ownId, ownRating) {
     const el = panel.querySelector('[data-tabpanel="benchmark"] #tds-bench-results');
     if (!el) return;
 
-    const rows = extractCompareCompanies(data);
+    let rows = [];
+    if (Array.isArray(data)) {
+      rows = data;
+    } else if (data?.companies && Array.isArray(data.companies)) {
+      rows = data.companies;
+    } else if (data?.companies && typeof data.companies === 'object') {
+      rows = Object.values(data.companies);
+    } else if (data && typeof data === 'object') {
+      const arr = Object.values(data).find((v) => Array.isArray(v));
+      if (arr) rows = arr;
+    }
+
     if (!rows.length) {
-      el.innerHTML = `<div class="tds-box tds-box-warn">Torn returned no companies for detected company type ${escapeHtml(String(own.typeName || own.typeId))}. Response fields: ${escapeHtml(Object.keys(data || {}).join(', ') || 'none')}.</div>`;
+      el.innerHTML = `<div class="tds-box tds-box-warn">No comparison companies were returned.</div>`;
       return;
     }
 
@@ -3454,105 +3500,140 @@
       weeklyIncome: numericValue(compareField(row, ['weekly_income', 'weeklyIncome'], /weekly.*income/i)),
       dailyCustomers: numericValue(compareField(row, ['daily_customers', 'dailyCustomers'], /daily.*customer/i)),
       weeklyCustomers: numericValue(compareField(row, ['weekly_customers', 'weeklyCustomers'], /weekly.*customer/i)),
-      employees: numericValue(compareField(row, ['employees', 'employees_current', 'employeesCurrent'], /^employees$|employees.*current/i)),
     }));
 
     const tier = state.benchmark.tier || 'same';
-
-    // If Torn returned our own company in this page, trust the rating from
-    // that same endpoint over any similarly named field found in profile.
-    const ownReturnedRow = own.id !== null
-      ? normalized.find((row) => row.id !== null && String(row.id) === String(own.id))
-      : null;
-    const effectiveOwnRating =
-      ownReturnedRow && ownReturnedRow.rating !== null
-        ? ownReturnedRow.rating
-        : own.rating;
-
-    const hasRatingData = normalized.some((row) => row.rating !== null);
-    let sameRatingFallback = false;
-
     let filtered = normalized.filter((row) => {
       if (tier === 'all') return true;
-      if (tier === 'mid') return row.rating !== null && row.rating >= 3 && row.rating <= 5;
-      if (tier === 'top') return row.rating !== null && row.rating >= 8 && row.rating <= 10;
-      if (tier === 'same') {
-        if (effectiveOwnRating === null || !hasRatingData) return false;
-        return row.rating !== null && Math.abs(row.rating - effectiveOwnRating) < 0.001;
-      }
+      if (row.rating === null) return true;
+      if (tier === 'same') return ownRating !== null ? row.rating === ownRating : true;
+      if (tier === 'mid') return row.rating >= 3 && row.rating <= 5;
+      if (tier === 'top') return row.rating >= 8 && row.rating <= 10;
       return true;
     });
 
-    // Never leave Same Rating looking broken. If the endpoint/page does not
-    // expose enough rating information to form a match, show the fetched
-    // companies and explain why rather than presenting an empty table.
-    if (tier === 'same' && filtered.length === 0) {
-      filtered = normalized;
-      sameRatingFallback = true;
-    }
+    if (!filtered.length) filtered = normalized;
 
-    // Prefer weekly income for a less noisy comparison; fall back to daily.
-    const metric = filtered.some((r) => r.weeklyIncome !== null) ? 'weeklyIncome' : 'dailyIncome';
-    const metricLabel = metric === 'weeklyIncome' ? 'Weekly Income' : 'Daily Income';
+    const hasWeeklyIncome = filtered.some((r) => r.weeklyIncome !== null);
+    const hasDailyIncome = filtered.some((r) => r.dailyIncome !== null);
+    const hasWeeklyCustomers = filtered.some((r) => r.weeklyCustomers !== null);
+    const hasDailyCustomers = filtered.some((r) => r.dailyCustomers !== null);
 
-    const sorted = [...filtered].sort((a, b) => (b[metric] ?? -1) - (a[metric] ?? -1));
-    const ownIndex = own.id !== null
-      ? sorted.findIndex((row) => row.id !== null && String(row.id) === String(own.id))
+    const metric = hasWeeklyIncome ? 'weeklyIncome' : (hasDailyIncome ? 'dailyIncome' : null);
+    const metricLabel = metric === 'weeklyIncome' ? 'Weekly Income' : (metric === 'dailyIncome' ? 'Daily Income' : 'Company');
+
+    const sorted = [...filtered].sort((a, b) => {
+      if (!metric) return String(a.name || '').localeCompare(String(b.name || ''));
+      return (b[metric] ?? -1) - (a[metric] ?? -1);
+    });
+
+    const ownIndex = ownId !== null
+      ? sorted.findIndex((row) => row.id !== null && String(row.id) === String(ownId))
       : -1;
+    const ownRow = ownIndex >= 0 ? sorted[ownIndex] : null;
+
+    const avgWeeklyIncome = averageNumeric(sorted.map((r) => r.weeklyIncome));
+    const medianWeeklyIncome = medianNumeric(sorted.map((r) => r.weeklyIncome));
+    const avgDailyIncome = averageNumeric(sorted.map((r) => r.dailyIncome));
+    const avgWeeklyCustomers = averageNumeric(sorted.map((r) => r.weeklyCustomers));
+    const avgDailyCustomers = averageNumeric(sorted.map((r) => r.dailyCustomers));
+
+    const weeklyRpcRows = sorted
+      .map((r) => ({ row: r, value: revenuePerCustomer(r.weeklyIncome, r.weeklyCustomers) }))
+      .filter((x) => typeof x.value === 'number')
+      .sort((a, b) => b.value - a.value);
+    const avgWeeklyRpc = averageNumeric(weeklyRpcRows.map((x) => x.value));
 
     let html = `<div class="tds-card">`;
-    html += `<div class="tds-row"><span class="tds-row-label">Company type</span><span class="tds-row-value">${escapeHtml(String(own.typeName || own.typeId))}${own.typeName ? ` (${escapeHtml(String(own.typeId))})` : ''}</span></div>`;
-    html += `<div class="tds-row"><span class="tds-row-label">Companies fetched</span><span class="tds-row-value">${formatNumber(rows.length)}</span></div>`;
-    if (effectiveOwnRating !== null) {
-      html += `<div class="tds-row"><span class="tds-row-label">Detected rating for comparison</span><span class="tds-row-value">${escapeHtml(String(effectiveOwnRating))}★</span></div>`;
-    }
-    html += `<div class="tds-row"><span class="tds-row-label">Matching selected rating</span><span class="tds-row-value">${sameRatingFallback ? 'Unavailable in this fetch' : formatNumber(filtered.length)}</span></div>`;
-    if (ownIndex >= 0) {
+    html += `<div class="tds-row"><span class="tds-row-label">Companies returned</span><span class="tds-row-value">${formatNumber(sorted.length)}</span></div>`;
+    if (ownIndex >= 0 && metric) {
       html += `<div class="tds-row"><span class="tds-row-label">Your rank by ${metricLabel}</span><span class="tds-row-value">#${ownIndex + 1} / ${sorted.length}</span></div>`;
     }
     html += `</div>`;
 
-    if (sameRatingFallback) {
-      html += `<div class="tds-box tds-box-warn">
-        <strong>Same Rating could not be matched from this response.</strong>
-        ${!hasRatingData
-          ? 'The companies returned by Torn did not expose a usable rating field in this fetch.'
-          : effectiveOwnRating === null
-            ? 'Your own company rating could not be identified reliably.'
-            : `No company in this fetched page had the detected ${escapeHtml(String(effectiveOwnRating))}★ rating.`}
-        Showing <strong>ALL RATINGS</strong> instead so the Compare tab remains useful.
-      </div>`;
+    if (ownRow) {
+      html += `<div class="tds-section-label">Your company</div><div class="tds-card">`;
+
+      if (ownRow.weeklyIncome !== null) {
+        html += `<div class="tds-row"><span class="tds-row-label">Weekly income</span><span class="tds-row-value ${compareClass(ownRow.weeklyIncome, avgWeeklyIncome)}">${formatMoney(ownRow.weeklyIncome)}</span></div>`;
+        html += `<div class="tds-row"><span class="tds-row-label">vs weekly average</span><span class="tds-row-value ${compareClass(ownRow.weeklyIncome, avgWeeklyIncome)}">${signedPercent(percentDiff(ownRow.weeklyIncome, avgWeeklyIncome))}</span></div>`;
+        html += `<div class="tds-row"><span class="tds-row-label">vs weekly median</span><span class="tds-row-value ${compareClass(ownRow.weeklyIncome, medianWeeklyIncome)}">${signedPercent(percentDiff(ownRow.weeklyIncome, medianWeeklyIncome))}</span></div>`;
+      }
+
+      if (ownRow.dailyIncome !== null) {
+        html += `<div class="tds-row"><span class="tds-row-label">Daily income</span><span class="tds-row-value ${compareClass(ownRow.dailyIncome, avgDailyIncome)}">${formatMoney(ownRow.dailyIncome)}</span></div>`;
+      }
+
+      if (ownRow.weeklyCustomers !== null) {
+        html += `<div class="tds-row"><span class="tds-row-label">Weekly customers</span><span class="tds-row-value ${compareClass(ownRow.weeklyCustomers, avgWeeklyCustomers)}">${formatNumber(ownRow.weeklyCustomers)}</span></div>`;
+      }
+
+      if (ownRow.dailyCustomers !== null) {
+        html += `<div class="tds-row"><span class="tds-row-label">Daily customers</span><span class="tds-row-value ${compareClass(ownRow.dailyCustomers, avgDailyCustomers)}">${formatNumber(ownRow.dailyCustomers)}</span></div>`;
+      }
+
+      const ownRpc = revenuePerCustomer(ownRow.weeklyIncome, ownRow.weeklyCustomers);
+      if (ownRpc !== null) {
+        html += `<div class="tds-row"><span class="tds-row-label">Weekly revenue / customer</span><span class="tds-row-value ${compareClass(ownRpc, avgWeeklyRpc)}">${formatMoney(ownRpc)}</span></div>`;
+      }
+
+      html += `</div>`;
+
+      if (metric && typeof ownRow[metric] === 'number') {
+        const targetRows = [
+          { label: 'Next position', index: ownIndex > 0 ? ownIndex - 1 : null },
+          { label: 'Top 10', index: sorted.length >= 10 ? 9 : null },
+          { label: 'Top 5', index: sorted.length >= 5 ? 4 : null },
+          { label: '#1', index: sorted.length >= 1 ? 0 : null },
+        ];
+
+        html += `<div class="tds-section-label">Targets</div><div class="tds-card">`;
+        targetRows.forEach((target) => {
+          if (target.index === null || target.index < 0 || target.index >= sorted.length) return;
+          if (ownIndex >= 0 && ownIndex <= target.index) {
+            html += `<div class="tds-row"><span class="tds-row-label">${target.label}</span><span class="tds-row-value tds-v-good">Achieved</span></div>`;
+            return;
+          }
+
+          const targetValue = sorted[target.index]?.[metric];
+          if (typeof targetValue !== 'number') return;
+
+          const needed = Math.max(0, targetValue - ownRow[metric] + 1);
+          const pct = ownRow[metric] > 0 ? (needed / ownRow[metric]) * 100 : null;
+          html += `<div class="tds-row"><span class="tds-row-label">${target.label}</span><span class="tds-row-value">${formatMoney(needed)}${pct !== null ? ` (${pct.toFixed(1)}%)` : ''}</span></div>`;
+        });
+        html += `</div>`;
+      }
     }
 
-    if (rows.length >= 100) {
-      html += `<div class="tds-box tds-box-warn">Torn returns up to 100 companies per request for this endpoint. This view compares the first 100 returned for your company type, so very large company categories may contain additional companies outside this fetch.</div>`;
-    }
-
-    if (!sorted.length) {
-      html += `<div class="tds-box tds-box-neutral">No companies in this fetch matched the selected rating band. Try <strong>ALL RATINGS</strong>.</div>`;
-      el.innerHTML = html;
-      return;
-    }
-
-    html += `<div class="tds-section-label">Top ${Math.min(15, sorted.length)} — ${metricLabel}</div>`;
-    html += `<div style="overflow-x:auto;"><table class="tds-table"><thead><tr>
-      <th>#</th><th>Company</th><th>★</th><th>Daily Income</th><th>Weekly Income</th><th>Daily Customers</th><th>Weekly Customers</th>
+    html += `<div class="tds-section-label">Comparison table</div>`;
+    html += `<div style="overflow-x:auto;"><table class="tds-table tds-compare-table"><thead><tr>
+      <th>#</th><th>Company</th><th>★</th>
+      ${hasDailyIncome ? '<th>Daily Income</th>' : ''}
+      ${hasWeeklyIncome ? '<th>Weekly Income</th>' : ''}
+      ${hasDailyCustomers ? '<th>Daily Customers</th>' : ''}
+      ${hasWeeklyCustomers ? '<th>Weekly Customers</th>' : ''}
     </tr></thead><tbody>`;
 
-    sorted.slice(0, 15).forEach((row, i) => {
-      const isYou = own.id !== null && row.id !== null && String(row.id) === String(own.id);
+    sorted.slice(0, 25).forEach((row, i) => {
+      const isYou = ownId !== null && row.id !== null && String(row.id) === String(ownId);
       html += `<tr style="${isYou ? 'color:var(--tds-accent,#3ddc84);font-weight:700;' : ''}">
         <td>${i + 1}</td>
         <td>${escapeHtml(String(row.name ?? `#${row.id ?? '?'}`))}${isYou ? ' (you)' : ''}</td>
-        <td>${row.rating !== null ? escapeHtml(String(row.rating)) : '—'}</td>
-        <td class="tds-num">${row.dailyIncome !== null ? formatMoney(row.dailyIncome) : '—'}</td>
-        <td class="tds-num">${row.weeklyIncome !== null ? formatMoney(row.weeklyIncome) : '—'}</td>
-        <td class="tds-num">${row.dailyCustomers !== null ? formatNumber(row.dailyCustomers) : '—'}</td>
-        <td class="tds-num">${row.weeklyCustomers !== null ? formatNumber(row.weeklyCustomers) : '—'}</td>
+        <td>${row.rating !== null ? `${row.rating}★` : '—'}</td>
+        ${hasDailyIncome ? `<td>${row.dailyIncome !== null ? formatMoney(row.dailyIncome) : '—'}</td>` : ''}
+        ${hasWeeklyIncome ? `<td>${row.weeklyIncome !== null ? formatMoney(row.weeklyIncome) : '—'}</td>` : ''}
+        ${hasDailyCustomers ? `<td>${row.dailyCustomers !== null ? formatNumber(row.dailyCustomers) : '—'}</td>` : ''}
+        ${hasWeeklyCustomers ? `<td>${row.weeklyCustomers !== null ? formatNumber(row.weeklyCustomers) : '—'}</td>` : ''}
       </tr>`;
     });
 
     html += `</tbody></table></div>`;
+
+    if (sorted.length > 25) {
+      html += `<div class="tds-box tds-box-neutral" style="margin-top:10px;">Showing 25 companies in this table. Summary statistics use all ${formatNumber(sorted.length)} companies returned.</div>`;
+    }
+
     el.innerHTML = html;
   }
 
