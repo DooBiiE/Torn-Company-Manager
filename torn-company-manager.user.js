@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Company Management Suite
 // @namespace    torn-company-management-suite
-// @version      1.1.8
+// @version      1.1.9
 // @description  Local-only company management dashboard for Torn directors, embedded in the Jobs page. No company data ever leaves your browser; only your Torn User ID is checked against a public license list.
 // @author       DooBiiE
 // @match        https://www.torn.com/*
@@ -60,11 +60,16 @@
   // 0. CONSTANTS
   // ---------------------------------------------------------------------
   const API_BASE = 'https://api.torn.com';
-  // UI version is read directly from the userscript @version metadata, so
-  // the header and footer always stay in sync with one version source.
-  const TDS_VERSION = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version)
-    ? GM_info.script.version
-    : 'unknown';
+  // Read the UI version from userscript metadata when available. TornPDA may
+  // not expose that metadata API, so a release fallback is provided below.
+  // TornPDA does not always expose the legacy GM_info object that desktop
+  // userscript managers provide. Try both common metadata APIs, then use the
+  // release version as a PDA-safe fallback so the UI never shows vunknown.
+  const TDS_VERSION_FALLBACK = '1.1.9';
+  const TDS_VERSION =
+    (typeof GM_info !== 'undefined' && GM_info?.script?.version) ||
+    (typeof GM !== 'undefined' && GM?.info?.script?.version) ||
+    TDS_VERSION_FALLBACK;
   const STORAGE_KEY_APIKEY = 'tds_api_key';
   const STORAGE_KEY_LAST_RUN_AT = 'tds_last_run_at';
   const STORAGE_KEY_THEME = 'tds_theme';
@@ -431,6 +436,7 @@
         text-transform: uppercase; margin: 16px 0 8px;
       }
       .tds-section-label:first-child { margin-top: 0; }
+      .tds-employee-subheading { font-weight: 800 !important; text-decoration: underline; text-underline-offset: 2px; }
       .tds-card { background: var(--tds-bg-card, #323232); border: 1px solid var(--tds-border, #1a1a1a); border-radius: 8px; padding: 12px 14px; margin-bottom: 10px; }
       .tds-card-title { color: var(--tds-text-icon, #aaaaaa); font-size: 11.5px; margin-bottom: 6px; }
       .tds-row { display: flex; justify-content: space-between; align-items: center; padding: 3px 0; gap: 10px; }
@@ -917,17 +923,48 @@
     html += `<div class="tds-box ${boxClass}"><strong>${escapeHtml(verdict.headline)}</strong><br>${escapeHtml(verdict.detail)}</div>`;
 
     const profile = findRaw(results, 'company', 'profile');
+    const employeesRaw = findRaw(results, 'company', 'employees');
+    const employees = extractEmployeesEntries(employeesRaw);
+
+    // company/profile has changed shape across Torn API versions and can be
+    // returned either flat or wrapped inside objects such as { company: {...} }.
+    // Read the requested fields recursively instead of only printing primitive
+    // top-level properties (which made the Company card appear empty on wrapped
+    // responses).
     if (profile) {
+      const companyName = findValueDeep(profile, ['name', 'company_name']);
+      const companyAge = findValueDeep(profile, ['days_old', 'age', 'company_age']);
+      const popularity = findValueDeep(profile, ['popularity']);
+      const efficiency = findValueDeep(profile, ['efficiency']);
+      const environment = findValueDeep(profile, ['environment', 'environment_rating']);
+      const capacity = findValueDeep(profile, [
+        'employees_capacity', 'employee_capacity', 'max_employees',
+        'maximum_employees', 'capacity'
+      ]);
+
+      const employeeCount = employees.length || numericValue(findValueDeep(profile, [
+        'employees_hired', 'employee_count', 'employees_count', 'num_employees'
+      ]));
+
       html += '<div class="tds-section-label">Company</div><div class="tds-card">';
-      Object.entries(profile).slice(0, 12).forEach(([k, v]) => {
-        if (v && typeof v === 'object') return;
-        html += `<div class="tds-row"><span class="tds-row-label">${escapeHtml(String(k))}</span><span class="tds-row-value">${escapeHtml(String(v))}</span></div>`;
+      html += companyOverviewRow('Name', companyName);
+      html += companyOverviewRow('Age', companyAge, (v) => {
+        const n = numericValue(v);
+        return n !== null ? `${formatNumber(n)} days` : displayValue(v);
+      });
+      html += companyOverviewRow('Popularity', popularity);
+      html += companyOverviewRow('Efficiency', efficiency);
+      html += companyOverviewRow('Environment', environment);
+      html += companyOverviewRow('Employees', employeeCount, (v) => {
+        const current = numericValue(v);
+        const max = numericValue(capacity);
+        if (current !== null && max !== null) return `${formatNumber(current)} / ${formatNumber(max)}`;
+        if (current !== null) return formatNumber(current);
+        if (max !== null) return `— / ${formatNumber(max)}`;
+        return '—';
       });
       html += '</div>';
     }
-
-    const employeesRaw = findRaw(results, 'company', 'employees');
-    const employees = extractEmployeesEntries(employeesRaw);
 
     html += '<div class="tds-section-label">Employees</div>';
     if (employees.length > 0) {
@@ -971,13 +1008,13 @@
 
             <div class="tds-card" style="margin:8px 0 0;">
               <div class="tds-row"><span class="tds-row-label">Days employed</span><span class="tds-row-value">${formatNumber(emp.days_in_company)}</span></div>
-              <div class="tds-section-label" style="margin-top:10px;">Working Stats</div>
+              <div class="tds-section-label tds-employee-subheading" style="margin-top:10px;">Working Stats</div>
               <div class="tds-row"><span class="tds-row-label">Manual Labor</span><span class="tds-row-value">${formatNumber(emp.manual_labor)}</span></div>
               <div class="tds-row"><span class="tds-row-label">Intelligence</span><span class="tds-row-value">${formatNumber(emp.intelligence)}</span></div>
               <div class="tds-row"><span class="tds-row-label">Endurance</span><span class="tds-row-value">${formatNumber(emp.endurance)}</span></div>
 
               ${effectiveness ? `
-                <div class="tds-section-label" style="margin-top:10px;">Effectiveness</div>
+                <div class="tds-section-label tds-employee-subheading" style="margin-top:10px;">Effectiveness</div>
                 <div class="tds-row"><span class="tds-row-label">Working Stats</span><span class="tds-row-value">${formatNumber(effectiveness.working_stats)}</span></div>
                 <div class="tds-row"><span class="tds-row-label">Settled In</span><span class="tds-row-value">${formatNumber(effectiveness.settled_in)}</span></div>
                 <div class="tds-row"><span class="tds-row-label">Director Education</span><span class="tds-row-value">${formatNumber(effectiveness.director_education)}</span></div>
@@ -986,7 +1023,7 @@
               ` : ''}
 
               ${status || lastAction ? `
-                <div class="tds-section-label" style="margin-top:10px;">Status</div>
+                <div class="tds-section-label tds-employee-subheading" style="margin-top:10px;">Status</div>
                 <div class="tds-row"><span class="tds-row-label">Status</span><span class="tds-row-value">${escapeHtml(String(statusText))}</span></div>
                 <div class="tds-row"><span class="tds-row-label">State</span><span class="tds-row-value">${escapeHtml(String(status?.state || '—'))}</span></div>
                 <div class="tds-row"><span class="tds-row-label">Location</span><span class="tds-row-value">${escapeHtml(String(location))}</span></div>
@@ -1251,6 +1288,52 @@
         name: emp.name ?? `#${id}`,
         position: emp.position ?? ''
       }));
+  }
+
+  function normalizeFieldName(name) {
+    return String(name || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  }
+
+  function findValueDeep(obj, preferredNames) {
+    if (!obj || typeof obj !== 'object') return null;
+    const wanted = new Set(preferredNames.map(normalizeFieldName));
+    const seen = new WeakSet();
+    let found = null;
+
+    function walk(value) {
+      if (found !== null || !value || typeof value !== 'object' || seen.has(value)) return;
+      seen.add(value);
+
+      for (const [key, child] of Object.entries(value)) {
+        if (wanted.has(normalizeFieldName(key)) && child !== undefined && child !== null && typeof child !== 'object') {
+          found = child;
+          return;
+        }
+      }
+      for (const child of Object.values(value)) {
+        if (child && typeof child === 'object') walk(child);
+        if (found !== null) return;
+      }
+    }
+
+    walk(obj);
+    return found;
+  }
+
+  function numericValue(value) {
+    if (typeof value === 'number' && Number.isFinite(value)) return value;
+    if (typeof value === 'string' && value.trim() !== '' && Number.isFinite(Number(value))) return Number(value);
+    return null;
+  }
+
+  function displayValue(value) {
+    if (value === undefined || value === null || value === '') return '—';
+    if (typeof value === 'number') return formatNumber(value);
+    return String(value);
+  }
+
+  function companyOverviewRow(label, value, formatter = displayValue) {
+    return `<div class="tds-row"><span class="tds-row-label">${escapeHtml(label)}</span><span class="tds-row-value">${escapeHtml(formatter(value))}</span></div>`;
   }
 
   function findNestedObject(obj, keyPattern) {
