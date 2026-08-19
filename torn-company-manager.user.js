@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Company Management Suite
 // @namespace    torn-company-management-suite
-// @version      1.1.10
+// @version      1.1.11
 // @description  Local-only company management dashboard for Torn directors, embedded in the Jobs page. No company data ever leaves your browser; only your Torn User ID is checked against a public license list.
 // @author       DooBiiE
 // @match        https://www.torn.com/*
@@ -962,7 +962,19 @@
       for (const [key, label] of preferred) {
         const row = profileRows.find((r) => normalizeFieldName(r.key) === normalizeFieldName(key));
         if (!row || shown.has(row.path)) continue;
-        html += companyOverviewRow(label, row.value, formatCompanyValue);
+
+        let formatter = formatCompanyValue;
+        if (label === 'Director') {
+          formatter = (value) => formatDirectorName(value, employees, results);
+        } else if (label === 'Type') {
+          formatter = (value) => formatCompanyType(value, results);
+        } else if (label === 'Company Age') {
+          formatter = formatCompanyAge;
+        } else if (label === 'Daily Income' || label === 'Weekly Income') {
+          formatter = formatCurrency;
+        }
+
+        html += companyOverviewRow(label, row.value, formatter);
         shown.add(row.path);
       }
 
@@ -982,7 +994,11 @@
         const nk = normalizeFieldName(row.key);
         // These are already represented by the combined Employees row.
         if (/^(employeeshired|employeecount|employeescount|numemployees|employeescapacity|employeecapacity|maxemployees|maximumemployees|capacity)$/.test(nk)) continue;
-        html += companyOverviewRow(row.label, row.value, formatCompanyValue);
+
+        let formatter = formatCompanyValue;
+        if (/^(dailyincome|weeklyincome)$/.test(nk)) formatter = formatCurrency;
+        if (/^(daysold|age)$/.test(nk)) formatter = formatCompanyAge;
+        html += companyOverviewRow(row.label, row.value, formatter);
         shown.add(row.path);
       }
       html += '</div>';
@@ -998,7 +1014,9 @@
       if (detailedRows.length) {
         html += '<div class="tds-section-label">Company Details</div><div class="tds-card">';
         for (const row of detailedRows) {
-          html += companyOverviewRow(row.label, row.value, formatCompanyValue);
+          const nk = normalizeFieldName(row.key);
+          const formatter = /^(dailyincome|weeklyincome)$/.test(nk) ? formatCurrency : formatCompanyValue;
+          html += companyOverviewRow(row.label, row.value, formatter);
         }
         html += '</div>';
       }
@@ -1425,6 +1443,116 @@
     if (typeof value === 'boolean') return value ? 'Yes' : 'No';
     if (typeof value === 'number') return formatNumber(value);
     return String(value);
+  }
+
+  function formatCurrency(value) {
+    const n = numericValue(value);
+    if (n === null) return formatCompanyValue(value);
+    return `$${formatNumber(n)}`;
+  }
+
+  function formatCompanyAge(value) {
+    const totalDays = numericValue(value);
+    if (totalDays === null) return formatCompanyValue(value);
+
+    const days = Math.max(0, Math.floor(totalDays));
+    if (days < 365) return `${formatNumber(days)} ${days === 1 ? 'day' : 'days'}`;
+
+    // The API exposes company age as a day count, not a foundation date, so
+    // month values here use 30-day company-age months after each 365-day year.
+    const years = Math.floor(days / 365);
+    const afterYears = days % 365;
+    const months = Math.floor(afterYears / 30);
+    const remainingDays = afterYears % 30;
+    const parts = [`${years} ${years === 1 ? 'year' : 'years'}`];
+    if (months) parts.push(`${months} ${months === 1 ? 'month' : 'months'}`);
+    if (remainingDays || !months) parts.push(`${remainingDays} ${remainingDays === 1 ? 'day' : 'days'}`);
+    return parts.join(', ');
+  }
+
+  function formatDirectorName(value, employees, results) {
+    if (value && typeof value === 'object') {
+      const objectName = findValueDeep(value, ['name', 'player_name', 'username']);
+      if (objectName) return String(objectName);
+      const objectId = findValueDeep(value, ['id', 'player_id', 'user_id']);
+      if (objectId !== null) value = objectId;
+    }
+
+    const directorId = String(value ?? '').trim();
+    if (!directorId) return '—';
+
+    const rosterMatch = (employees || []).find((employee) => String(employee.id) === directorId);
+    if (rosterMatch?.name && !String(rosterMatch.name).startsWith('#')) return String(rosterMatch.name);
+
+    const basic = findRaw(results, 'user', 'basic');
+    const basicId = basic && findValueDeep(basic, ['player_id', 'user_id', 'id']);
+    const basicName = basic && findValueDeep(basic, ['name', 'player_name', 'username']);
+    if (basicId !== null && String(basicId) === directorId && basicName) return String(basicName);
+
+    return String(value);
+  }
+
+  function formatCompanyType(value, results) {
+    if (value && typeof value === 'object') {
+      const name = findValueDeep(value, ['name', 'type_name', 'company_type_name']);
+      const id = findValueDeep(value, ['id', 'type', 'type_id', 'company_type']);
+      if (name && id !== null) return `${name} (${id})`;
+      if (name) return String(name);
+      if (id !== null) value = id;
+    }
+
+    const typeId = numericValue(value);
+    if (typeId === null) return formatCompanyValue(value);
+
+    const reference = findRaw(results, 'torn', 'companies');
+    const typeName = resolveCompanyTypeName(reference, typeId);
+    return typeName ? `${typeName} (${typeId})` : String(typeId);
+  }
+
+  function resolveCompanyTypeName(raw, typeId) {
+    if (!raw || typeof raw !== 'object') return null;
+    const wanted = String(typeId);
+    const seen = new WeakSet();
+    let found = null;
+
+    function walk(value) {
+      if (found || !value || typeof value !== 'object' || seen.has(value)) return;
+      seen.add(value);
+
+      if (!Array.isArray(value) && Object.prototype.hasOwnProperty.call(value, wanted)) {
+        const candidate = value[wanted];
+        if (candidate && typeof candidate === 'object') {
+          const name = findValueDeep(candidate, ['name', 'company_name', 'type_name']);
+          if (name) {
+            found = String(name);
+            return;
+          }
+        } else if (typeof candidate === 'string') {
+          found = candidate;
+          return;
+        }
+      }
+
+      for (const child of Object.values(value)) {
+        if (!child || typeof child !== 'object') continue;
+        const id = findValueDeep(child, ['id', 'type_id', 'company_type']);
+        if (id !== null && String(id) === wanted) {
+          const name = findValueDeep(child, ['name', 'company_name', 'type_name']);
+          if (name) {
+            found = String(name);
+            return;
+          }
+        }
+      }
+
+      for (const child of Object.values(value)) {
+        if (child && typeof child === 'object') walk(child);
+        if (found) return;
+      }
+    }
+
+    walk(raw);
+    return found;
   }
 
   function findNestedObject(obj, keyPattern) {
