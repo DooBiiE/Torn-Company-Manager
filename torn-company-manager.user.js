@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         Torn Company Management Suite
 // @namespace    torn-company-management-suite
-// @version      1.1.0
+// @version      1.1.1
 // @description  Local-only company management dashboard for Torn directors, embedded in the Jobs page. No company data ever leaves your browser; only your Torn User ID is checked against a public license list.
-// @author       DooBiiE
+// @author       you
 // @match        https://www.torn.com/*
 // @grant        GM_xmlhttpRequest
 // @grant        GM_setValue
@@ -83,6 +83,30 @@
   // guesses a license into existence.
   const LICENSE_JSON_URL = 'https://raw.githubusercontent.com/DooBiiE/Torn-Company-Manager/refs/heads/main/licensed-users.json';
   const LICENSE_CACHE_TTL_MS = 60 * 60 * 1000; // 1h -- avoids hitting GitHub raw on every page load/navigation
+
+  // Torn's official Custom Key Builder deep-link format, confirmed against a
+  // real published example (title + one param per section, each a
+  // comma-separated selection list): the base URL, then &title=..., then
+  // &<section>=<selections>. Requesting company:detailed/stock/applications
+  // here is safe even for a non-director -- Torn evaluates the director-only
+  // restriction at QUERY time (per Diagnostics, that's error 7, "Incorrect
+  // ID-entity relation" -- a role check, not a permission-tier check), not
+  // at key-creation time. So one link works whether the requester is
+  // currently the director or not, and if their role changes later the same
+  // key starts returning that data automatically -- no need to regenerate it.
+  const CUSTOM_KEY_TITLE = 'Torn Company Management Suite';
+  const CUSTOM_KEY_SECTIONS = {
+    user: 'basic,workstats,log',
+    company: 'profile,employees,detailed,stock,applications',
+    torn: 'companies',
+  };
+  function buildCustomKeyUrl() {
+    const params = [`title=${encodeURIComponent(CUSTOM_KEY_TITLE)}`];
+    for (const [section, selections] of Object.entries(CUSTOM_KEY_SECTIONS)) {
+      params.push(`${section}=${encodeURIComponent(selections)}`);
+    }
+    return `https://www.torn.com/preferences.php#tab=api?step=addNewKey&${params.join('&')}`;
+  }
 
   const PROBE_PLAN = [
     { section: 'company', selections: 'profile', label: 'Company profile' },
@@ -319,7 +343,8 @@
         headline: 'Employee-level access only',
         detail: 'Roster is visible, but financials/stock/applications are blocked (' +
           directorSignals.map((r) => `${r.selections}: ${r.reason || 'blocked'}`).join('; ') +
-          '). Expected for a non-director key.',
+          '). This is a role check (are you the director of this company), not a key-tier limit — ' +
+          'a higher-access key on the same non-director account will not unlock these.',
       };
     }
     if (directorOkCount > 0 && directorOkCount < directorSignals.length) {
@@ -705,15 +730,27 @@
       <div class="tds-section-label">API Key</div>
       <div class="tds-box tds-box-neutral">Stored only in this browser (Tampermonkey local storage). Never sent anywhere except api.torn.com.</div>
       <div class="tds-box tds-box-warn">
-        <strong>Recommended access level:</strong> Full Access, or a Custom key covering
-        <code>company: profile, employees, detailed, stock, applications</code> and
-        <code>user: basic, workstats, log</code>. <strong>Limited Access may also work</strong> \u2014
-        Torn's preset access levels don't map 1:1 to what's visible to you in-game, so which selections a
-        Limited key actually reaches can only be known by testing it. Check the Diagnostics tab after saving
-        your key: it shows ACCESSIBLE/BLOCKED for every selection this suite uses, which is the real answer
-        for your specific key, not a guess from here.
+        <strong>What actually gates each selection</strong> (confirmed by testing a real key at both Limited
+        and Full Access, not assumed):
+        <ul style="margin:6px 0 0 18px; padding:0;">
+          <li><code>company: detailed, stock, applications</code> \u2014 gated by <strong>being the company
+            director</strong>, not by key tier. These returned BLOCKED (Torn error 7, "Incorrect ID-entity
+            relation") even with a Full Access key belonging to a non-director. No key upgrade fixes this;
+            only the director's own key gets real data here.</li>
+          <li><code>user: log</code> (training history) \u2014 <strong>is</strong> tier-gated: BLOCKED at Limited
+            (error 16, "access level not high enough"), ACCESSIBLE at Full.</li>
+          <li><code>company: profile, employees</code> and <code>user: basic, workstats</code> \u2014 worked at
+            Limited already.</li>
+        </ul>
       </div>
-      <input class="tds-input" id="tds-keyinput" type="text" placeholder="Paste API key here" />
+      <div class="tds-box tds-box-neutral">
+        Rather than handing out a broad Full Access key, use Torn's own Custom Key Builder to request only the
+        selections this suite uses. It's safe to include the director-only ones even if you're not currently
+        the director \u2014 they'll simply stay BLOCKED until your role changes, at which point the same key
+        starts working for them automatically.
+      </div>
+      <button class="tds-btn-ghost" id="tds-custom-key-link">Generate Custom Key Request \u2197</button>
+      <input class="tds-input" id="tds-keyinput" type="text" placeholder="Paste API key here" style="margin-top:8px;" />
       <div style="margin-top:8px; display:flex; gap:8px;">
         <button class="tds-btn" id="tds-savekey">Save key</button>
       </div>
@@ -754,6 +791,14 @@
 
     const keyInput = el.querySelector('#tds-keyinput');
     keyInput.value = GM_getValue(STORAGE_KEY_APIKEY, '');
+
+    // Opens Torn's own key-creation page pre-filled with exactly the
+    // selections this suite uses. This is a plain outbound link the user
+    // clicks themselves — nothing here submits anything on their behalf.
+    el.querySelector('#tds-custom-key-link').addEventListener('click', () => {
+      window.open(buildCustomKeyUrl(), '_blank', 'noopener');
+    });
+
     el.querySelector('#tds-savekey').addEventListener('click', async () => {
       const key = keyInput.value.trim();
       GM_setValue(STORAGE_KEY_APIKEY, key);
