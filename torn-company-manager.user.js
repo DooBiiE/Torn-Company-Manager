@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Company Management Suite
 // @namespace    torn-company-management-suite
-// @version      1.3.33
+// @version      1.3.34
 // @description  Local-only company management dashboard for Torn directors, embedded in the Jobs page. No company data ever leaves your browser; only your Torn User ID is checked against a public license list.
 // @author       DooBiiE
 // @match        https://www.torn.com/*
@@ -67,7 +67,7 @@
   // TornPDA does not always expose the legacy GM_info object that desktop
   // userscript managers provide. Try both common metadata APIs, then use the
   // release version as a PDA-safe fallback so the UI never shows vunknown.
-  const TDS_VERSION_FALLBACK = '1.3.33';
+  const TDS_VERSION_FALLBACK = '1.3.34';
   const TDS_VERSION =
     (typeof GM_info !== 'undefined' && GM_info?.script?.version) ||
     (typeof GM !== 'undefined' && GM?.info?.script?.version) ||
@@ -465,10 +465,16 @@
   }
 
   async function takeSnapshotFromDiagnostic(results) {
-    const snapshot = { timestamp: Date.now(), source: 'api' };
+    const timestamp = Date.now();
+    const snapshot = { timestamp, source: 'api' };
+
     for (const r of results) {
       if (r.status === 'ok') snapshot[`${r.section}_${r.selections}`] = r.raw;
     }
+
+    const performance = performanceRecordFromResults(results, timestamp);
+    if (performance) snapshot.performance = performance;
+
     if (Object.keys(snapshot).length > 2) {
       await LocalDB.put('snapshots', snapshot);
       await pruneSnapshots();
@@ -1977,6 +1983,275 @@
     return [...byDay.values()].sort((a, b) => a.timestamp - b.timestamp);
   }
 
+  // -----------------------------------------------------------------------
+  // COMPANY PERFORMANCE HISTORY
+  // -----------------------------------------------------------------------
+  function firstNumericDeep(obj, names) {
+    for (const name of names) {
+      const value = numericValue(findValueDeep(obj, [name]));
+      if (value !== null) return value;
+    }
+    return null;
+  }
+
+  function performanceRoleSummary(employeesRaw) {
+    const employees = extractEmployeesEntries(employeesRaw);
+    const roleEE = {};
+    const roleHeadcount = {};
+    let totalEE = 0;
+    let employeesWithEE = 0;
+
+    for (const employee of employees) {
+      const role = String(employee.position || 'Unassigned');
+      const ee = getEmployeeEffectiveness(employee.raw);
+      const total = typeof ee?.total === 'number' ? ee.total : null;
+
+      roleHeadcount[role] = (roleHeadcount[role] || 0) + 1;
+
+      if (total !== null) {
+        roleEE[role] = (roleEE[role] || 0) + total;
+        totalEE += total;
+        employeesWithEE += 1;
+      }
+    }
+
+    return {
+      employeeCount: employees.length,
+      employeesWithEE,
+      totalEE,
+      roleEE,
+      roleHeadcount,
+    };
+  }
+
+  function salesCapacityFromRoleEE(roleEE) {
+    let total = 0;
+    let matched = 0;
+
+    for (const [role, value] of Object.entries(roleEE || {})) {
+      if (!/\b(sales?|seller|cashier|retail)\b/i.test(String(role))) continue;
+      if (typeof value !== 'number' || !Number.isFinite(value)) continue;
+      total += value;
+      matched += 1;
+    }
+
+    return matched ? total : null;
+  }
+
+  function buildPerformanceRecord(profile, detailed, employeesRaw, timestamp = Date.now()) {
+    const combined = { ...(profile || {}), ...(detailed || {}) };
+    const roles = performanceRoleSummary(employeesRaw);
+
+    return {
+      timestamp,
+      observed: {
+        dailyIncome: firstNumericDeep(combined, ['daily_income', 'dailyIncome']),
+        weeklyIncome: firstNumericDeep(combined, ['weekly_income', 'weeklyIncome']),
+        dailyCustomers: firstNumericDeep(combined, ['daily_customers', 'dailyCustomers']),
+        weeklyCustomers: firstNumericDeep(combined, ['weekly_customers', 'weeklyCustomers']),
+        popularity: firstNumericDeep(combined, ['popularity']),
+        efficiency: firstNumericDeep(combined, ['efficiency']),
+        environment: firstNumericDeep(combined, ['environment']),
+        employeeCount: roles.employeeCount,
+      },
+      calculated: {
+        totalEE: roles.employeesWithEE ? roles.totalEE : null,
+        salesEE: salesCapacityFromRoleEE(roles.roleEE),
+        roleEE: roles.roleEE,
+        roleHeadcount: roles.roleHeadcount,
+      },
+    };
+  }
+
+  function performanceRecordFromResults(results, timestamp = Date.now()) {
+    if (!results) return null;
+
+    return buildPerformanceRecord(
+      findRaw(results, 'company', 'profile'),
+      findRaw(results, 'company', 'detailed'),
+      findRaw(results, 'company', 'employees'),
+      timestamp
+    );
+  }
+
+  function performanceRecordFromSnapshot(snapshot) {
+    if (!snapshot) return null;
+
+    if (snapshot.performance && snapshot.performance.observed) {
+      return snapshot.performance;
+    }
+
+    return buildPerformanceRecord(
+      snapshot.company_profile,
+      snapshot.company_detailed,
+      snapshot.company_employees,
+      snapshot.timestamp
+    );
+  }
+
+  async function getDailyPerformanceHistory() {
+    const snapshots = await getSnapshotsSorted();
+    const daily = collapseToDaily(snapshots);
+
+    return daily
+      .map(performanceRecordFromSnapshot)
+      .filter(Boolean)
+      .filter((record) => {
+        const observed = record.observed || {};
+        const calculated = record.calculated || {};
+        return [
+          observed.dailyIncome,
+          observed.dailyCustomers,
+          observed.weeklyIncome,
+          observed.weeklyCustomers,
+          calculated.totalEE,
+          calculated.salesEE,
+        ].some((value) => typeof value === 'number');
+      });
+  }
+
+  function pearsonCorrelation(pairs) {
+    const rows = pairs.filter(
+      (pair) =>
+        Array.isArray(pair) &&
+        pair.length === 2 &&
+        typeof pair[0] === 'number' &&
+        Number.isFinite(pair[0]) &&
+        typeof pair[1] === 'number' &&
+        Number.isFinite(pair[1])
+    );
+
+    if (rows.length < 3) return null;
+
+    const xs = rows.map((row) => row[0]);
+    const ys = rows.map((row) => row[1]);
+    const avgX = xs.reduce((sum, value) => sum + value, 0) / xs.length;
+    const avgY = ys.reduce((sum, value) => sum + value, 0) / ys.length;
+
+    let numerator = 0;
+    let xSq = 0;
+    let ySq = 0;
+
+    for (let i = 0; i < rows.length; i += 1) {
+      const dx = xs[i] - avgX;
+      const dy = ys[i] - avgY;
+      numerator += dx * dy;
+      xSq += dx * dx;
+      ySq += dy * dy;
+    }
+
+    if (xSq <= 0 || ySq <= 0) return null;
+    return numerator / Math.sqrt(xSq * ySq);
+  }
+
+  function correlationLabel(value) {
+    if (typeof value !== 'number' || !Number.isFinite(value)) return 'Insufficient variation/data';
+
+    const abs = Math.abs(value);
+    const strength =
+      abs >= 0.75
+        ? 'Strong'
+        : abs >= 0.5
+          ? 'Moderate'
+          : abs >= 0.25
+            ? 'Weak'
+            : 'Very weak';
+
+    return `${strength} ${value >= 0 ? 'positive' : 'negative'} (${value.toFixed(2)})`;
+  }
+
+  function performanceConfidence(historyLength) {
+    if (historyLength >= 14) return 'Medium';
+    if (historyLength >= 7) return 'Low–Medium';
+    return 'Low';
+  }
+
+  function formatPerformanceDate(timestamp) {
+    const d = new Date(timestamp);
+    return d.toLocaleDateString('en-GB', {
+      day: '2-digit',
+      month: 'short',
+    });
+  }
+
+  async function renderOptimizerPerformanceEvidence(container) {
+    const target = container.querySelector('#tds-performance-evidence');
+    if (!target) return;
+
+    try {
+      const history = await getDailyPerformanceHistory();
+
+      if (!history.length) {
+        target.innerHTML = `<div class="tds-box tds-box-neutral">
+          No local performance history yet. Run Diagnostics on future days to build observations.
+        </div>`;
+        return;
+      }
+
+      const latest = history[history.length - 1];
+      const previous = history.length > 1 ? history[history.length - 2] : null;
+      const customerCorrelation = pearsonCorrelation(
+        history.map((row) => [row.calculated?.salesEE, row.observed?.dailyCustomers])
+      );
+      const incomeCorrelation = pearsonCorrelation(
+        history.map((row) => [row.calculated?.salesEE, row.observed?.dailyIncome])
+      );
+
+      let html = `<div class="tds-box tds-box-info">
+        <strong>Performance evidence:</strong>
+        ${formatNumber(history.length)} local daily observation${history.length === 1 ? '' : 's'} available.
+        Confidence: <strong>${escapeHtml(performanceConfidence(history.length))}</strong>.
+        Correlations are observational only and do not prove cause/effect.
+      </div>`;
+
+      html += `<div class="tds-card">
+        <div class="tds-row"><span class="tds-row-label">Latest Sales EE capacity</span><span class="tds-row-value">${typeof latest.calculated?.salesEE === 'number' ? `${formatNumber(Math.round(latest.calculated.salesEE))} EE points` : '—'}</span></div>
+        <div class="tds-row"><span class="tds-row-label">Latest daily customers</span><span class="tds-row-value">${typeof latest.observed?.dailyCustomers === 'number' ? formatNumber(latest.observed.dailyCustomers) : '—'}</span></div>
+        <div class="tds-row"><span class="tds-row-label">Latest daily income</span><span class="tds-row-value">${typeof latest.observed?.dailyIncome === 'number' ? formatMoney(latest.observed.dailyIncome) : '—'}</span></div>
+        <div class="tds-row"><span class="tds-row-label">Sales EE ↔ daily customers</span><span class="tds-row-value">${escapeHtml(correlationLabel(customerCorrelation))}</span></div>
+        <div class="tds-row"><span class="tds-row-label">Sales EE ↔ daily income</span><span class="tds-row-value">${escapeHtml(correlationLabel(incomeCorrelation))}</span></div>
+      </div>`;
+
+      if (previous) {
+        const salesDelta =
+          typeof latest.calculated?.salesEE === 'number' &&
+          typeof previous.calculated?.salesEE === 'number'
+            ? latest.calculated.salesEE - previous.calculated.salesEE
+            : null;
+
+        const customerDelta =
+          typeof latest.observed?.dailyCustomers === 'number' &&
+          typeof previous.observed?.dailyCustomers === 'number'
+            ? latest.observed.dailyCustomers - previous.observed.dailyCustomers
+            : null;
+
+        const incomeDelta =
+          typeof latest.observed?.dailyIncome === 'number' &&
+          typeof previous.observed?.dailyIncome === 'number'
+            ? latest.observed.dailyIncome - previous.observed.dailyIncome
+            : null;
+
+        html += `<div class="tds-section-label">Latest observed change</div><div class="tds-card">
+          <div class="tds-row"><span class="tds-row-label">Sales EE capacity</span><span class="tds-row-value">${salesDelta === null ? '—' : `${salesDelta > 0 ? '+' : ''}${formatNumber(Math.round(salesDelta))} EE points`}</span></div>
+          <div class="tds-row"><span class="tds-row-label">Daily customers</span><span class="tds-row-value">${customerDelta === null ? '—' : `${customerDelta > 0 ? '+' : ''}${formatNumber(customerDelta)}`}</span></div>
+          <div class="tds-row"><span class="tds-row-label">Daily income</span><span class="tds-row-value">${incomeDelta === null ? '—' : `${incomeDelta > 0 ? '+' : ''}${formatMoney(incomeDelta)}`}</span></div>
+        </div>`;
+      }
+
+      html += `<div class="tds-box tds-box-neutral" style="margin-top:10px;">
+        <strong>Observed:</strong> income, customers and company values returned by Torn.<br>
+        <strong>Calculated:</strong> Total EE and role EE capacity computed from the roster.<br>
+        <strong>Estimated:</strong> optimiser recommendations and capacity floors; these are management heuristics.
+      </div>`;
+
+      target.innerHTML = html;
+    } catch (err) {
+      target.innerHTML = `<div class="tds-box tds-box-warn">
+        Local performance history could not be read: ${escapeHtml(String(err?.message || err || 'Unknown error'))}
+      </div>`;
+    }
+  }
+
   // =======================================================================
   // FINANCE TAB
   // =======================================================================
@@ -2138,7 +2413,68 @@
       }
     }
 
-    html += `<div class="tds-box tds-box-neutral" style="margin-top:10px;">One snapshot is taken per diagnostic run, up to ${MAX_SNAPSHOTS} kept locally (oldest pruned first). Run Diagnostics Again when you want a fresh snapshot.</div>`;
+    const performanceHistory = await getDailyPerformanceHistory();
+
+    html += `<div class="tds-section-label">Company Performance History</div>`;
+
+    if (!performanceHistory.length) {
+      html += `<div class="tds-box tds-box-neutral">
+        No usable performance observations yet. Future Diagnostics runs will build this automatically.
+      </div>`;
+    } else {
+      const recent = performanceHistory.slice(-7).reverse();
+
+      html += `<div class="tds-box tds-box-info">
+        Performance History uses the latest locally stored snapshot for each local day.
+        Nothing is backfilled or invented.
+      </div>`;
+
+      html += `<div style="overflow-x:auto;"><table class="tds-table">
+        <thead><tr>
+          <th>Date</th>
+          <th>Daily Income</th>
+          <th>Daily Customers</th>
+          <th>Total EE</th>
+          <th>Sales EE Capacity</th>
+          <th>Employees</th>
+        </tr></thead><tbody>`;
+
+      for (const row of recent) {
+        html += `<tr>
+          <td>${escapeHtml(formatPerformanceDate(row.timestamp))}</td>
+          <td>${typeof row.observed?.dailyIncome === 'number' ? formatMoney(row.observed.dailyIncome) : '—'}</td>
+          <td>${typeof row.observed?.dailyCustomers === 'number' ? formatNumber(row.observed.dailyCustomers) : '—'}</td>
+          <td>${typeof row.calculated?.totalEE === 'number' ? formatNumber(Math.round(row.calculated.totalEE)) : '—'}</td>
+          <td>${typeof row.calculated?.salesEE === 'number' ? `${formatNumber(Math.round(row.calculated.salesEE))} EE` : '—'}</td>
+          <td>${typeof row.observed?.employeeCount === 'number' ? formatNumber(row.observed.employeeCount) : '—'}</td>
+        </tr>`;
+      }
+
+      html += `</tbody></table></div>`;
+
+      const customerCorrelation = pearsonCorrelation(
+        performanceHistory.map((row) => [row.calculated?.salesEE, row.observed?.dailyCustomers])
+      );
+      const incomeCorrelation = pearsonCorrelation(
+        performanceHistory.map((row) => [row.calculated?.salesEE, row.observed?.dailyIncome])
+      );
+
+      html += `<div class="tds-card" style="margin-top:10px;">
+        <div class="tds-row"><span class="tds-row-label">Observations</span><span class="tds-row-value">${formatNumber(performanceHistory.length)}</span></div>
+        <div class="tds-row"><span class="tds-row-label">Sales EE ↔ Daily Customers</span><span class="tds-row-value">${escapeHtml(correlationLabel(customerCorrelation))}</span></div>
+        <div class="tds-row"><span class="tds-row-label">Sales EE ↔ Daily Income</span><span class="tds-row-value">${escapeHtml(correlationLabel(incomeCorrelation))}</span></div>
+        <div class="tds-row"><span class="tds-row-label">Evidence Confidence</span><span class="tds-row-value">${escapeHtml(performanceConfidence(performanceHistory.length))}</span></div>
+      </div>`;
+
+      html += `<div class="tds-box tds-box-neutral" style="margin-top:10px;">
+        <strong>Observed:</strong> Torn-reported company results.
+        <strong>Calculated:</strong> EE totals derived from the employee roster.
+        <strong>Estimated:</strong> optimiser recommendations shown elsewhere in the suite.
+        Correlation is descriptive only and does not prove cause/effect.
+      </div>`;
+    }
+
+    html += `<div class="tds-box tds-box-neutral" style="margin-top:10px;">One snapshot is taken per diagnostic run, up to ${MAX_SNAPSHOTS} kept locally (oldest pruned first). Performance History uses the latest snapshot from each local day.</div>`;
 
     el.innerHTML = html;
   }
@@ -3834,6 +4170,9 @@
       It does not yet know minimum staffing requirements or position-capacity rules.
     </div></div></div>`;
 
+    html += `<div class="tds-section-label">Performance evidence</div>`;
+    html += `<div id="tds-performance-evidence"><div class="tds-box tds-box-neutral">Loading local performance history…</div></div>`;
+
     html += `<div class="tds-section-label">Whole-company balanced optimiser</div>`;
 
     html += `<div class="tds-box tds-box-info">
@@ -4195,6 +4534,9 @@
     </div>`;
 
     el.innerHTML = html;
+    renderOptimizerPerformanceEvidence(el).catch((err) =>
+      console.warn('[TDS] Performance evidence render failed:', err)
+    );
   }
 
   // =======================================================================
