@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Company Management Suite
 // @namespace    torn-company-management-suite
-// @version      1.3.25
+// @version      1.3.26
 // @description  Local-only company management dashboard for Torn directors, embedded in the Jobs page. No company data ever leaves your browser; only your Torn User ID is checked against a public license list.
 // @author       DooBiiE
 // @match        https://www.torn.com/*
@@ -67,7 +67,7 @@
   // TornPDA does not always expose the legacy GM_info object that desktop
   // userscript managers provide. Try both common metadata APIs, then use the
   // release version as a PDA-safe fallback so the UI never shows vunknown.
-  const TDS_VERSION_FALLBACK = '1.3.25';
+  const TDS_VERSION_FALLBACK = '1.3.26';
   const TDS_VERSION =
     (typeof GM_info !== 'undefined' && GM_info?.script?.version) ||
     (typeof GM !== 'undefined' && GM?.info?.script?.version) ||
@@ -650,6 +650,21 @@
         padding-bottom: 8px;
       }
       .tds-optimize-table tbody tr:last-child td { border-bottom: none; }
+      .tds-position-matrix th,
+      .tds-position-matrix td {
+        text-align: center !important;
+        vertical-align: middle;
+        white-space: nowrap;
+      }
+      .tds-position-matrix tbody tr td {
+        border-bottom: 1px solid rgba(255,255,255,0.16);
+        padding-top: 8px;
+        padding-bottom: 8px;
+      }
+      .tds-position-best {
+        font-weight: 700;
+        outline: 1px solid rgba(255,255,255,0.16);
+      }
       .tds-compare-table th,
       .tds-compare-table td {
         text-align: center !important;
@@ -3007,12 +3022,46 @@
     };
   }
 
+  function buildEmployeePositionMatrix(employees, positions) {
+    return employees.map((employee) => {
+      const ee = getEmployeeEffectiveness(employee.raw);
+
+      const cells = positions.map((position) => {
+        const fit = employeePositionFit(employee.raw, position);
+        const estimate = estimateEffectivenessAtPosition(employee.raw, ee, position);
+
+        return {
+          position,
+          fit,
+          estimate,
+        };
+      });
+
+      const ranked = cells
+        .filter((cell) => cell.estimate && typeof cell.estimate.total === 'number')
+        .sort((a, b) =>
+          b.estimate.total - a.estimate.total ||
+          (b.fit?.coverage ?? 0) - (a.fit?.coverage ?? 0)
+        );
+
+      const best = ranked[0] || null;
+
+      return {
+        employee,
+        ee,
+        cells,
+        best,
+      };
+    });
+  }
+
   function renderOptimizeTab(panel) {
     const el = panel.querySelector('[data-tabpanel="optimize"]');
     if (!el) return;
     const results = state.lastResults;
+
     if (!results) {
-      el.innerHTML = `<div class="tds-box tds-box-neutral">Run Diagnostics once so Optimize can read your employee working stats and effectiveness.</div>`;
+      el.innerHTML = `<div class="tds-box tds-box-neutral">Run Diagnostics once so Employee Effectiveness can read employee working stats and position requirements.</div>`;
       return;
     }
 
@@ -3022,328 +3071,171 @@
     const typeId = numericValue(findValueDeep(profile, ['company_type', 'type_id', 'type']));
     const positions = extractPositionRequirements(reference, typeId);
 
-    let html = `<div class="tds-box tds-box-info"><strong>How Employee Effectiveness works:</strong> Current EE is Torn's real employee effectiveness. For each available position, Optimize calculates the Working Stats component using Torn's published work-stat efficiency formula, then carries across the employee's current non-position EE adjustment (Total EE minus Working Stats). The resulting <strong>Estimated EE</strong> is a prediction for comparison, not a live Torn value.</div>`;
+    let html = `<div class="tds-box tds-box-info">
+      <strong>Employee Effectiveness:</strong> current Total EE is Torn's real value.
+      Position estimates change only the position-dependent Working Stats component and retain the employee's current non-position EE adjustment.
+      All recommendations are advisory only.
+    </div>`;
 
     if (!employees.length) {
       el.innerHTML = html + `<div class="tds-box tds-box-danger">No employee data is available.</div>`;
       return;
     }
 
-    const rows = employees.map((employee) => {
-      const ee = getEmployeeEffectiveness(employee.raw);
-      let best = null;
+    if (!positions.length) {
+      el.innerHTML = html + `<div class="tds-box tds-box-warn">No reliable position requirement data was found for this company type, so a position matrix cannot be calculated safely.</div>`;
+      return;
+    }
 
-      if (positions.length) {
-        const ranked = positions
-          .map((position) => {
-            const fit = employeePositionFit(employee.raw, position);
-            const estimate = estimateEffectivenessAtPosition(employee.raw, ee, position);
-            return { position, fit, estimate };
-          })
-          .filter((row) => row.fit && row.estimate)
-          .sort((a, b) =>
-            b.estimate.total - a.estimate.total ||
-            b.estimate.workingStats - a.estimate.workingStats ||
-            b.fit.coverage - a.fit.coverage ||
-            a.fit.shortfall - b.fit.shortfall
-          );
-        best = ranked[0] || null;
-      }
+    const matrix = buildEmployeePositionMatrix(employees, positions);
 
-      return { employee, ee, best };
-    }).sort((a, b) => {
+    // Existing recommendation summary
+    const rows = [...matrix].sort((a, b) => {
       const av = typeof a.ee?.total === 'number' ? a.ee.total : Number.POSITIVE_INFINITY;
       const bv = typeof b.ee?.total === 'number' ? b.ee.total : Number.POSITIVE_INFINITY;
       return av - bv;
     });
 
-    html += `<div class="tds-section-label">Employee effectiveness</div>`;
+    html += `<div class="tds-section-label">Recommended positions</div>`;
     html += `<div style="overflow-x:auto;">
       <table class="tds-table tds-optimize-table">
         <thead>
           <tr>
             <th>Employee</th>
             <th>Current Position</th>
-            <th>Working Stats</th>
-            <th>Settled In</th>
-            <th>Director Ed.</th>
-            <th>Addiction</th>
-            <th>Total EE</th>
-            ${positions.length ? '<th>Best Position</th><th>New Working Stats</th><th>Est. New EE</th><th>Change</th><th>Fit</th>' : ''}
+            <th>Current EE</th>
+            <th>Best Position</th>
+            <th>Est. New EE</th>
+            <th>Change</th>
+            <th>Fit</th>
           </tr>
         </thead>
         <tbody>`;
 
     for (const row of rows) {
-      const { employee, ee, best } = row;
-      const currentTotal = typeof ee?.total === 'number' ? ee.total : null;
-      const estimatedTotal = best?.estimate && typeof best.estimate.total === 'number' ? best.estimate.total : null;
-      const delta = currentTotal !== null && estimatedTotal !== null ? estimatedTotal - currentTotal : null;
-      const deltaText = delta === null ? '—' : `${delta > 0 ? '+' : ''}${formatNumber(delta)}`;
+      const currentTotal = typeof row.ee?.total === 'number' ? row.ee.total : null;
+      const estimatedTotal = row.best?.estimate?.total ?? null;
+      const delta =
+        currentTotal !== null && estimatedTotal !== null
+          ? estimatedTotal - currentTotal
+          : null;
 
-      html += `<tr>`;
-      html += `<td><strong>${escapeHtml(employee.name)}</strong></td>`;
-      html += `<td>${escapeHtml(employee.position || '—')}</td>`;
-      html += `<td>${typeof ee?.workingStats === 'number' ? formatNumber(ee.workingStats) : '—'}</td>`;
-      html += `<td>${typeof ee?.settledIn === 'number' ? formatNumber(ee.settledIn) : '—'}</td>`;
-      html += `<td>${typeof ee?.directorEducation === 'number' ? formatNumber(ee.directorEducation) : '—'}</td>`;
-      html += `<td>${typeof ee?.addiction === 'number' ? formatNumber(ee.addiction) : '—'}</td>`;
-      html += `<td><strong>${currentTotal !== null ? formatNumber(currentTotal) : '—'}</strong></td>`;
+      const deltaClass =
+        delta === null
+          ? ''
+          : delta > 0
+            ? 'tds-v-good'
+            : delta < 0
+              ? 'tds-v-bad'
+              : '';
 
-      if (positions.length) {
-        html += `<td>${best ? escapeHtml(best.position.name) : '—'}</td>`;
-        html += `<td>${best?.estimate ? formatNumber(best.estimate.workingStats) : '—'}</td>`;
-        html += `<td><strong>${estimatedTotal !== null ? formatNumber(estimatedTotal) : '—'}</strong></td>`;
-        html += `<td><strong>${deltaText}</strong></td>`;
-        html += `<td>${best ? `${best.fit.coverage}%` : '—'}</td>`;
+      html += `<tr>
+        <td><strong>${escapeHtml(row.employee.name)}</strong></td>
+        <td>${escapeHtml(row.employee.position || '—')}</td>
+        <td>${currentTotal !== null ? formatNumber(currentTotal) : '—'}</td>
+        <td>${row.best ? escapeHtml(row.best.position.name) : '—'}</td>
+        <td>${estimatedTotal !== null ? formatNumber(estimatedTotal) : '—'}</td>
+        <td class="${deltaClass}"><strong>${delta === null ? '—' : `${delta > 0 ? '+' : ''}${formatNumber(delta)}`}</strong></td>
+        <td>${row.best?.fit ? `${row.best.fit.coverage}%` : '—'}</td>
+      </tr>`;
+    }
+
+    html += `</tbody></table></div>`;
+
+    // Full position matrix
+    html += `<div class="tds-section-label">Position matrix</div>`;
+    html += `<div class="tds-box tds-box-neutral">
+      Each cell shows <strong>Estimated Total EE</strong> for that employee in that position.
+      The best estimated position for each employee is highlighted. Hovering/clicking is not required; the estimated EE is shown directly.
+    </div>`;
+
+    html += `<div style="overflow-x:auto;">
+      <table class="tds-table tds-position-matrix">
+        <thead><tr>
+          <th>Employee</th>
+          <th>Current</th>`;
+
+    for (const position of positions) {
+      html += `<th>${escapeHtml(position.name)}</th>`;
+    }
+
+    html += `</tr></thead><tbody>`;
+
+    for (const row of matrix) {
+      html += `<tr>
+        <td><strong>${escapeHtml(row.employee.name)}</strong></td>
+        <td>${escapeHtml(row.employee.position || '—')}</td>`;
+
+      for (const cell of row.cells) {
+        const estimated = cell.estimate?.total ?? null;
+        const current = row.ee?.total ?? null;
+        const delta =
+          estimated !== null && typeof current === 'number'
+            ? estimated - current
+            : null;
+
+        const isBest =
+          row.best &&
+          row.best.position &&
+          row.best.position.name === cell.position.name;
+
+        const cls = isBest
+          ? 'tds-position-best tds-v-good'
+          : (delta !== null && delta < 0 ? 'tds-v-bad' : '');
+
+        const sub =
+          delta === null
+            ? ''
+            : `<div class="tds-v-dim">${delta > 0 ? '+' : ''}${formatNumber(delta)}</div>`;
+
+        html += `<td class="${cls}">
+          <strong>${estimated !== null ? formatNumber(estimated) : '—'}</strong>
+          ${sub}
+        </td>`;
       }
+
       html += `</tr>`;
     }
 
     html += `</tbody></table></div>`;
 
-    if (!positions.length) {
-      html += `<div class="tds-box tds-box-warn" style="margin-top:10px;">No reliable position requirement data was found for company type ${escapeHtml(String(typeId ?? 'unknown'))}, so Optimize is showing Torn's real current effectiveness values without inventing position recommendations.</div>`;
+    // Company-wide opportunity summary
+    const improvements = matrix
+      .map((row) => {
+        const current = row.ee?.total ?? null;
+        const best = row.best?.estimate?.total ?? null;
+        const gain =
+          typeof current === 'number' && typeof best === 'number'
+            ? best - current
+            : null;
+        return { row, gain };
+      })
+      .filter((x) => typeof x.gain === 'number' && x.gain > 0)
+      .sort((a, b) => b.gain - a.gain);
+
+    html += `<div class="tds-section-label">Biggest opportunities</div>`;
+
+    if (!improvements.length) {
+      html += `<div class="tds-box tds-box-info">No employee currently has a higher estimated EE in another position using the available position requirements.</div>`;
     } else {
-      html += `<div class="tds-box tds-box-neutral" style="margin-top:10px;">
-        <strong>Estimated EE:</strong> the target position's calculated Working Stats EE plus the employee's current non-position adjustment.
-        This preserves bonuses/penalties already reflected in Torn's Total EE while changing only the position-dependent Working Stats component.
-        Rows remain sorted by current <strong>Total EE, lowest first</strong>.
-      </div>`;
+      html += `<div class="tds-card">`;
+      improvements.slice(0, 8).forEach((entry) => {
+        html += `<div class="tds-row">
+          <span class="tds-row-label"><strong>${escapeHtml(entry.row.employee.name)}</strong></span>
+          <span class="tds-row-value tds-v-good">
+            ${escapeHtml(entry.row.employee.position || '—')} → ${escapeHtml(entry.row.best.position.name)}
+            · +${formatNumber(entry.gain)} EE
+          </span>
+        </div>`;
+      });
+      html += `</div>`;
     }
+
+    html += `<div class="tds-box tds-box-neutral" style="margin-top:10px;">
+      <strong>Important:</strong> this matrix evaluates employees individually. It does not yet account for the fact that multiple employees may compete for the same limited company position. A future whole-company assignment optimiser can solve that as a separate step.
+    </div>`;
 
     el.innerHTML = html;
-  }
-
-  // -----------------------------------------------------------------------
-  // TRAINING / ROTATIONAL DEBT HELPERS
-  // -----------------------------------------------------------------------
-  function normalizePersonName(value) {
-    return String(value || '')
-      .toLowerCase()
-      .replace(/<[^>]*>/g, '')
-      .replace(/[^a-z0-9]+/g, ' ')
-      .trim()
-      .replace(/\s+/g, ' ');
-  }
-
-  function parseTrainingEvent(entry, employees) {
-    if (!entry) return null;
-
-    const raw = entry.raw || {};
-    const text = String(entry.text || '');
-    if (!/\btrain(?:ed|ing|s)?\b/i.test(text)) return null;
-
-    // Structured recipient fields are preferred. Avoid a plain `user_id`
-    // first because some log shapes use it for the director/trainer.
-    const structuredId = pickNumeric(raw, [
-      'employee_id', 'target_id', 'recipient_id', 'trained_id',
-      'employee', 'target', 'recipient'
-    ]);
-
-    const structuredName = pickText(raw, [
-      'employee_name', 'target_name', 'recipient_name', 'trained_name',
-      'employee', 'target', 'recipient'
-    ]);
-
-    let employee = null;
-
-    if (structuredId !== null) {
-      employee = employees.find((e) => String(e.id) === String(structuredId)) || null;
-    }
-
-    if (!employee && structuredName) {
-      const wanted = normalizePersonName(structuredName);
-      employee = employees.find((e) => normalizePersonName(e.name) === wanted) || null;
-    }
-
-    // Most Torn company-news/log messages include the recipient's visible
-    // name. Match longest names first so one employee's name does not become
-    // a substring match inside another employee's name.
-    if (!employee) {
-      const normalizedText = normalizePersonName(text);
-      const byLength = [...employees].sort((a, b) => String(b.name).length - String(a.name).length);
-      employee = byLength.find((e) => {
-        const n = normalizePersonName(e.name);
-        return n && (` ${normalizedText} `).includes(` ${n} `);
-      }) || null;
-    }
-
-    if (!employee) return null;
-
-    let quantity = pickNumeric(raw, [
-      'quantity', 'qty', 'count', 'trains', 'train_count', 'amount'
-    ]);
-
-    if (quantity === null) {
-      const patterns = [
-        /(\d[\d,]*)\s+trains?\b/i,
-        /\btrains?\s*[x×:]?\s*(\d[\d,]*)\b/i,
-        /\btrained\b.*?\b(\d[\d,]*)\s+times?\b/i,
-      ];
-      for (const pattern of patterns) {
-        const m = text.match(pattern);
-        if (!m) continue;
-        quantity = Number(String(m[1]).replace(/,/g, ''));
-        break;
-      }
-    }
-
-    // A normal Torn "trained employee" event represents one train unless an
-    // explicit quantity is present.
-    if (quantity === null) quantity = 1;
-    if (!Number.isFinite(quantity) || quantity <= 0) return null;
-
-    return {
-      eventId: String(entry.id || ''),
-      timestamp: Number(entry.timestamp),
-      employeeId: String(employee.id),
-      employeeName: employee.name,
-      quantity,
-      text,
-    };
-  }
-
-  function collectTrainingEvents(raw, employees) {
-    const sourceEntries = flattenNewsEntries(raw);
-    const events = [];
-    const seen = new Set();
-
-    for (const entry of sourceEntries) {
-      const parsed = parseTrainingEvent(entry, employees);
-      if (!parsed) continue;
-
-      const key = parsed.eventId
-        ? `id:${parsed.eventId}`
-        : `${parsed.timestamp}|${parsed.employeeId}|${parsed.quantity}`;
-
-      if (seen.has(key)) continue;
-      seen.add(key);
-      events.push(parsed);
-    }
-
-    events.sort((a, b) => b.timestamp - a.timestamp);
-    return { sourceEntries, events };
-  }
-
-  function mergeTrainingEventSources(primary, secondary) {
-    const rows = [...(primary || []), ...(secondary || [])]
-      .sort((a, b) => b.timestamp - a.timestamp);
-
-    const merged = [];
-    for (const event of rows) {
-      // The same train can appear in both company/news and user/log with
-      // different event IDs. Treat matching employee/quantity within a
-      // two-second window as the same action.
-      const duplicate = merged.some((existing) =>
-        existing.employeeId === event.employeeId &&
-        existing.quantity === event.quantity &&
-        Math.abs(existing.timestamp - event.timestamp) <= 2
-      );
-      if (!duplicate) merged.push(event);
-    }
-    return merged;
-  }
-
-  function formatTrainingCoverage(timestamp) {
-    if (!timestamp) return 'Unknown';
-    const ms = Number(timestamp) * 1000;
-    const days = Math.max(0, Math.floor((Date.now() - ms) / 86400000));
-    if (days < 1) return 'Less than 1 day';
-    return `${formatNumber(days)} day${days === 1 ? '' : 's'}`;
-  }
-
-  function calculateRotationalDebt(employees, events, coverageStart) {
-    const now = Math.floor(Date.now() / 1000);
-    const THREE_DAYS = 3 * 86400;
-
-    const actualByEmployee = new Map();
-    const lastTrainByEmployee = new Map();
-    const trains7ByEmployee = new Map();
-    const trains30ByEmployee = new Map();
-    const sevenAgo = now - 7 * 86400;
-    const thirtyAgo = now - 30 * 86400;
-
-    for (const event of events) {
-      const id = String(event.employeeId);
-      actualByEmployee.set(id, (actualByEmployee.get(id) || 0) + event.quantity);
-
-      const prev = lastTrainByEmployee.get(id);
-      if (!prev || event.timestamp > prev) lastTrainByEmployee.set(id, event.timestamp);
-
-      if (event.timestamp >= sevenAgo) {
-        trains7ByEmployee.set(id, (trains7ByEmployee.get(id) || 0) + event.quantity);
-      }
-      if (event.timestamp >= thirtyAgo) {
-        trains30ByEmployee.set(id, (trains30ByEmployee.get(id) || 0) + event.quantity);
-      }
-    }
-
-    const rows = employees.map((employee) => {
-      const days = numericValue(employee.raw?.days_in_company) ?? 0;
-      const joinedAt = now - Math.max(0, days) * 86400;
-      const eligibleAt = joinedAt + THREE_DAYS;
-      const fairStart = Math.max(coverageStart || now, eligibleAt);
-      const eligibleSeconds = Math.max(0, now - fairStart);
-      const eligibleWeight = eligibleSeconds / 86400;
-
-      return {
-        employee,
-        eligibleWeight,
-        actual: actualByEmployee.get(String(employee.id)) || 0,
-        lastTrain: lastTrainByEmployee.get(String(employee.id)) || null,
-        trains7: trains7ByEmployee.get(String(employee.id)) || 0,
-        trains30: trains30ByEmployee.get(String(employee.id)) || 0,
-      };
-    });
-
-    const totalObserved = rows.reduce((sum, row) => sum + row.actual, 0);
-    const totalWeight = rows.reduce((sum, row) => sum + row.eligibleWeight, 0);
-
-    for (const row of rows) {
-      row.expected = totalWeight > 0
-        ? totalObserved * (row.eligibleWeight / totalWeight)
-        : 0;
-      row.debt = row.expected - row.actual;
-    }
-
-    rows.sort((a, b) =>
-      b.debt - a.debt ||
-      (a.lastTrain || 0) - (b.lastTrain || 0) ||
-      String(a.employee.name).localeCompare(String(b.employee.name))
-    );
-
-    return { rows, totalObserved, totalWeight };
-  }
-
-  async function fetchTrainingHistorySources(results) {
-    const diagnosticNews = findRaw(results, 'company', 'news');
-    const diagnosticLog = findRaw(results, 'user', 'log');
-
-    let newsRaw = diagnosticNews;
-    let logRaw = diagnosticLog;
-    let newsError = null;
-    let logError = null;
-
-    if (!newsRaw) {
-      try {
-        // Reuse the already rate-limited/cached company news helper. It asks
-        // Torn for a recent history window and gracefully falls back when
-        // from/to are not accepted by a particular API shape.
-        newsRaw = await fetchCompanyNewsForStock();
-      } catch (err) {
-        newsError = err;
-      }
-    }
-
-    // `user/log` remains a fallback/second source because directors' personal
-    // logs can contain the same training actions. Do not make an extra request
-    // here if Diagnostics did not already return it.
-    if (!logRaw) {
-      logError = findBlockedReason(results, 'user', 'log');
-    }
-
-    return { newsRaw, logRaw, newsError, logError };
   }
 
   // =======================================================================
