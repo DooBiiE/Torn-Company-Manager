@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Company Management Suite
 // @namespace    torn-company-management-suite
-// @version      1.3.6
+// @version      1.3.7
 // @updateURL    https://raw.githubusercontent.com/DooBiiE/Torn-Company-Manager/main/torn-company-manager.user.js
 // @downloadURL  https://raw.githubusercontent.com/DooBiiE/Torn-Company-Manager/main/torn-company-manager.user.js
 // @description  Local-only company management dashboard for Torn directors, embedded in the Jobs page. No company data ever leaves your browser; only your Torn User ID is checked against a public license list.
@@ -61,6 +61,21 @@
   'use strict';
 
   // ---------------------------------------------------------------------
+  // TornPDA compatibility shims
+  // ---------------------------------------------------------------------
+  // TornPDA does not expose every legacy Greasemonkey helper. This suite has
+  // no @resource entries, so returning an empty value is safe if a wrapper
+  // probes these functions.
+  if (typeof globalThis.GM_getResourceText !== 'function') {
+    globalThis.GM_getResourceText = function () { return ''; };
+  }
+  if (typeof globalThis.GM_getResourceURL !== 'function') {
+    globalThis.GM_getResourceURL = function () { return ''; };
+  }
+
+  console.log('[TDS] v1.3.7 script started');
+
+  // ---------------------------------------------------------------------
   // 0. CONSTANTS
   // ---------------------------------------------------------------------
   const API_BASE = 'https://api.torn.com';
@@ -69,15 +84,21 @@
   // TornPDA does not always expose the legacy GM_info object that desktop
   // userscript managers provide. Try both common metadata APIs, then use the
   // release version as a PDA-safe fallback so the UI never shows vunknown.
-  const TDS_VERSION_FALLBACK = '1.3.6';
+  const TDS_VERSION_FALLBACK = '1.3.7';
 // Update distribution uses the same GitHub-hosted .user.js for both version
 // checks and downloads. Release process: bump @version + this fallback, then
 // replace torn-company-manager.user.js on the main branch.
 
-  const TDS_VERSION =
-    (typeof GM_info !== 'undefined' && GM_info?.script?.version) ||
-    (typeof GM !== 'undefined' && GM?.info?.script?.version) ||
-    TDS_VERSION_FALLBACK;
+  let TDS_VERSION = TDS_VERSION_FALLBACK;
+  try {
+    if (typeof GM_info !== 'undefined' && GM_info && GM_info.script && GM_info.script.version) {
+      TDS_VERSION = GM_info.script.version;
+    } else if (typeof GM !== 'undefined' && GM && GM.info && GM.info.script && GM.info.script.version) {
+      TDS_VERSION = GM.info.script.version;
+    }
+  } catch (_) {
+    TDS_VERSION = TDS_VERSION_FALLBACK;
+  }
   const STORAGE_KEY_APIKEY = 'tds_api_key';
   const STORAGE_KEY_LAST_RUN_AT = 'tds_last_run_at';
   const STORAGE_KEY_THEME = 'tds_theme';
