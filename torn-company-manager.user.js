@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Company Management Suite
 // @namespace    torn-company-management-suite
-// @version      1.3.34
+// @version      1.3.35
 // @description  Local-only company management dashboard for Torn directors, embedded in the Jobs page. No company data ever leaves your browser; only your Torn User ID is checked against a public license list.
 // @author       DooBiiE
 // @match        https://www.torn.com/*
@@ -67,7 +67,7 @@
   // TornPDA does not always expose the legacy GM_info object that desktop
   // userscript managers provide. Try both common metadata APIs, then use the
   // release version as a PDA-safe fallback so the UI never shows vunknown.
-  const TDS_VERSION_FALLBACK = '1.3.34';
+  const TDS_VERSION_FALLBACK = '1.3.35';
   const TDS_VERSION =
     (typeof GM_info !== 'undefined' && GM_info?.script?.version) ||
     (typeof GM !== 'undefined' && GM?.info?.script?.version) ||
@@ -78,7 +78,7 @@
   const STORAGE_KEY_LICENSE_CACHE = 'tds_license_cache';
   const MIN_CALL_INTERVAL_MS = 800; // ~75 req/min ceiling, well under Torn's 100/min cap
   const DB_NAME = 'torn_director_system';
-  const DB_VERSION = 1;
+  const DB_VERSION = 2;
 
   // Public list of licensed Torn User IDs. Only the numeric User ID (read
   // from user/basic, EXACT) is compared against this -- no API key or
@@ -369,6 +369,10 @@
           if (!db.objectStoreNames.contains('diagnostics')) {
             db.createObjectStore('diagnostics', { keyPath: 'timestamp' });
           }
+          if (!db.objectStoreNames.contains('performance')) {
+            const store = db.createObjectStore('performance', { keyPath: 'day' });
+            store.createIndex('timestamp', 'timestamp');
+          }
         };
         req.onsuccess = () => resolve(req.result);
         req.onerror = () => reject(req.error);
@@ -428,7 +432,8 @@
     return { put, getAll, deleteKey, getLatest, clear };
   })();
 
-  const MAX_SNAPSHOTS = 120; // matches the "120 max stored locally" retention policy
+  const MAX_SNAPSHOTS = 120; // full/raw snapshots: intentionally limited
+  const MAX_PERFORMANCE_DAYS = 730; // compact daily records: rolling 2-year history
 
   async function pruneSnapshots() {
     const all = await LocalDB.getAll('snapshots');
@@ -436,6 +441,18 @@
     all.sort((a, b) => a.timestamp - b.timestamp);
     const toRemove = all.slice(0, all.length - MAX_SNAPSHOTS);
     for (const row of toRemove) await LocalDB.deleteKey('snapshots', row.id);
+  }
+
+  async function prunePerformanceHistory() {
+    const all = await LocalDB.getAll('performance');
+    if (all.length <= MAX_PERFORMANCE_DAYS) return;
+
+    all.sort((a, b) => Number(a.timestamp || 0) - Number(b.timestamp || 0));
+    const toRemove = all.slice(0, all.length - MAX_PERFORMANCE_DAYS);
+
+    for (const row of toRemove) {
+      await LocalDB.deleteKey('performance', row.day);
+    }
   }
 
   // ---------------------------------------------------------------------
@@ -473,7 +490,10 @@
     }
 
     const performance = performanceRecordFromResults(results, timestamp);
-    if (performance) snapshot.performance = performance;
+    if (performance) {
+      snapshot.performance = performance;
+      await saveCompactPerformanceRecord(performance);
+    }
 
     if (Object.keys(snapshot).length > 2) {
       await LocalDB.put('snapshots', snapshot);
@@ -796,6 +816,24 @@
       .tds-stock-summary-value {
         font-size: 17px;
         font-weight: 700;
+      }
+      .tds-performance-history th,
+      .tds-performance-history td {
+        text-align: center !important;
+        vertical-align: middle;
+      }
+      .tds-performance-history tbody tr td {
+        border-bottom: 1px solid rgba(255,255,255,0.14);
+        padding-top: 8px;
+        padding-bottom: 8px;
+      }
+      .tds-history-high {
+        font-weight: 700;
+        box-shadow: inset 0 0 0 1px rgba(80,220,130,0.35);
+      }
+      .tds-history-low {
+        font-weight: 700;
+        box-shadow: inset 0 0 0 1px rgba(230,90,90,0.35);
       }
       .tds-spark { display: flex; align-items: flex-end; gap: 4px; height: 46px; margin: 6px 0; }
       .tds-spark-col { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 3px; }
@@ -1968,6 +2006,14 @@
     return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
   }
 
+  function isoDayKey(ts) {
+    const d = new Date(ts);
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${y}-${m}-${day}`;
+  }
+
   async function getSnapshotsSorted() {
     const all = await LocalDB.getAll('snapshots');
     return all.sort((a, b) => a.timestamp - b.timestamp);
@@ -2043,7 +2089,9 @@
     const roles = performanceRoleSummary(employeesRaw);
 
     return {
+      day: isoDayKey(timestamp),
       timestamp,
+      source: 'local',
       observed: {
         dailyIncome: firstNumericDeep(combined, ['daily_income', 'dailyIncome']),
         weeklyIncome: firstNumericDeep(combined, ['weekly_income', 'weeklyIncome']),
@@ -2090,12 +2138,51 @@
   }
 
   async function getDailyPerformanceHistory() {
-    const snapshots = await getSnapshotsSorted();
-    const daily = collapseToDaily(snapshots);
+    const compact = await LocalDB.getAll('performance');
 
-    return daily
+    // Migrate/use legacy raw snapshots too, so existing users do not lose the
+    // history they already collected before the compact store was introduced.
+    const snapshots = await getSnapshotsSorted();
+    const legacy = collapseToDaily(snapshots)
       .map(performanceRecordFromSnapshot)
-      .filter(Boolean)
+      .filter(Boolean);
+
+    const byDay = new Map();
+
+    for (const record of legacy) {
+      const day = record.day || isoDayKey(record.timestamp);
+      byDay.set(day, {
+        ...record,
+        day,
+        source: record.source || 'local',
+      });
+    }
+
+    // Compact records win because they can include Torn historical backfill.
+    for (const record of compact) {
+      if (!record?.day) continue;
+
+      const existing = byDay.get(record.day);
+      if (!existing) {
+        byDay.set(record.day, record);
+        continue;
+      }
+
+      byDay.set(record.day, {
+        ...existing,
+        ...record,
+        observed: {
+          ...(existing.observed || {}),
+          ...(record.observed || {}),
+        },
+        calculated: {
+          ...(existing.calculated || {}),
+          ...(record.calculated || {}),
+        },
+      });
+    }
+
+    return [...byDay.values()]
       .filter((record) => {
         const observed = record.observed || {};
         const calculated = record.calculated || {};
@@ -2107,7 +2194,107 @@
           calculated.totalEE,
           calculated.salesEE,
         ].some((value) => typeof value === 'number');
+      })
+      .sort((a, b) => Number(a.timestamp || 0) - Number(b.timestamp || 0));
+  }
+
+  async function saveCompactPerformanceRecord(record) {
+    if (!record) return;
+
+    const day = record.day || isoDayKey(record.timestamp || Date.now());
+    const existing = (await LocalDB.getAll('performance')).find((row) => row.day === day);
+
+    const merged = {
+      ...(existing || {}),
+      ...record,
+      day,
+      observed: {
+        ...(existing?.observed || {}),
+        ...(record.observed || {}),
+      },
+      calculated: {
+        ...(existing?.calculated || {}),
+        ...(record.calculated || {}),
+      },
+    };
+
+    await LocalDB.put('performance', merged);
+    await prunePerformanceHistory();
+  }
+
+
+  function snapshotTimestampForDaysAgo(daysAgo) {
+    const d = new Date();
+    d.setHours(12, 0, 0, 0);
+    d.setDate(d.getDate() - daysAgo);
+    return Math.floor(d.getTime() / 1000);
+  }
+
+  async function backfillCompanyPerformanceHistory(companyId, onProgress = null) {
+    if (companyId === null || companyId === undefined) {
+      throw new Error('Company ID is unavailable.');
+    }
+
+    const historyDays = 30;
+    let saved = 0;
+    let unavailable = 0;
+
+    for (let daysAgo = historyDays - 1; daysAgo >= 0; daysAgo -= 1) {
+      const timestampSeconds = snapshotTimestampForDaysAgo(daysAgo);
+      const timestampMs = timestampSeconds * 1000;
+      const day = isoDayKey(timestampMs);
+
+      onProgress?.({
+        day,
+        complete: historyDays - 1 - daysAgo,
+        total: historyDays,
       });
+
+      try {
+        const csv = await ApiClient.callV2Text('company/snapshot', {
+          timestamp: timestampSeconds,
+        });
+
+        const map = buildSnapshotFinancialMap(csv);
+        const row = map.get(String(companyId));
+
+        if (!row) {
+          unavailable += 1;
+          continue;
+        }
+
+        await saveCompactPerformanceRecord({
+          day,
+          timestamp: timestampMs,
+          source: 'torn_snapshot',
+          observed: {
+            dailyIncome: row.dailyIncome,
+            weeklyIncome: row.weeklyIncome,
+            dailyCustomers: row.dailyCustomers,
+            weeklyCustomers: row.weeklyCustomers,
+          },
+          calculated: {
+            totalEE: null,
+            salesEE: null,
+            roleEE: null,
+            roleHeadcount: null,
+          },
+        });
+
+        saved += 1;
+      } catch (err) {
+        // Older-than-retention snapshots legitimately may not exist.
+        unavailable += 1;
+      }
+    }
+
+    onProgress?.({
+      day: null,
+      complete: historyDays,
+      total: historyDays,
+    });
+
+    return { saved, unavailable, requested: historyDays };
   }
 
   function pearsonCorrelation(pairs) {
@@ -2164,6 +2351,43 @@
     if (historyLength >= 14) return 'Medium';
     if (historyLength >= 7) return 'Low–Medium';
     return 'Low';
+  }
+
+  function historyExtrema(history, getter) {
+    const values = history
+      .map((row) => getter(row))
+      .filter((value) => typeof value === 'number' && Number.isFinite(value));
+
+    if (!values.length) return { min: null, max: null };
+
+    return {
+      min: Math.min(...values),
+      max: Math.max(...values),
+    };
+  }
+
+  function extremaClass(value, extrema) {
+    if (typeof value !== 'number' || !extrema) return '';
+
+    if (
+      extrema.max !== null &&
+      extrema.min !== null &&
+      extrema.max !== extrema.min &&
+      value === extrema.max
+    ) {
+      return 'tds-v-good tds-history-high';
+    }
+
+    if (
+      extrema.max !== null &&
+      extrema.min !== null &&
+      extrema.max !== extrema.min &&
+      value === extrema.min
+    ) {
+      return 'tds-v-bad tds-history-low';
+    }
+
+    return '';
   }
 
   function formatPerformanceDate(timestamp) {
@@ -2422,16 +2646,34 @@
         No usable performance observations yet. Future Diagnostics runs will build this automatically.
       </div>`;
     } else {
-      const recent = performanceHistory.slice(-7).reverse();
+      const displayHistory = performanceHistory.slice(-90).reverse();
+
+      const incomeExtrema = historyExtrema(
+        performanceHistory,
+        (row) => row.observed?.dailyIncome
+      );
+      const customerExtrema = historyExtrema(
+        performanceHistory,
+        (row) => row.observed?.dailyCustomers
+      );
+      const totalEEExtrema = historyExtrema(
+        performanceHistory,
+        (row) => row.calculated?.totalEE
+      );
+      const salesEEExtrema = historyExtrema(
+        performanceHistory,
+        (row) => row.calculated?.salesEE
+      );
 
       html += `<div class="tds-box tds-box-info">
-        Performance History uses the latest locally stored snapshot for each local day.
-        Nothing is backfilled or invented.
+        Compact Performance History keeps a rolling <strong>${MAX_PERFORMANCE_DAYS}-day</strong> local log.
+        The table shows up to the most recent 90 days. Green highlights the highest recorded value for that metric; red highlights the lowest.
       </div>`;
 
-      html += `<div style="overflow-x:auto;"><table class="tds-table">
+      html += `<div style="overflow-x:auto;"><table class="tds-table tds-performance-history">
         <thead><tr>
           <th>Date</th>
+          <th>Source</th>
           <th>Daily Income</th>
           <th>Daily Customers</th>
           <th>Total EE</th>
@@ -2439,18 +2681,33 @@
           <th>Employees</th>
         </tr></thead><tbody>`;
 
-      for (const row of recent) {
+      for (const row of displayHistory) {
+        const income = row.observed?.dailyIncome;
+        const customers = row.observed?.dailyCustomers;
+        const totalEE = row.calculated?.totalEE;
+        const salesEE = row.calculated?.salesEE;
+
         html += `<tr>
           <td>${escapeHtml(formatPerformanceDate(row.timestamp))}</td>
-          <td>${typeof row.observed?.dailyIncome === 'number' ? formatMoney(row.observed.dailyIncome) : '—'}</td>
-          <td>${typeof row.observed?.dailyCustomers === 'number' ? formatNumber(row.observed.dailyCustomers) : '—'}</td>
-          <td>${typeof row.calculated?.totalEE === 'number' ? formatNumber(Math.round(row.calculated.totalEE)) : '—'}</td>
-          <td>${typeof row.calculated?.salesEE === 'number' ? `${formatNumber(Math.round(row.calculated.salesEE))} EE` : '—'}</td>
+          <td>${row.source === 'torn_snapshot' ? 'Torn Snapshot' : 'Local'}</td>
+          <td class="${extremaClass(income, incomeExtrema)}">${typeof income === 'number' ? formatMoney(income) : '—'}</td>
+          <td class="${extremaClass(customers, customerExtrema)}">${typeof customers === 'number' ? formatNumber(customers) : '—'}</td>
+          <td class="${extremaClass(totalEE, totalEEExtrema)}">${typeof totalEE === 'number' ? formatNumber(Math.round(totalEE)) : '—'}</td>
+          <td class="${extremaClass(salesEE, salesEEExtrema)}">${typeof salesEE === 'number' ? `${formatNumber(Math.round(salesEE))} EE` : '—'}</td>
           <td>${typeof row.observed?.employeeCount === 'number' ? formatNumber(row.observed.employeeCount) : '—'}</td>
         </tr>`;
       }
 
       html += `</tbody></table></div>`;
+
+      html += `<div class="tds-box tds-box-neutral" style="margin-top:10px;">
+        <strong>Historical backfill:</strong> Torn's Company Snapshot can supply retained historical income/customer figures for dates before this script recorded them.
+        Historical Snapshot rows cannot reconstruct past employee EE or staffing, so those fields remain blank rather than being guessed.
+      </div>
+      <div style="margin-top:10px;">
+        <button class="tds-btn-ghost" id="tds-history-backfill">Backfill available Torn history</button>
+        <span id="tds-history-backfill-status" class="tds-v-dim" style="margin-left:8px;"></span>
+      </div>`;
 
       const customerCorrelation = pearsonCorrelation(
         performanceHistory.map((row) => [row.calculated?.salesEE, row.observed?.dailyCustomers])
@@ -2474,9 +2731,54 @@
       </div>`;
     }
 
-    html += `<div class="tds-box tds-box-neutral" style="margin-top:10px;">One snapshot is taken per diagnostic run, up to ${MAX_SNAPSHOTS} kept locally (oldest pruned first). Performance History uses the latest snapshot from each local day.</div>`;
+    html += `<div class="tds-box tds-box-neutral" style="margin-top:10px;">
+      <strong>Local retention:</strong> full diagnostic snapshots are capped at ${MAX_SNAPSHOTS} because they can be relatively large.
+      Compact Performance History is stored separately and rolls after ${MAX_PERFORMANCE_DAYS} daily records (about 2 years).
+    </div>`;
 
     el.innerHTML = html;
+
+    const backfillButton = el.querySelector('#tds-history-backfill');
+    const backfillStatus = el.querySelector('#tds-history-backfill-status');
+
+    if (backfillButton) {
+      backfillButton.addEventListener('click', async () => {
+        const currentResults = state.lastResults;
+        const own = extractOwnCompanyInfo(currentResults);
+
+        if (own.id === null) {
+          if (backfillStatus) backfillStatus.textContent = 'Company ID unavailable.';
+          return;
+        }
+
+        backfillButton.disabled = true;
+
+        try {
+          const result = await backfillCompanyPerformanceHistory(
+            own.id,
+            (progress) => {
+              if (!backfillStatus) return;
+              backfillStatus.textContent =
+                `Fetching ${progress.complete}/${progress.total}${progress.day ? ` · ${progress.day}` : ''}…`;
+            }
+          );
+
+          if (backfillStatus) {
+            backfillStatus.textContent =
+              `Saved ${result.saved} historical day(s); ${result.unavailable} unavailable.`;
+          }
+
+          await renderFinanceTab(panel);
+        } catch (err) {
+          if (backfillStatus) {
+            backfillStatus.textContent =
+              `Backfill failed: ${String(err?.reason || err?.message || err)}`;
+          }
+        } finally {
+          backfillButton.disabled = false;
+        }
+      });
+    }
   }
 
   // =======================================================================
