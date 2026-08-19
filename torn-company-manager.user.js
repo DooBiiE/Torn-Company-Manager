@@ -3,7 +3,7 @@
 // @namespace    torn-company-management-suite
 // @version      1.1.7
 // @description  Local-only company management dashboard for Torn directors, embedded in the Jobs page. No company data ever leaves your browser; only your Torn User ID is checked against a public license list.
-// @author       you
+// @author       DooBiiE
 // @match        https://www.torn.com/*
 // @grant        GM_xmlhttpRequest
 // @grant        GM_setValue
