@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Company Management Suite
 // @namespace    torn-company-management-suite
-// @version      1.3.29
+// @version      1.3.33
 // @description  Local-only company management dashboard for Torn directors, embedded in the Jobs page. No company data ever leaves your browser; only your Torn User ID is checked against a public license list.
 // @author       DooBiiE
 // @match        https://www.torn.com/*
@@ -67,7 +67,7 @@
   // TornPDA does not always expose the legacy GM_info object that desktop
   // userscript managers provide. Try both common metadata APIs, then use the
   // release version as a PDA-safe fallback so the UI never shows vunknown.
-  const TDS_VERSION_FALLBACK = '1.3.29';
+  const TDS_VERSION_FALLBACK = '1.3.33';
   const TDS_VERSION =
     (typeof GM_info !== 'undefined' && GM_info?.script?.version) ||
     (typeof GM !== 'undefined' && GM?.info?.script?.version) ||
@@ -705,6 +705,30 @@
         justify-content: space-between;
         gap: 12px;
         padding: 3px 0;
+      }
+      .tds-optimizer-summary {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+        gap: 8px;
+        margin: 10px 0;
+      }
+      .tds-optimizer-card {
+        border: 1px solid var(--tds-border, #444);
+        border-radius: 6px;
+        padding: 10px;
+        text-align: center;
+        background: rgba(255,255,255,0.025);
+      }
+      .tds-optimizer-label {
+        font-size: 10px;
+        text-transform: uppercase;
+        letter-spacing: .5px;
+        opacity: .72;
+        margin-bottom: 4px;
+      }
+      .tds-optimizer-value {
+        font-size: 17px;
+        font-weight: 700;
       }
       .tds-compare-table th,
       .tds-compare-table td {
@@ -3375,6 +3399,257 @@
     };
   }
 
+  const CORE_CAPACITY_RETAIN_RATIO = 0.85;
+  const IMPORTANT_CAPACITY_RETAIN_RATIO = 0.70;
+  const STAGED_MOVE_LIMIT = 3;
+
+  function employeeRoleCapacity(row, positionName) {
+    const cell = findMatrixCell(row, positionName);
+    const estimated = cell?.estimate?.total;
+
+    if (typeof estimated === 'number' && Number.isFinite(estimated)) {
+      return Math.max(0, estimated);
+    }
+
+    const current = row.ee?.total;
+    return typeof current === 'number' && Number.isFinite(current)
+      ? Math.max(0, current)
+      : 0;
+  }
+
+  function calculateRoleCapacity(matrix, positionName, assignments = null) {
+    let total = 0;
+
+    if (assignments) {
+      for (const assignment of assignments) {
+        if (assignment.assignedPosition !== positionName) continue;
+        total += employeeRoleCapacity(assignment.row, positionName);
+      }
+      return total;
+    }
+
+    for (const row of matrix) {
+      if (row.employee.position !== positionName) continue;
+      total += employeeRoleCapacity(row, positionName);
+    }
+
+    return total;
+  }
+
+  function roleCapacityRules(positions, matrix) {
+    const rules = new Map();
+
+    for (const position of positions) {
+      const classification = classifyCompanyRole(position);
+      const currentCapacity = calculateRoleCapacity(matrix, position.name);
+      const currentCount = matrix.filter(
+        (row) => row.employee.position === position.name
+      ).length;
+
+      let retainRatio = 0;
+
+      if (classification.level === 'core' && currentCount > 0) {
+        retainRatio = CORE_CAPACITY_RETAIN_RATIO;
+      } else if (classification.level === 'important' && currentCount > 0) {
+        retainRatio = IMPORTANT_CAPACITY_RETAIN_RATIO;
+      }
+
+      rules.set(position.name, {
+        position,
+        classification,
+        currentCapacity,
+        currentCount,
+        retainRatio,
+        minimumCapacity: currentCapacity * retainRatio,
+      });
+    }
+
+    return rules;
+  }
+
+  function buildCoverageMinimums(positions, matrix) {
+    const currentCounts = countEmployeesByPosition(matrix, false);
+    const minimums = new Map();
+
+    for (const position of positions) {
+      const classification = classifyCompanyRole(position);
+      const current = currentCounts.get(position.name) || 0;
+
+      let minimum = 0;
+
+      // Core sales/revenue roles are protected at their current staffing level
+      // so the optimiser never "improves EE" by stripping the company's sales floor.
+      if (classification.level === 'core' && current > 0) {
+        minimum = current;
+      }
+      // Other operationally important roles keep at least one employee if
+      // currently staffed.
+      else if (classification.level === 'important' && current > 0) {
+        minimum = 1;
+      }
+
+      minimums.set(position.name, minimum);
+    }
+
+    return { currentCounts, minimums };
+  }
+
+  function findMatrixCell(row, positionName) {
+    return row.cells.find((cell) => cell.position.name === positionName) || null;
+  }
+
+  function optimiseCompanyAssignments(matrix, positions) {
+    const capacityRules = roleCapacityRules(positions, matrix);
+    const currentCounts = countEmployeesByPosition(matrix, false);
+
+    const assignments = matrix.map((row) => {
+      const currentCell = findMatrixCell(row, row.employee.position);
+      const currentEstimated =
+        currentCell?.estimate?.total ??
+        row.ee?.total ??
+        null;
+
+      return {
+        row,
+        currentPosition: row.employee.position,
+        assignedPosition: row.employee.position,
+        currentEE: typeof row.ee?.total === 'number' ? row.ee.total : currentEstimated,
+        assignedEE: currentEstimated,
+      };
+    });
+
+    function projectedRoleCapacity(positionName, simulatedAssignments = assignments) {
+      return calculateRoleCapacity(matrix, positionName, simulatedAssignments);
+    }
+
+    function canMoveWithCapacity(assignment, targetPosition) {
+      const source = assignment.assignedPosition;
+      if (!source || source === targetPosition) return false;
+
+      const sourceRule = capacityRules.get(source);
+
+      // Standard/support roles have no protected-capacity floor.
+      if (!sourceRule || sourceRule.retainRatio <= 0) return true;
+
+      const sourceCapacityBefore = projectedRoleCapacity(source);
+      const leavingCapacity = employeeRoleCapacity(assignment.row, source);
+      const sourceCapacityAfter = Math.max(0, sourceCapacityBefore - leavingCapacity);
+
+      return sourceCapacityAfter + 1e-9 >= sourceRule.minimumCapacity;
+    }
+
+    const appliedMoves = [];
+    const movedEmployees = new Set();
+
+    // Conservative greedy optimisation: choose the largest positive EE move
+    // that does not push a protected role below its retained-capacity floor.
+    while (true) {
+      let bestMove = null;
+
+      for (const assignment of assignments) {
+        if (movedEmployees.has(String(assignment.row.employee.id))) continue;
+
+        for (const cell of assignment.row.cells) {
+          const target = cell.position.name;
+          const targetEE = cell.estimate?.total;
+
+          if (typeof targetEE !== 'number') continue;
+          if (!canMoveWithCapacity(assignment, target)) continue;
+          if (typeof assignment.assignedEE !== 'number') continue;
+
+          const gain = targetEE - assignment.assignedEE;
+          if (gain <= 0) continue;
+
+          if (
+            !bestMove ||
+            gain > bestMove.gain ||
+            (
+              gain === bestMove.gain &&
+              (cell.fit?.coverage ?? 0) > (bestMove.cell.fit?.coverage ?? 0)
+            )
+          ) {
+            bestMove = { assignment, cell, gain };
+          }
+        }
+      }
+
+      if (!bestMove) break;
+
+      const assignment = bestMove.assignment;
+      const from = assignment.assignedPosition;
+      const to = bestMove.cell.position.name;
+
+      assignment.assignedPosition = to;
+      assignment.assignedEE = bestMove.cell.estimate.total;
+      movedEmployees.add(String(assignment.row.employee.id));
+
+      appliedMoves.push({
+        employee: assignment.row.employee,
+        from,
+        to,
+        currentEE: assignment.currentEE,
+        newEE: assignment.assignedEE,
+        gain: bestMove.gain,
+        fit: bestMove.cell.fit,
+      });
+    }
+
+    const projectedCounts = new Map();
+    for (const assignment of assignments) {
+      const role = assignment.assignedPosition;
+      projectedCounts.set(role, (projectedCounts.get(role) || 0) + 1);
+    }
+
+    const currentTotalEE = assignments.reduce(
+      (sum, assignment) =>
+        sum + (typeof assignment.currentEE === 'number' ? assignment.currentEE : 0),
+      0
+    );
+
+    const projectedTotalEE = assignments.reduce(
+      (sum, assignment) =>
+        sum + (typeof assignment.assignedEE === 'number' ? assignment.assignedEE : 0),
+      0
+    );
+
+    const protectedRoles = positions
+      .map((position) => {
+        const rule = capacityRules.get(position.name);
+        const currentCapacity = rule?.currentCapacity ?? 0;
+        const projectedCapacity = projectedRoleCapacity(position.name);
+
+        return {
+          position,
+          retainRatio: rule?.retainRatio ?? 0,
+          minimumCapacity: rule?.minimumCapacity ?? 0,
+          currentCapacity,
+          projectedCapacity,
+          capacityRetained:
+            currentCapacity > 0
+              ? (projectedCapacity / currentCapacity) * 100
+              : null,
+          current: currentCounts.get(position.name) || 0,
+          projected: projectedCounts.get(position.name) || 0,
+        };
+      })
+      .filter((row) => row.retainRatio > 0);
+
+    const stagedMoves = appliedMoves.slice(0, STAGED_MOVE_LIMIT);
+
+    return {
+      assignments,
+      appliedMoves,
+      stagedMoves,
+      currentTotalEE,
+      projectedTotalEE,
+      totalGain: projectedTotalEE - currentTotalEE,
+      currentCounts,
+      projectedCounts,
+      protectedRoles,
+      capacityRules,
+    };
+  }
+
   function renderOptimizeTab(panel) {
     const el = panel.querySelector('[data-tabpanel="optimize"]');
     if (!el) return;
@@ -3416,6 +3691,7 @@
     const matrix = buildEmployeePositionMatrix(employees, positions);
     const roleAnalysis = analyseCompanyRoles(positions, matrix);
     const balance = buildPositionBalanceWarnings(matrix, positions);
+    const optimizer = optimiseCompanyAssignments(matrix, positions);
 
     html += `<div class="tds-section-label">Company roles</div>`;
 
@@ -3557,6 +3833,220 @@
       This warning checks current vs individually recommended headcount only.
       It does not yet know minimum staffing requirements or position-capacity rules.
     </div></div></div>`;
+
+    html += `<div class="tds-section-label">Whole-company balanced optimiser</div>`;
+
+    html += `<div class="tds-box tds-box-info">
+      This optimiser starts from the current team and only recommends positive-EE moves that preserve protected <strong>role capacity</strong>.
+      Core sales/revenue roles retain at least <strong>85%</strong> of their current estimated EE capacity; other Important roles retain at least <strong>70%</strong>.
+      This is a management heuristic, not an official Torn staffing rule.
+    </div>`;
+
+    html += `<div class="tds-optimizer-summary">
+      <div class="tds-optimizer-card">
+        <div class="tds-optimizer-label">Current Total EE</div>
+        <div class="tds-optimizer-value">${formatNumber(optimizer.currentTotalEE)}</div>
+      </div>
+      <div class="tds-optimizer-card">
+        <div class="tds-optimizer-label">Projected Total EE</div>
+        <div class="tds-optimizer-value">${formatNumber(optimizer.projectedTotalEE)}</div>
+      </div>
+      <div class="tds-optimizer-card">
+        <div class="tds-optimizer-label">Potential Gain</div>
+        <div class="tds-optimizer-value ${optimizer.totalGain > 0 ? 'tds-v-good' : ''}">
+          ${optimizer.totalGain > 0 ? '+' : ''}${formatNumber(optimizer.totalGain)}
+        </div>
+      </div>
+      <div class="tds-optimizer-card">
+        <div class="tds-optimizer-label">Suggested Moves</div>
+        <div class="tds-optimizer-value">${formatNumber(optimizer.appliedMoves.length)}</div>
+      </div>
+    </div>`;
+
+    if (optimizer.protectedRoles.length) {
+      html += `<div class="tds-box tds-box-neutral" style="margin-top:10px;"><strong>EE Capacity:</strong> Capacity values are Employee Effectiveness (EE) points, not revenue or customer capacity. The optimiser totals the estimated EE points assigned to each protected operational role and uses that total as a staffing-strength safety check.</div>`;
+      html += `<div class="tds-section-label">Protected role EE capacity</div><div class="tds-card">`;
+
+      for (const role of optimizer.protectedRoles) {
+        html += `<div class="tds-row">
+          <span class="tds-row-label"><strong>${escapeHtml(role.position.name)}</strong></span>
+          <span class="tds-row-value">
+            Staff ${formatNumber(role.current)} → ${formatNumber(role.projected)}
+            · EE Capacity ${formatNumber(Math.round(role.currentCapacity))} → ${formatNumber(Math.round(role.projectedCapacity))} points
+            · ${role.capacityRetained !== null ? `${role.capacityRetained.toFixed(1)}% EE retained` : '—'}
+            · Safety Floor ${(role.retainRatio * 100).toFixed(0)}%
+          </span>
+        </div>`;
+      }
+
+      html += `</div>`;
+    }
+
+    if (!optimizer.appliedMoves.length) {
+      html += `<div class="tds-box tds-box-neutral">
+        No positive-EE moves were found that improve the team while preserving the protected operational coverage rules.
+      </div>`;
+    } else {
+      html += `<div style="overflow-x:auto;">
+        <table class="tds-table tds-optimize-table">
+          <thead>
+            <tr>
+              <th>Employee</th>
+              <th>Current Role</th>
+              <th>Balanced Recommendation</th>
+              <th>Current EE</th>
+              <th>Projected EE</th>
+              <th>Gain</th>
+              <th>Fit</th>
+            </tr>
+          </thead>
+          <tbody>`;
+
+      for (const move of optimizer.appliedMoves) {
+        html += `<tr>
+          <td><strong>${escapeHtml(move.employee.name)}</strong></td>
+          <td>${escapeHtml(move.from || '—')}</td>
+          <td class="tds-v-good"><strong>${escapeHtml(move.to)}</strong></td>
+          <td>${typeof move.currentEE === 'number' ? formatNumber(move.currentEE) : '—'}</td>
+          <td>${typeof move.newEE === 'number' ? formatNumber(move.newEE) : '—'}</td>
+          <td class="tds-v-good"><strong>+${formatNumber(move.gain)}</strong></td>
+          <td>${move.fit ? `${move.fit.coverage}%` : '—'}</td>
+        </tr>`;
+      }
+
+      html += `</tbody></table></div>`;
+    }
+
+    html += `<div class="tds-section-label">Staged recommendation</div>`;
+
+    if (!optimizer.stagedMoves.length) {
+      html += `<div class="tds-box tds-box-neutral">
+        No safe positive-EE moves are currently recommended under the capacity-retention rules.
+      </div>`;
+    } else {
+      html += `<div class="tds-box tds-box-info">
+        Apply these moves first, then reassess after the next company performance update before applying additional moves.
+        This reduces the risk of making several staffing changes at once without observing their effect on customers/revenue.
+      </div><div class="tds-card">`;
+
+      optimizer.stagedMoves.forEach((move, index) => {
+        html += `<div class="tds-row">
+          <span class="tds-row-label">
+            <strong>Phase ${index + 1}: ${escapeHtml(move.employee.name)}</strong>
+          </span>
+          <span class="tds-row-value tds-v-good">
+            ${escapeHtml(move.from)} → ${escapeHtml(move.to)}
+            · +${formatNumber(move.gain)} EE
+          </span>
+        </div>`;
+      });
+
+      html += `</div>`;
+    }
+
+    html += `<div class="tds-section-label">Recommended company layout</div>`;
+
+    const finalAssignments = [...optimizer.assignments].sort((a, b) => {
+      const aMove = a.assignedPosition !== a.currentPosition ? 1 : 0;
+      const bMove = b.assignedPosition !== b.currentPosition ? 1 : 0;
+
+      return (
+        bMove - aMove ||
+        String(a.assignedPosition || '').localeCompare(String(b.assignedPosition || '')) ||
+        String(a.row.employee.name).localeCompare(String(b.row.employee.name))
+      );
+    });
+
+    html += `<div style="overflow-x:auto;">
+      <table class="tds-table tds-optimize-table">
+        <thead>
+          <tr>
+            <th>Employee</th>
+            <th>Current Role</th>
+            <th>Recommended Role</th>
+            <th>Action</th>
+            <th>Current EE</th>
+            <th>Projected EE</th>
+            <th>Change</th>
+          </tr>
+        </thead>
+        <tbody>`;
+
+    for (const assignment of finalAssignments) {
+      const isMove = assignment.assignedPosition !== assignment.currentPosition;
+      const change =
+        typeof assignment.currentEE === 'number' &&
+        typeof assignment.assignedEE === 'number'
+          ? assignment.assignedEE - assignment.currentEE
+          : null;
+
+      const actionClass = isMove ? 'tds-v-good' : '';
+      const changeClass =
+        change === null
+          ? ''
+          : change > 0
+            ? 'tds-v-good'
+            : change < 0
+              ? 'tds-v-bad'
+              : '';
+
+      html += `<tr>
+        <td><strong>${escapeHtml(assignment.row.employee.name)}</strong></td>
+        <td>${escapeHtml(assignment.currentPosition || '—')}</td>
+        <td class="${isMove ? 'tds-v-good' : ''}"><strong>${escapeHtml(assignment.assignedPosition || '—')}</strong></td>
+        <td class="${actionClass}"><strong>${isMove ? 'MOVE' : 'KEEP'}</strong></td>
+        <td>${typeof assignment.currentEE === 'number' ? formatNumber(assignment.currentEE) : '—'}</td>
+        <td>${typeof assignment.assignedEE === 'number' ? formatNumber(assignment.assignedEE) : '—'}</td>
+        <td class="${changeClass}">
+          <strong>${change === null ? '—' : `${change > 0 ? '+' : ''}${formatNumber(change)}`}</strong>
+        </td>
+      </tr>`;
+    }
+
+    html += `</tbody></table></div>`;
+
+    html += `<div class="tds-section-label">Role headcount plan</div><div class="tds-card">`;
+
+    for (const position of positions) {
+      const current = optimizer.currentCounts.get(position.name) || 0;
+      const projected = optimizer.projectedCounts.get(position.name) || 0;
+
+      if (current === 0 && projected === 0) continue;
+
+      const cls =
+        projected < current
+          ? 'tds-v-bad'
+          : projected > current
+            ? 'tds-v-good'
+            : '';
+
+      html += `<div class="tds-row">
+        <span class="tds-row-label"><strong>${escapeHtml(position.name)}</strong></span>
+        <span class="tds-row-value ${cls}">
+          ${formatNumber(current)} → ${formatNumber(projected)}
+        </span>
+      </div>`;
+    }
+
+    html += `</div>`;
+
+    const moveCount = finalAssignments.filter(
+      (assignment) => assignment.assignedPosition !== assignment.currentPosition
+    ).length;
+    const keepCount = finalAssignments.length - moveCount;
+
+    html += `<div class="tds-box tds-box-neutral" style="margin-top:10px;">
+      <strong>Plan summary:</strong>
+      ${formatNumber(moveCount)} employee${moveCount === 1 ? '' : 's'} to move,
+      ${formatNumber(keepCount)} to keep in their current role.
+      This is the complete staffing layout produced by the balanced optimiser.
+    </div>`;
+
+    html += `<div class="tds-box tds-box-warn" style="margin-top:10px;">
+      <strong>Do not move everyone from the Individual Best table.</strong>
+      Use the <strong>Recommended Company Layout</strong> above for company-wide staffing decisions.
+      The Individual Best table remains useful for understanding each employee's personal ceiling.
+    </div>`;
 
     // Existing recommendation summary
     const rows = [...matrix].sort((a, b) => {
@@ -3701,7 +4191,7 @@
     }
 
     html += `<div class="tds-box tds-box-neutral" style="margin-top:10px;">
-      <strong>Next optimisation step:</strong> a whole-company assignment optimiser can consider role coverage and position limits together, so it recommends a balanced team rather than simply placing every employee in their individual highest-EE role.
+      <strong>Optimizer limitation:</strong> role-capacity floors are estimated from current employee EE and configurable heuristic retention levels (85% Core / 70% Important). They are not official Torn minimum staffing requirements, and revenue impact cannot be predicted exactly from headcount alone.
     </div>`;
 
     el.innerHTML = html;
