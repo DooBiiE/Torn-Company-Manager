@@ -1,18 +1,10 @@
 // ==UserScript==
 // @name         Torn Company Management Suite
 // @namespace    torn-company-management-suite
-// @version      1.3.7
-// @updateURL    https://raw.githubusercontent.com/DooBiiE/Torn-Company-Manager/main/torn-company-manager.user.js
-// @downloadURL  https://raw.githubusercontent.com/DooBiiE/Torn-Company-Manager/main/torn-company-manager.user.js
-// @description  Local-only company management dashboard for Torn directors, embedded in the Jobs page. No company data ever leaves your browser; only your Torn User ID is checked against a public license list.
+// @version      1.3.8
+// @description  Torn company management dashboard
 // @author       DooBiiE
 // @match        https://www.torn.com/*
-// @grant        GM_xmlhttpRequest
-// @grant        GM_setValue
-// @grant        GM_getValue
-// @grant        GM_deleteValue
-// @connect      api.torn.com
-// @connect      raw.githubusercontent.com
 // @run-at       document-end
 // ==/UserScript==
 
@@ -60,34 +52,70 @@
 (function () {
   'use strict';
 
-  // ---------------------------------------------------------------------
-  // TornPDA compatibility shims
-  // ---------------------------------------------------------------------
-  // TornPDA does not expose every legacy Greasemonkey helper. This suite has
-  // no @resource entries, so returning an empty value is safe if a wrapper
-  // probes these functions.
-  if (typeof globalThis.GM_getResourceText !== 'function') {
-    globalThis.GM_getResourceText = function () { return ''; };
-  }
-  if (typeof globalThis.GM_getResourceURL !== 'function') {
-    globalThis.GM_getResourceURL = function () { return ''; };
-  }
-
-  console.log('[TDS] v1.3.7 script started');
+  console.log('[TDS] v1.3.8 script started');
 
   // ---------------------------------------------------------------------
   // 0. CONSTANTS
   // ---------------------------------------------------------------------
   const API_BASE = 'https://api.torn.com';
+
+  function tdsHttpRequest(details) {
+    const method = String(details?.method || 'GET').toUpperCase();
+    const headers = details?.headers || {};
+    const url = details?.url;
+
+    // TornPDA native bridge
+    if (method === 'GET' && typeof PDA_httpGet === 'function') {
+      PDA_httpGet(url, headers)
+        .then((res) => {
+          details?.onload?.({
+            responseText: res?.responseText ?? '',
+            status: res?.status ?? 200,
+            statusText: res?.statusText ?? '',
+            responseHeaders: res?.responseHeaders ?? '',
+          });
+        })
+        .catch((err) => details?.onerror?.(err));
+      return;
+    }
+
+    // Modern Greasemonkey/Tampermonkey API
+    if (typeof GM !== 'undefined' && GM && typeof GM.xmlHttpRequest === 'function') {
+      GM.xmlHttpRequest(details);
+      return;
+    }
+
+    // Legacy userscript API
+    if (typeof GM_xmlhttpRequest === 'function') {
+      GM_xmlhttpRequest(details);
+      return;
+    }
+
+    // Last-resort same/CORS-compatible fetch fallback.
+    fetch(url, {
+      method,
+      headers,
+      body: details?.data || details?.body,
+      credentials: 'omit',
+    })
+      .then(async (res) => {
+        const responseText = await res.text();
+        details?.onload?.({
+          responseText,
+          status: res.status,
+          statusText: res.statusText,
+          responseHeaders: '',
+        });
+      })
+      .catch((err) => details?.onerror?.(err));
+  }
+
   // Read the UI version from userscript metadata when available. TornPDA may
   // not expose that metadata API, so a release fallback is provided below.
   // TornPDA does not always expose the legacy GM_info object that desktop
   // userscript managers provide. Try both common metadata APIs, then use the
   // release version as a PDA-safe fallback so the UI never shows vunknown.
-  const TDS_VERSION_FALLBACK = '1.3.7';
-// Update distribution uses the same GitHub-hosted .user.js for both version
-// checks and downloads. Release process: bump @version + this fallback, then
-// replace torn-company-manager.user.js on the main branch.
+  const TDS_VERSION_FALLBACK = '1.3.8';
 
   let TDS_VERSION = TDS_VERSION_FALLBACK;
   try {
@@ -110,9 +138,14 @@
   // continues to use the normal GM functions.
   function tdsGetValue(key, fallback = null) {
     try {
-      if (typeof GM_getValue === 'function') return GM_getValue(key, fallback);
+      if (typeof GM !== 'undefined' && GM && typeof GM.getValue === 'function') {
+        // TornPDA's GM object can be async; synchronous callers cannot await it,
+        // so keep localStorage as the authoritative PDA fallback below.
+      } else if (typeof GM_getValue === 'function') {
+        return GM_getValue(key, fallback);
+      }
     } catch (err) {
-      console.warn('[TDS] GM_getValue failed; using localStorage fallback:', err);
+      console.warn('[TDS] userscript storage read failed; using localStorage fallback:', err);
     }
     try {
       const raw = localStorage.getItem(`tds_fallback_${key}`);
@@ -124,12 +157,14 @@
 
   function tdsSetValue(key, value) {
     try {
-      if (typeof GM_setValue === 'function') {
+      if (typeof GM !== 'undefined' && GM && typeof GM.setValue === 'function') {
+        Promise.resolve(GM.setValue(key, value)).catch(() => {});
+      } else if (typeof GM_setValue === 'function') {
         GM_setValue(key, value);
         return;
       }
     } catch (err) {
-      console.warn('[TDS] GM_setValue failed; using localStorage fallback:', err);
+      console.warn('[TDS] userscript storage write failed; using localStorage fallback:', err);
     }
     try {
       localStorage.setItem(`tds_fallback_${key}`, JSON.stringify(value));
@@ -138,12 +173,14 @@
 
   function tdsDeleteValue(key) {
     try {
-      if (typeof GM_deleteValue === 'function') {
+      if (typeof GM !== 'undefined' && GM && typeof GM.deleteValue === 'function') {
+        Promise.resolve(GM.deleteValue(key)).catch(() => {});
+      } else if (typeof GM_deleteValue === 'function') {
         GM_deleteValue(key);
         return;
       }
     } catch (err) {
-      console.warn('[TDS] GM_deleteValue failed; using localStorage fallback:', err);
+      console.warn('[TDS] userscript storage delete failed; using localStorage fallback:', err);
     }
     try {
       localStorage.removeItem(`tds_fallback_${key}`);
@@ -238,7 +275,7 @@
       const url = `${API_BASE}/${path}?${params.toString()}`;
 
       return new Promise((resolve, reject) => {
-        GM_xmlhttpRequest({
+        tdsHttpRequest({
           method: 'GET',
           url,
           timeout: 15000,
@@ -288,7 +325,7 @@
       const url = `${API_BASE}/v2/${cleanPath}${query ? `?${query}` : ''}`;
 
       return new Promise((resolve, reject) => {
-        GM_xmlhttpRequest({
+        tdsHttpRequest({
           method: 'GET',
           url,
           headers: {
@@ -338,7 +375,7 @@
       const url = `${API_BASE}/v2/${cleanPath}${query ? `?${query}` : ''}`;
 
       return new Promise((resolve, reject) => {
-        GM_xmlhttpRequest({
+        tdsHttpRequest({
           method: 'GET',
           url,
           headers: {
@@ -1374,7 +1411,7 @@
 
   function fetchLicenseList() {
     return new Promise((resolve, reject) => {
-      GM_xmlhttpRequest({
+      tdsHttpRequest({
         method: 'GET',
         url: LICENSE_JSON_URL,
         timeout: 15000,
