@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Company Management Suite
 // @namespace    torn-company-management-suite
-// @version      1.3.35
+// @version      1.3.36
 // @description  Local-only company management dashboard for Torn directors, embedded in the Jobs page. No company data ever leaves your browser; only your Torn User ID is checked against a public license list.
 // @author       DooBiiE
 // @match        https://www.torn.com/*
@@ -67,7 +67,7 @@
   // TornPDA does not always expose the legacy GM_info object that desktop
   // userscript managers provide. Try both common metadata APIs, then use the
   // release version as a PDA-safe fallback so the UI never shows vunknown.
-  const TDS_VERSION_FALLBACK = '1.3.35';
+  const TDS_VERSION_FALLBACK = '1.3.36';
   const TDS_VERSION =
     (typeof GM_info !== 'undefined' && GM_info?.script?.version) ||
     (typeof GM !== 'undefined' && GM?.info?.script?.version) ||
@@ -2579,61 +2579,161 @@
       }
     }
 
-    // --- Historical comparison from local snapshots ---
-    // Snapshots store profile and detailed under separate keys (matching how
-    // they were fetched), so merge them per-snapshot the same way as above —
-    // otherwise a snapshot taken when only "detailed" held the income field
-    // would silently be treated as having no income data at all.
-    function snapshotIncomeFields(snap) {
-      return { ...(snap.company_profile || {}), ...(snap.company_detailed || {}) };
-    }
-    function findDailyIncome(snap) {
-      const merged = snapshotIncomeFields(snap);
-      return Object.entries(merged).find(([k, v]) => typeof v === 'number' && /daily/i.test(k) && /profit|income/i.test(k));
-    }
+    // --- Daily performance comparison ---
+    // Prefer the compact Performance History layer, which can include both
+    // locally observed days and Torn historical Snapshot backfill.
+    const dailyPerformance = await getDailyPerformanceHistory();
+    const comparableIncomeDays = dailyPerformance.filter(
+      (row) => typeof row.observed?.dailyIncome === 'number'
+    );
 
-    const allSnapshots = await getSnapshotsSorted();
-    const withIncomeData = allSnapshots.filter((s) => s.company_profile || s.company_detailed);
-    const daily = collapseToDaily(withIncomeData);
+    html += '<div class="tds-section-label">Latest Day vs Previous Day <span class="tds-v-dim" style="font-weight:400;">(Torn Snapshot / local performance history)</span></div>';
 
-    html += '<div class="tds-section-label">Today vs Yesterday <span class="tds-v-dim" style="font-weight:400;">(HISTORICAL \u2014 from local snapshots only)</span></div>';
-    if (daily.length < 2) {
-      html += `<div class="tds-box tds-box-neutral">Insufficient data \u2014 only ${daily.length} day${daily.length === 1 ? '' : 's'} of local snapshots so far. This starts filling in from tomorrow\u2019s first run onward; nothing here is backfilled or estimated.</div>`;
+    if (comparableIncomeDays.length < 2) {
+      html += `<div class="tds-box tds-box-neutral">
+        Insufficient comparable income history — ${comparableIncomeDays.length} day${comparableIncomeDays.length === 1 ? '' : 's'} currently has a usable daily income value.
+        Use <strong>Backfill available Torn history</strong> below to retrieve retained historical Company Snapshot data where available.
+      </div>`;
     } else {
-      const todaySnap = daily[daily.length - 1];
-      const ySnap = daily[daily.length - 2];
-      const gField = findDailyIncome(todaySnap);
-      const yField = gField ? [gField[0], snapshotIncomeFields(ySnap)[gField[0]]] : null;
+      const latestDay = comparableIncomeDays[comparableIncomeDays.length - 1];
+      const previousDay = comparableIncomeDays[comparableIncomeDays.length - 2];
+
+      const latestIncome = latestDay.observed.dailyIncome;
+      const previousIncome = previousDay.observed.dailyIncome;
+      const change = latestIncome - previousIncome;
+      const pct = previousIncome !== 0
+        ? (change / Math.abs(previousIncome)) * 100
+        : null;
+
       html += '<div class="tds-card">';
-      if (gField && yField && typeof yField[1] === 'number') {
-        const change = gField[1] - yField[1];
-        const pct = yField[1] !== 0 ? (change / Math.abs(yField[1])) * 100 : null;
-        html += `<div class="tds-row"><span class="tds-row-label">Today</span><span class="tds-row-value">${formatMoney(gField[1])}</span></div>`;
-        html += `<div class="tds-row"><span class="tds-row-label">Yesterday (last snapshot that day)</span><span class="tds-row-value">${formatMoney(yField[1])}</span></div>`;
-        html += `<div class="tds-row"><span class="tds-row-label">Change</span><span class="tds-row-value ${change >= 0 ? 'tds-v-good' : 'tds-v-bad'}">${change >= 0 ? '+' : ''}${formatMoney(change)}${pct !== null ? ` (${change >= 0 ? '\u2191' : '\u2193'} ${Math.abs(pct).toFixed(1)}%)` : ''}</span></div>`;
-      } else {
-        html += `<div class="tds-row-label">Couldn\u2019t match a comparable income field between the two snapshots.</div>`;
+      html += `<div class="tds-row"><span class="tds-row-label">${escapeHtml(formatPerformanceDate(latestDay.timestamp))} (${latestDay.source === 'torn_snapshot' ? 'Torn Snapshot' : 'Local'})</span><span class="tds-row-value">${formatMoney(latestIncome)}</span></div>`;
+      html += `<div class="tds-row"><span class="tds-row-label">${escapeHtml(formatPerformanceDate(previousDay.timestamp))} (${previousDay.source === 'torn_snapshot' ? 'Torn Snapshot' : 'Local'})</span><span class="tds-row-value">${formatMoney(previousIncome)}</span></div>`;
+      html += `<div class="tds-row"><span class="tds-row-label">Change</span><span class="tds-row-value ${change >= 0 ? 'tds-v-good' : 'tds-v-bad'}">${change >= 0 ? '+' : ''}${formatMoney(change)}${pct !== null ? ` (${change >= 0 ? '↑' : '↓'} ${Math.abs(pct).toFixed(1)}%)` : ''}</span></div>`;
+
+      const latestCustomers = latestDay.observed?.dailyCustomers;
+      const previousCustomers = previousDay.observed?.dailyCustomers;
+      if (
+        typeof latestCustomers === 'number' &&
+        typeof previousCustomers === 'number'
+      ) {
+        const customerChange = latestCustomers - previousCustomers;
+        const customerPct = previousCustomers !== 0
+          ? (customerChange / Math.abs(previousCustomers)) * 100
+          : null;
+
+        html += `<div class="tds-row"><span class="tds-row-label">Daily customers change</span><span class="tds-row-value ${customerChange >= 0 ? 'tds-v-good' : 'tds-v-bad'}">${customerChange >= 0 ? '+' : ''}${formatNumber(customerChange)}${customerPct !== null ? ` (${customerChange >= 0 ? '↑' : '↓'} ${Math.abs(customerPct).toFixed(1)}%)` : ''}</span></div>`;
       }
+
       html += '</div>';
 
-      // Sparkline of last up to 7 local daily snapshots
-      const recent = daily.slice(-7);
-      const values = recent.map((s) => {
-        const f = findDailyIncome(s);
-        return f ? f[1] : null;
-      }).filter((v) => v !== null);
-      if (values.length >= 2) {
-        const maxAbs = Math.max(...values.map((v) => Math.abs(v)), 1);
-        html += `<div class="tds-section-label">Last ${values.length} days <span class="tds-v-dim" style="font-weight:400;">(local snapshots)</span></div><div class="tds-card"><div class="tds-spark">`;
-        recent.forEach((s) => {
-          const f = findDailyIncome(s);
-          const v = f ? f[1] : 0;
-          const h = Math.max(2, Math.round((Math.abs(v) / maxAbs) * 40));
-          const cls = v >= 0 ? 'tds-bar-pos' : 'tds-bar-neg';
-          const d = new Date(s.timestamp);
-          html += `<div class="tds-spark-col"><div class="tds-spark-bar ${cls}" style="height:${h}px" title="${formatMoney(v)}"></div><div class="tds-spark-label">${d.getMonth() + 1}/${d.getDate()}</div></div>`;
+      const recentIncomeDays = comparableIncomeDays.slice(-7);
+      if (recentIncomeDays.length >= 2) {
+        const values = recentIncomeDays.map(
+          (row) => row.observed.dailyIncome
+        );
+        const maxAbs = Math.max(...values.map((value) => Math.abs(value)), 1);
+
+        html += `<div class="tds-section-label">Last ${values.length} comparable days <span class="tds-v-dim" style="font-weight:400;">(Performance History)</span></div><div class="tds-card"><div class="tds-spark">`;
+
+        recentIncomeDays.forEach((row) => {
+          const value = row.observed.dailyIncome;
+          const height = Math.max(
+            4,
+            Math.round((Math.abs(value) / maxAbs) * 38)
+          );
+
+          html += `<div class="tds-spark-bar ${value >= 0 ? 'tds-spark-pos' : 'tds-spark-neg'}" style="height:${height}px" title="${escapeHtml(formatPerformanceDate(row.timestamp))}: ${escapeHtml(formatMoney(value))}"></div>`;
         });
+
         html += '</div></div>';
+      }
+    }
+
+    // --- Product sale activity from company/news ---
+    // This is API-derived and mirrors the useful "what sold" information from
+    // Torn's company financial view without scraping or automating the page.
+    const stockRawForFinance = findRaw(results, 'company', 'stock');
+    const stockItemsForFinance = extractStockItems(stockRawForFinance);
+
+    if (stockItemsForFinance.length) {
+      html += '<div class="tds-section-label">Product Sales — Last 24h vs Previous 24h <span class="tds-v-dim" style="font-weight:400;">(company/news)</span></div>';
+
+      try {
+        const diagnosticNews = findRaw(results, 'company', 'news');
+        const newsRaw = diagnosticNews || await fetchCompanyNewsForStock();
+        const salesCompare = aggregateSalesComparison(
+          newsRaw,
+          stockItemsForFinance
+        );
+
+        if (!salesCompare.parsedEvents) {
+          html += `<div class="tds-box tds-box-neutral">
+            Company news was readable, but no stock-sale events were recognised in the returned history.
+          </div>`;
+        } else {
+          const coverageComplete = salesCompare.coverageHours >= 48;
+
+          html += `<div class="tds-box ${coverageComplete ? 'tds-box-info' : 'tds-box-warn'}">
+            ${coverageComplete
+              ? 'Returned company-news history covers at least 48 hours, so the two windows are directly comparable.'
+              : `Returned company-news history covers about ${salesCompare.coverageHours.toFixed(1)} hours. Previous-24h figures may therefore be partial.`}
+          </div>`;
+
+          const unitChange = salesCompare.currentUnits - salesCompare.previousUnits;
+          const unitPct = salesCompare.previousUnits > 0
+            ? (unitChange / salesCompare.previousUnits) * 100
+            : null;
+
+          html += `<div class="tds-card">
+            <div class="tds-row"><span class="tds-row-label">Units sold — last 24h</span><span class="tds-row-value">${formatNumber(salesCompare.currentUnits)}</span></div>
+            <div class="tds-row"><span class="tds-row-label">Units sold — previous 24h</span><span class="tds-row-value">${formatNumber(salesCompare.previousUnits)}</span></div>
+            <div class="tds-row"><span class="tds-row-label">Unit-sales change</span><span class="tds-row-value ${unitChange >= 0 ? 'tds-v-good' : 'tds-v-bad'}">${unitChange >= 0 ? '+' : ''}${formatNumber(unitChange)}${unitPct !== null ? ` (${unitChange >= 0 ? '↑' : '↓'} ${Math.abs(unitPct).toFixed(1)}%)` : ''}</span></div>`;
+
+          if (
+            salesCompare.currentPricedUnits > 0 ||
+            salesCompare.previousPricedUnits > 0
+          ) {
+            const revenueChange =
+              salesCompare.currentRevenue -
+              salesCompare.previousRevenue;
+
+            html += `<div class="tds-row"><span class="tds-row-label">Observed sale revenue — last 24h</span><span class="tds-row-value">${formatMoney(salesCompare.currentRevenue)}</span></div>
+              <div class="tds-row"><span class="tds-row-label">Observed sale revenue — previous 24h</span><span class="tds-row-value">${formatMoney(salesCompare.previousRevenue)}</span></div>
+              <div class="tds-row"><span class="tds-row-label">Observed revenue change</span><span class="tds-row-value ${revenueChange >= 0 ? 'tds-v-good' : 'tds-v-bad'}">${revenueChange >= 0 ? '+' : ''}${formatMoney(revenueChange)}</span></div>`;
+          }
+
+          html += '</div>';
+
+          const productRows = salesCompare.products.filter(
+            (row) => row.currentUnits > 0 || row.previousUnits > 0
+          );
+
+          if (productRows.length) {
+            html += `<div style="overflow-x:auto;"><table class="tds-table tds-performance-history">
+              <thead><tr>
+                <th>Product</th>
+                <th>Last 24h</th>
+                <th>Previous 24h</th>
+                <th>Change</th>
+              </tr></thead><tbody>`;
+
+            for (const row of productRows) {
+              const delta = row.currentUnits - row.previousUnits;
+              html += `<tr>
+                <td><strong>${escapeHtml(row.name)}</strong></td>
+                <td>${formatNumber(row.currentUnits)}</td>
+                <td>${formatNumber(row.previousUnits)}</td>
+                <td class="${delta >= 0 ? 'tds-v-good' : 'tds-v-bad'}">${delta >= 0 ? '+' : ''}${formatNumber(delta)}</td>
+              </tr>`;
+            }
+
+            html += '</tbody></table></div>';
+          }
+        }
+      } catch (err) {
+        html += `<div class="tds-box tds-box-warn">
+          Product-sale comparison unavailable: ${escapeHtml(String(err?.reason || err?.message || err))}
+        </div>`;
       }
     }
 
@@ -2940,6 +3040,89 @@
       name: match?.name || itemName,
       id: match?.id || null,
       price: salePrice
+    };
+  }
+
+  function aggregateSalesComparison(newsRaw, stockItems) {
+    const nowSec = Math.floor(Date.now() / 1000);
+    const dayAgo = nowSec - 86400;
+    const twoDaysAgo = nowSec - 2 * 86400;
+
+    const entries = flattenNewsEntries(newsRaw);
+    let parsedEvents = 0;
+    let currentUnits = 0;
+    let previousUnits = 0;
+    let currentRevenue = 0;
+    let previousRevenue = 0;
+    let currentPricedUnits = 0;
+    let previousPricedUnits = 0;
+
+    const productMap = new Map();
+
+    for (const entry of entries) {
+      const sale = parseSaleFromNews(entry, stockItems);
+      if (!sale) continue;
+      parsedEvents += 1;
+
+      if (sale.timestamp < twoDaysAgo) continue;
+
+      const key = String(sale.id || normalizeFieldName(sale.name));
+      const row = productMap.get(key) || {
+        name: sale.name,
+        currentUnits: 0,
+        previousUnits: 0,
+        currentRevenue: 0,
+        previousRevenue: 0,
+      };
+
+      const isCurrent = sale.timestamp >= dayAgo;
+      const isPrevious = sale.timestamp >= twoDaysAgo && sale.timestamp < dayAgo;
+
+      if (isCurrent) {
+        row.currentUnits += sale.quantity;
+        currentUnits += sale.quantity;
+
+        if (typeof sale.price === 'number') {
+          const revenue = sale.quantity * sale.price;
+          row.currentRevenue += revenue;
+          currentRevenue += revenue;
+          currentPricedUnits += sale.quantity;
+        }
+      } else if (isPrevious) {
+        row.previousUnits += sale.quantity;
+        previousUnits += sale.quantity;
+
+        if (typeof sale.price === 'number') {
+          const revenue = sale.quantity * sale.price;
+          row.previousRevenue += revenue;
+          previousRevenue += revenue;
+          previousPricedUnits += sale.quantity;
+        }
+      }
+
+      productMap.set(key, row);
+    }
+
+    const oldestTimestamp = entries.length
+      ? Math.min(...entries.map((entry) => entry.timestamp))
+      : null;
+
+    return {
+      parsedEvents,
+      newsEntries: entries.length,
+      oldestTimestamp,
+      coverageHours: oldestTimestamp
+        ? Math.max(0, (nowSec - oldestTimestamp) / 3600)
+        : 0,
+      currentUnits,
+      previousUnits,
+      currentRevenue,
+      previousRevenue,
+      currentPricedUnits,
+      previousPricedUnits,
+      products: [...productMap.values()].sort(
+        (a, b) => b.currentUnits - a.currentUnits
+      ),
     };
   }
 
