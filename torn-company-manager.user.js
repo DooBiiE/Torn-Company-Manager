@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Company Management Suite
 // @namespace    torn-company-management-suite
-// @version      1.3.5
+// @version      1.3.6
 // @updateURL    https://raw.githubusercontent.com/DooBiiE/Torn-Company-Manager/main/torn-company-manager.user.js
 // @downloadURL  https://raw.githubusercontent.com/DooBiiE/Torn-Company-Manager/main/torn-company-manager.user.js
 // @description  Local-only company management dashboard for Torn directors, embedded in the Jobs page. No company data ever leaves your browser; only your Torn User ID is checked against a public license list.
@@ -69,7 +69,7 @@
   // TornPDA does not always expose the legacy GM_info object that desktop
   // userscript managers provide. Try both common metadata APIs, then use the
   // release version as a PDA-safe fallback so the UI never shows vunknown.
-  const TDS_VERSION_FALLBACK = '1.3.5';
+  const TDS_VERSION_FALLBACK = '1.3.6';
 // Update distribution uses the same GitHub-hosted .user.js for both version
 // checks and downloads. Release process: bump @version + this fallback, then
 // replace torn-company-manager.user.js on the main branch.
@@ -89,7 +89,7 @@
   // continues to use the normal GM functions.
   function tdsGetValue(key, fallback = null) {
     try {
-      if (typeof GM_getValue === 'function') return tdsGetValue(key, fallback);
+      if (typeof GM_getValue === 'function') return GM_getValue(key, fallback);
     } catch (err) {
       console.warn('[TDS] GM_getValue failed; using localStorage fallback:', err);
     }
@@ -104,7 +104,7 @@
   function tdsSetValue(key, value) {
     try {
       if (typeof GM_setValue === 'function') {
-        tdsSetValue(key, value);
+        GM_setValue(key, value);
         return;
       }
     } catch (err) {
@@ -118,7 +118,7 @@
   function tdsDeleteValue(key) {
     try {
       if (typeof GM_deleteValue === 'function') {
-        tdsDeleteValue(key);
+        GM_deleteValue(key);
         return;
       }
     } catch (err) {
@@ -4345,7 +4345,30 @@
     if (!mount) return;
 
     detectTornColours();
-    const panel = buildPanel(mount);
+
+    let panel;
+    try {
+      panel = buildPanel(mount);
+    } catch (err) {
+      console.error('[TDS] Panel build failed:', err);
+
+      // PDA-visible fallback so a future compatibility error does not look
+      // like "the script did nothing".
+      if (!document.getElementById('tds-boot-error')) {
+        const errorBox = document.createElement('div');
+        errorBox.id = 'tds-boot-error';
+        errorBox.style.cssText =
+          'margin:10px;padding:10px;border:1px solid #d66;border-radius:6px;' +
+          'background:#3a2222;color:#ffd0d0;font:12px sans-serif;position:relative;z-index:9999;';
+        errorBox.textContent =
+          'Torn Company Management Suite v' + TDS_VERSION +
+          ' loaded, but the dashboard could not be built. Check the TornPDA script console for [TDS] Panel build failed.';
+        try {
+          (mount || document.body || document.documentElement).prepend(errorBox);
+        } catch (_) {}
+      }
+      return;
+    }
 
     // Hydrate the UI from the last persisted diagnostic first. This means a
     // Torn navigation/refresh does not trigger another API diagnostic.
