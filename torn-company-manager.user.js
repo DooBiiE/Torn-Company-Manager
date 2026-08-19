@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         Torn Company Management Suite
 // @namespace    torn-company-management-suite
-// @version      1.1.6
+// @version      1.1.7
 // @description  Local-only company management dashboard for Torn directors, embedded in the Jobs page. No company data ever leaves your browser; only your Torn User ID is checked against a public license list.
-// @author       you
+// @author       DooBiiE
 // @match        https://www.torn.com/*
 // @grant        GM_xmlhttpRequest
 // @grant        GM_setValue
@@ -768,7 +768,10 @@
         treated as sensitive credentials.
       </div>
       <button class="tds-btn" id="tds-create-api-key">Create Custom API Key ↗</button>
-      <input class="tds-input" id="tds-keyinput" type="text" placeholder="Paste API key here" style="margin-top:8px;" />
+      <div style="position:relative; margin-top:8px;">
+        <input class="tds-input" id="tds-keyinput" type="password" autocomplete="off" spellcheck="false" placeholder="Paste API key here" style="padding-right:76px; width:100%; box-sizing:border-box;" />
+        <button type="button" class="tds-btn-ghost" id="tds-togglekey" style="position:absolute; right:6px; top:50%; transform:translateY(-50%); padding:4px 8px; font-size:11px;">Show</button>
+      </div>
       <div style="margin-top:8px; display:flex; gap:8px;">
         <button class="tds-btn" id="tds-savekey">Save key</button>
       </div>
@@ -808,7 +811,16 @@
     `;
 
     const keyInput = el.querySelector('#tds-keyinput');
+    const toggleKey = el.querySelector('#tds-togglekey');
     keyInput.value = GM_getValue(STORAGE_KEY_APIKEY, '');
+
+    // Keep the API key masked by default. It can be temporarily revealed
+    // with the Show button when the user needs to verify or edit it.
+    toggleKey.addEventListener('click', () => {
+      const visible = keyInput.type === 'text';
+      keyInput.type = visible ? 'password' : 'text';
+      toggleKey.textContent = visible ? 'Show' : 'Hide';
+    });
 
     // Open Torn's official custom-key creation flow with this suite's
     // required selections and title pre-filled. Torn performs the actual
