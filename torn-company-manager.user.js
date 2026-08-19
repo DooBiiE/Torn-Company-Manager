@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Company Management Suite
 // @namespace    torn-company-management-suite
-// @version      1.2.1
+// @version      1.2.2
 // @description  Local-only company management dashboard for Torn directors, embedded in the Jobs page. No company data ever leaves your browser; only your Torn User ID is checked against a public license list.
 // @author       DooBiiE
 // @match        https://www.torn.com/*
@@ -67,7 +67,7 @@
   // TornPDA does not always expose the legacy GM_info object that desktop
   // userscript managers provide. Try both common metadata APIs, then use the
   // release version as a PDA-safe fallback so the UI never shows vunknown.
-  const TDS_VERSION_FALLBACK = '1.2.1';
+  const TDS_VERSION_FALLBACK = '1.2.2';
   const TDS_VERSION =
     (typeof GM_info !== 'undefined' && GM_info?.script?.version) ||
     (typeof GM !== 'undefined' && GM?.info?.script?.version) ||
@@ -495,6 +495,9 @@
       .tds-table td { padding: 5px 6px; border-bottom: 1px solid var(--tds-border-soft, #242424); color: var(--tds-fg, #d8d8d8); }
       .tds-table tr:last-child td { border-bottom: none; }
       .tds-table td.tds-num { text-align: right; font-variant-numeric: tabular-nums; }
+      .tds-optimize-table th,
+      .tds-optimize-table td { text-align: center !important; vertical-align: middle; }
+      .tds-optimize-table td.tds-num { text-align: center !important; }
       .tds-spark { display: flex; align-items: flex-end; gap: 4px; height: 46px; margin: 6px 0; }
       .tds-spark-col { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 3px; }
       .tds-spark-bar { width: 100%; border-radius: 2px 2px 0 0; min-height: 2px; }
@@ -2178,6 +2181,61 @@
     return { coverage, shortfall, requiredCount };
   }
 
+  // Official Torn work-stat efficiency formula, applied once per required
+  // position stat. Company positions normally use a primary + secondary stat.
+  // Exact requirement on both stats therefore gives 90 Working Stats EE.
+  function calculatePositionWorkingStats(emp, position) {
+    const actual = {
+      manual: numericValue(emp.manual_labor) ?? 0,
+      intelligence: numericValue(emp.intelligence) ?? 0,
+      endurance: numericValue(emp.endurance) ?? 0,
+    };
+    const req = {
+      manual: numericValue(position.manual),
+      intelligence: numericValue(position.intelligence),
+      endurance: numericValue(position.endurance),
+    };
+
+    let total = 0;
+    let used = 0;
+    for (const key of Object.keys(req)) {
+      const required = req[key];
+      if (required === null || required <= 0) continue;
+
+      const stat = Math.max(0, actual[key] || 0);
+      const ratio = stat / required;
+      const base = Math.min(45, 45 * ratio);
+      const overRequirement = ratio > 0 ? Math.max(0, 5 * Math.log2(ratio)) : 0;
+
+      total += Math.floor(base + overRequirement);
+      used += 1;
+    }
+
+    return used ? total : null;
+  }
+
+  function estimateEffectivenessAtPosition(emp, ee, position) {
+    const workingStats = calculatePositionWorkingStats(emp, position);
+    if (workingStats === null) return null;
+
+    // Everything except Working Stats is retained from Torn's current Total EE.
+    // This automatically preserves Settled In, Director Education, Merits,
+    // Addiction, inactivity adjustments, and any future components Torn may add
+    // without us needing to guess each field individually.
+    const currentWorking = typeof ee?.workingStats === 'number' ? ee.workingStats : null;
+    const currentTotal = typeof ee?.total === 'number' ? ee.total : null;
+    const nonPositionAdjustment =
+      currentWorking !== null && currentTotal !== null
+        ? currentTotal - currentWorking
+        : 0;
+
+    return {
+      workingStats,
+      total: workingStats + nonPositionAdjustment,
+      nonPositionAdjustment,
+    };
+  }
+
   function renderOptimizeTab(panel) {
     const el = panel.querySelector('[data-tabpanel="optimize"]');
     if (!el) return;
@@ -2193,7 +2251,7 @@
     const typeId = numericValue(findValueDeep(profile, ['company_type', 'type_id', 'type']));
     const positions = extractPositionRequirements(reference, typeId);
 
-    let html = `<div class="tds-box tds-box-info"><strong>How Optimize works:</strong> Current EE is taken directly from Torn's employee <code>effectiveness</code> data — the same Working Stats, Settled In, Director Education, Addiction and Total values shown in Torn's company employee table. Position Fit is kept separate and only compares raw M/I/E stats with published position requirements.</div>`;
+    let html = `<div class="tds-box tds-box-info"><strong>How Optimize works:</strong> Current EE is Torn's real employee effectiveness. For each available position, Optimize calculates the Working Stats component using Torn's published work-stat efficiency formula, then carries across the employee's current non-position EE adjustment (Total EE minus Working Stats). The resulting <strong>Estimated EE</strong> is a prediction for comparison, not a live Torn value.</div>`;
 
     if (!employees.length) {
       el.innerHTML = html + `<div class="tds-box tds-box-danger">No employee data is available.</div>`;
@@ -2203,13 +2261,24 @@
     const rows = employees.map((employee) => {
       const ee = getEmployeeEffectiveness(employee.raw);
       let best = null;
+
       if (positions.length) {
         const ranked = positions
-          .map((position) => ({ position, fit: employeePositionFit(employee.raw, position) }))
-          .filter((row) => row.fit)
-          .sort((a, b) => b.fit.coverage - a.fit.coverage || a.fit.shortfall - b.fit.shortfall);
+          .map((position) => {
+            const fit = employeePositionFit(employee.raw, position);
+            const estimate = estimateEffectivenessAtPosition(employee.raw, ee, position);
+            return { position, fit, estimate };
+          })
+          .filter((row) => row.fit && row.estimate)
+          .sort((a, b) =>
+            b.estimate.total - a.estimate.total ||
+            b.estimate.workingStats - a.estimate.workingStats ||
+            b.fit.coverage - a.fit.coverage ||
+            a.fit.shortfall - b.fit.shortfall
+          );
         best = ranked[0] || null;
       }
+
       return { employee, ee, best };
     }).sort((a, b) => {
       const av = typeof a.ee?.total === 'number' ? a.ee.total : Number.POSITIVE_INFINITY;
@@ -2218,30 +2287,58 @@
     });
 
     html += `<div class="tds-section-label">Employee effectiveness</div>`;
-    html += `<div style="overflow-x:auto;"><table class="tds-table"><thead><tr><th>Employee</th><th>Current Position</th><th style="text-align:right;">Working Stats</th><th style="text-align:right;">Settled In</th><th style="text-align:right;">Director Ed.</th><th style="text-align:right;">Addiction</th><th style="text-align:right;">Total EE</th>${positions.length ? '<th>Best Position Fit</th><th style="text-align:right;">Fit</th>' : ''}</tr></thead><tbody>`;
+    html += `<div style="overflow-x:auto;">
+      <table class="tds-table tds-optimize-table">
+        <thead>
+          <tr>
+            <th>Employee</th>
+            <th>Current Position</th>
+            <th>Working Stats</th>
+            <th>Settled In</th>
+            <th>Director Ed.</th>
+            <th>Addiction</th>
+            <th>Total EE</th>
+            ${positions.length ? '<th>Best Position</th><th>New Working Stats</th><th>Est. New EE</th><th>Change</th><th>Fit</th>' : ''}
+          </tr>
+        </thead>
+        <tbody>`;
 
     for (const row of rows) {
       const { employee, ee, best } = row;
+      const currentTotal = typeof ee?.total === 'number' ? ee.total : null;
+      const estimatedTotal = best?.estimate && typeof best.estimate.total === 'number' ? best.estimate.total : null;
+      const delta = currentTotal !== null && estimatedTotal !== null ? estimatedTotal - currentTotal : null;
+      const deltaText = delta === null ? '—' : `${delta > 0 ? '+' : ''}${formatNumber(delta)}`;
+
       html += `<tr>`;
       html += `<td><strong>${escapeHtml(employee.name)}</strong></td>`;
       html += `<td>${escapeHtml(employee.position || '—')}</td>`;
-      html += `<td class="tds-num">${typeof ee?.workingStats === 'number' ? formatNumber(ee.workingStats) : '—'}</td>`;
-      html += `<td class="tds-num">${typeof ee?.settledIn === 'number' ? formatNumber(ee.settledIn) : '—'}</td>`;
-      html += `<td class="tds-num">${typeof ee?.directorEducation === 'number' ? formatNumber(ee.directorEducation) : '—'}</td>`;
-      html += `<td class="tds-num">${typeof ee?.addiction === 'number' ? formatNumber(ee.addiction) : '—'}</td>`;
-      html += `<td class="tds-num"><strong>${typeof ee?.total === 'number' ? formatNumber(ee.total) : '—'}</strong></td>`;
+      html += `<td>${typeof ee?.workingStats === 'number' ? formatNumber(ee.workingStats) : '—'}</td>`;
+      html += `<td>${typeof ee?.settledIn === 'number' ? formatNumber(ee.settledIn) : '—'}</td>`;
+      html += `<td>${typeof ee?.directorEducation === 'number' ? formatNumber(ee.directorEducation) : '—'}</td>`;
+      html += `<td>${typeof ee?.addiction === 'number' ? formatNumber(ee.addiction) : '—'}</td>`;
+      html += `<td><strong>${currentTotal !== null ? formatNumber(currentTotal) : '—'}</strong></td>`;
+
       if (positions.length) {
         html += `<td>${best ? escapeHtml(best.position.name) : '—'}</td>`;
-        html += `<td class="tds-num">${best ? `${best.fit.coverage}%` : '—'}</td>`;
+        html += `<td>${best?.estimate ? formatNumber(best.estimate.workingStats) : '—'}</td>`;
+        html += `<td><strong>${estimatedTotal !== null ? formatNumber(estimatedTotal) : '—'}</strong></td>`;
+        html += `<td><strong>${deltaText}</strong></td>`;
+        html += `<td>${best ? `${best.fit.coverage}%` : '—'}</td>`;
       }
       html += `</tr>`;
     }
+
     html += `</tbody></table></div>`;
 
     if (!positions.length) {
       html += `<div class="tds-box tds-box-warn" style="margin-top:10px;">No reliable position requirement data was found for company type ${escapeHtml(String(typeId ?? 'unknown'))}, so Optimize is showing Torn's real current effectiveness values without inventing position recommendations.</div>`;
     } else {
-      html += `<div class="tds-box tds-box-neutral" style="margin-top:10px;">Rows are sorted by <strong>Total EE, lowest first</strong> so the employees currently contributing the least effectiveness are easiest to spot. Total EE is Torn's real value; Position Fit is a separate derived comparison and is not a predicted EE score.</div>`;
+      html += `<div class="tds-box tds-box-neutral" style="margin-top:10px;">
+        <strong>Estimated EE:</strong> the target position's calculated Working Stats EE plus the employee's current non-position adjustment.
+        This preserves bonuses/penalties already reflected in Torn's Total EE while changing only the position-dependent Working Stats component.
+        Rows remain sorted by current <strong>Total EE, lowest first</strong>.
+      </div>`;
     }
 
     el.innerHTML = html;
