@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Company Management Suite
 // @namespace    torn-company-management-suite
-// @version      1.3.19
+// @version      1.3.20
 // @description  Local-only company management dashboard for Torn directors, embedded in the Jobs page. No company data ever leaves your browser; only your Torn User ID is checked against a public license list.
 // @author       DooBiiE
 // @match        https://www.torn.com/*
@@ -67,7 +67,7 @@
   // TornPDA does not always expose the legacy GM_info object that desktop
   // userscript managers provide. Try both common metadata APIs, then use the
   // release version as a PDA-safe fallback so the UI never shows vunknown.
-  const TDS_VERSION_FALLBACK = '1.3.19';
+  const TDS_VERSION_FALLBACK = '1.3.20';
   const TDS_VERSION =
     (typeof GM_info !== 'undefined' && GM_info?.script?.version) ||
     (typeof GM !== 'undefined' && GM?.info?.script?.version) ||
@@ -3297,11 +3297,37 @@
     return { id, typeId, typeName, rating };
   }
 
-  async function fetchBenchmarkCompanies(typeId, offset = 0) {
-    // Current Torn API v2 exposes a dedicated endpoint:
-    //   /v2/company/{typeId}/companies
-    // so we do not guess category/cat query parameters anymore.
-    return ApiClient.callV2(`company/${encodeURIComponent(typeId)}/companies`, {
+  function buildBenchmarkSearchFilters(typeId, tier, ownRating) {
+    const filters = [`type:Equal:${typeId}`];
+
+    if (tier === 'same' && ownRating !== null) {
+      filters.push(`rating:=:${ownRating}`);
+    } else if (tier === 'mid') {
+      filters.push('rating:>=:3');
+      filters.push('rating:<=:5');
+    } else if (tier === 'top') {
+      filters.push('rating:>=:8');
+      filters.push('rating:<=:10');
+    }
+
+    return filters.join(',');
+  }
+
+  async function fetchBenchmarkCompanies(typeId, offset = 0, tier = 'all', ownRating = null) {
+    // Keep the known-good type endpoint for ALL RATINGS.
+    if (tier === 'all') {
+      return ApiClient.callV2(`company/${encodeURIComponent(typeId)}/companies`, {
+        limit: 100,
+        offset,
+        striptags: 'true',
+      });
+    }
+
+    // For explicit rating bands, ask Torn to filter server-side. This avoids
+    // trying to derive 4★/3–5★ results from the type endpoint when that
+    // response is effectively returning only top-rated companies.
+    return ApiClient.callV2('company/search', {
+      filters: buildBenchmarkSearchFilters(typeId, tier, ownRating),
       limit: 100,
       offset,
       striptags: 'true',
@@ -3447,7 +3473,8 @@
       return;
     }
 
-    const cacheKey = String(own.typeId);
+    const tier = state.benchmark.tier || 'same';
+    const cacheKey = `${own.typeId}:${tier}:${tier === 'same' ? own.rating ?? 'unknown' : ''}`;
     const cached = state.benchmark.cache[cacheKey];
     if (!force && cached && Date.now() - cached.timestamp < BENCHMARK_CACHE_TTL_MS) {
       await renderBenchmarkResults(panel, cached.data, own).catch((err) => console.error('[TDS] Compare render failed:', err));
@@ -3457,7 +3484,7 @@
     if (resultsEl) resultsEl.innerHTML = `<div class="tds-box tds-box-neutral">Fetching ${escapeHtml(String(own.typeName || `company type ${own.typeId}`))} companies…</div>`;
 
     try {
-      const data = await fetchBenchmarkCompanies(own.typeId, 0);
+      const data = await fetchBenchmarkCompanies(own.typeId, 0, tier, own.rating);
       state.benchmark.cache[cacheKey] = { timestamp: Date.now(), data };
       await renderBenchmarkResults(panel, data, own);
     } catch (err) {
@@ -3688,26 +3715,17 @@
     }
 
     const tier = state.benchmark.tier || 'same';
-    const rowsWithRating = normalized.filter((row) => row.rating !== null);
-    let ratingFallback = false;
 
+    // Rating-specific requests are filtered by Torn server-side. Keep a light
+    // defensive filter only when rating values are actually present.
     let filtered = normalized.filter((row) => {
       if (tier === 'all') return true;
-
-      // If Torn did not return a rating for a row, exclude it from an explicit
-      // rating-band filter rather than silently mixing unknown ratings in.
-      if (row.rating === null) return false;
-
-      if (tier === 'same') return ownRating !== null ? row.rating === ownRating : false;
+      if (row.rating === null) return true;
+      if (tier === 'same') return ownRating !== null ? row.rating === ownRating : true;
       if (tier === 'mid') return row.rating >= 3 && row.rating <= 5;
       if (tier === 'top') return row.rating >= 8 && row.rating <= 10;
       return true;
     });
-
-    if (tier !== 'all' && filtered.length === 0) {
-      filtered = normalized;
-      ratingFallback = true;
-    }
 
     const hasWeeklyIncome = filtered.some((r) => r.weeklyIncome !== null);
     const hasDailyIncome = filtered.some((r) => r.dailyIncome !== null);
@@ -3748,7 +3766,11 @@
             ? '8–10★'
             : 'All Ratings';
 
-    let html = `<div class="tds-card">`;
+    let html = `<div class="tds-box tds-box-neutral">
+      ${tier === 'all'
+        ? 'Source: company type list.'
+        : 'Source: Torn company/search with the selected rating band applied server-side.'}
+    </div><div class="tds-card">`;
     html += `<div class="tds-row"><span class="tds-row-label">Selected rating</span><span class="tds-row-value">${escapeHtml(tierLabel)}</span></div>`;
     html += `<div class="tds-row"><span class="tds-row-label">Companies returned</span><span class="tds-row-value">${formatNumber(sorted.length)}</span></div>`;
     if (ownIndex >= 0 && metric) {
@@ -3809,15 +3831,6 @@
         });
         html += `</div>`;
       }
-    }
-
-    if (ratingFallback) {
-      html += `<div class="tds-box tds-box-warn">
-        <strong>${escapeHtml(tierLabel)} could not be matched from this returned company list.</strong>
-        ${rowsWithRating.length
-          ? 'No returned company matched that rating band, so all returned companies are shown instead.'
-          : 'Torn did not include usable rating values in this response, so all returned companies are shown instead.'}
-      </div>`;
     }
 
     const financialFieldCount = [
