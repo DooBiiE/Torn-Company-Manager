@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Company Management Suite
 // @namespace    torn-company-management-suite
-// @version      1.3.21
+// @version      1.3.22
 // @description  Local-only company management dashboard for Torn directors, embedded in the Jobs page. No company data ever leaves your browser; only your Torn User ID is checked against a public license list.
 // @author       DooBiiE
 // @match        https://www.torn.com/*
@@ -67,7 +67,7 @@
   // TornPDA does not always expose the legacy GM_info object that desktop
   // userscript managers provide. Try both common metadata APIs, then use the
   // release version as a PDA-safe fallback so the UI never shows vunknown.
-  const TDS_VERSION_FALLBACK = '1.3.21';
+  const TDS_VERSION_FALLBACK = '1.3.22';
   const TDS_VERSION =
     (typeof GM_info !== 'undefined' && GM_info?.script?.version) ||
     (typeof GM !== 'undefined' && GM?.info?.script?.version) ||
@@ -3660,6 +3660,36 @@
     return value >= baseline ? 'tds-v-good' : 'tds-v-bad';
   }
 
+  function rankForMetric(rows, ownId, metric) {
+    const ranked = rows
+      .filter((row) => typeof row[metric] === 'number')
+      .sort((a, b) => b[metric] - a[metric]);
+
+    const index = ranked.findIndex((row) =>
+      ownId !== null &&
+      row.id !== null &&
+      String(row.id) === String(ownId)
+    );
+
+    return {
+      rows: ranked,
+      rank: index >= 0 ? index + 1 : null,
+      total: ranked.length,
+      ownIndex: index,
+      ownRow: index >= 0 ? ranked[index] : null,
+    };
+  }
+
+  function metricTargetGap(rankedRows, ownValue, targetIndex) {
+    if (!Array.isArray(rankedRows) || targetIndex < 0 || targetIndex >= rankedRows.length) return null;
+    if (typeof ownValue !== 'number') return null;
+
+    const targetValue = rankedRows[targetIndex];
+    if (typeof targetValue !== 'number') return null;
+
+    return Math.max(0, targetValue - ownValue + 1);
+  }
+
   function revenuePerCustomer(income, customers) {
     if (typeof income !== 'number' || typeof customers !== 'number' || customers <= 0) return null;
     return income / customers;
@@ -3764,6 +3794,14 @@
       .sort((a, b) => b.value - a.value);
     const avgWeeklyRpc = averageNumeric(weeklyRpcRows.map((x) => x.value));
 
+    const dailyIncomeRank = rankForMetric(sorted, ownId, 'dailyIncome');
+    const dailyCustomersRank = rankForMetric(sorted, ownId, 'dailyCustomers');
+    const weeklyIncomeRank = rankForMetric(sorted, ownId, 'weeklyIncome');
+    const weeklyCustomersRank = rankForMetric(sorted, ownId, 'weeklyCustomers');
+
+    const medianDailyCustomers = medianNumeric(sorted.map((r) => r.dailyCustomers));
+    const medianWeeklyCustomers = medianNumeric(sorted.map((r) => r.weeklyCustomers));
+
     const tierLabel =
       tier === 'same'
         ? (ownRating !== null ? `Same Rating (${ownRating}★)` : 'Same Rating')
@@ -3786,6 +3824,70 @@
     html += `</div>`;
 
     if (ownRow) {
+      html += `<div class="tds-section-label">Performance summary</div>`;
+      html += `<div style="overflow-x:auto;"><table class="tds-table tds-compare-table"><thead><tr>
+        <th>Metric</th>
+        <th>Your Value</th>
+        <th>vs Average</th>
+        <th>vs Median</th>
+        <th>Rank</th>
+      </tr></thead><tbody>`;
+
+      const performanceRows = [
+        {
+          label: 'Daily Income',
+          value: ownRow.dailyIncome,
+          average: avgDailyIncome,
+          median: medianNumeric(sorted.map((r) => r.dailyIncome)),
+          rank: dailyIncomeRank,
+          money: true,
+        },
+        {
+          label: 'Daily Customers',
+          value: ownRow.dailyCustomers,
+          average: avgDailyCustomers,
+          median: medianDailyCustomers,
+          rank: dailyCustomersRank,
+          money: false,
+        },
+        {
+          label: 'Weekly Income',
+          value: ownRow.weeklyIncome,
+          average: avgWeeklyIncome,
+          median: medianWeeklyIncome,
+          rank: weeklyIncomeRank,
+          money: true,
+        },
+        {
+          label: 'Weekly Customers',
+          value: ownRow.weeklyCustomers,
+          average: avgWeeklyCustomers,
+          median: medianWeeklyCustomers,
+          rank: weeklyCustomersRank,
+          money: false,
+        },
+      ];
+
+      performanceRows.forEach((item) => {
+        if (item.value === null || item.value === undefined) return;
+        const valueText = item.money ? formatMoney(item.value) : formatNumber(item.value);
+        const avgText = signedPercent(percentDiff(item.value, item.average));
+        const medianText = signedPercent(percentDiff(item.value, item.median));
+        const rankText = item.rank.rank !== null
+          ? `#${item.rank.rank} / ${item.rank.total}`
+          : '—';
+
+        html += `<tr class="company-data-row">
+          <td><strong>${item.label}</strong></td>
+          <td class="${compareClass(item.value, item.average)}"><strong>${valueText}</strong></td>
+          <td class="${compareClass(item.value, item.average)}">${avgText}</td>
+          <td class="${compareClass(item.value, item.median)}">${medianText}</td>
+          <td>${rankText}</td>
+        </tr>`;
+      });
+
+      html += `</tbody></table></div>`;
+
       html += `<div class="tds-section-label">Your company</div><div class="tds-card">`;
 
       if (ownRow.weeklyIncome !== null) {
@@ -3813,32 +3915,62 @@
 
       html += `</div>`;
 
-      if (metric && typeof ownRow[metric] === 'number') {
+      html += `<div class="tds-section-label">Targets</div><div class="tds-card">`;
+
+      const targetMetrics = [
+        { label: 'Weekly Income', metric: 'weeklyIncome', rankInfo: weeklyIncomeRank, money: true },
+        { label: 'Weekly Customers', metric: 'weeklyCustomers', rankInfo: weeklyCustomersRank, money: false },
+        { label: 'Daily Income', metric: 'dailyIncome', rankInfo: dailyIncomeRank, money: true },
+        { label: 'Daily Customers', metric: 'dailyCustomers', rankInfo: dailyCustomersRank, money: false },
+      ];
+
+      targetMetrics.forEach((targetMetric) => {
+        const ownValue = ownRow[targetMetric.metric];
+        const info = targetMetric.rankInfo;
+
+        if (typeof ownValue !== 'number' || !info.rows.length) return;
+
+        html += `<div class="tds-section-label" style="margin-top:8px;">${targetMetric.label}</div>`;
+
         const targetRows = [
-          { label: 'Next position', index: ownIndex > 0 ? ownIndex - 1 : null },
-          { label: 'Top 10', index: sorted.length >= 10 ? 9 : null },
-          { label: 'Top 5', index: sorted.length >= 5 ? 4 : null },
-          { label: '#1', index: sorted.length >= 1 ? 0 : null },
+          { label: 'Next position', index: info.ownIndex > 0 ? info.ownIndex - 1 : null },
+          { label: 'Top 10', index: info.rows.length >= 10 ? 9 : null },
+          { label: 'Top 5', index: info.rows.length >= 5 ? 4 : null },
+          { label: '#1', index: info.rows.length >= 1 ? 0 : null },
         ];
 
-        html += `<div class="tds-section-label">Targets</div><div class="tds-card">`;
         targetRows.forEach((target) => {
-          if (target.index === null || target.index < 0 || target.index >= sorted.length) return;
-          if (ownIndex >= 0 && ownIndex <= target.index) {
+          if (target.index === null || target.index < 0 || target.index >= info.rows.length) return;
+
+          if (info.ownIndex >= 0 && info.ownIndex <= target.index) {
             html += `<div class="tds-row"><span class="tds-row-label">${target.label}</span><span class="tds-row-value tds-v-good">Achieved</span></div>`;
             return;
           }
 
-          const targetValue = sorted[target.index]?.[metric];
-          if (typeof targetValue !== 'number') return;
+          const targetValue = info.rows[target.index][targetMetric.metric];
+          const needed = metricTargetGap(
+            info.rows.map((row) => row[targetMetric.metric]),
+            ownValue,
+            target.index
+          );
 
-          const needed = Math.max(0, targetValue - ownRow[metric] + 1);
-          const pct = ownRow[metric] > 0 ? (needed / ownRow[metric]) * 100 : null;
-          html += `<div class="tds-row"><span class="tds-row-label">${target.label}</span><span class="tds-row-value">${formatMoney(needed)}${pct !== null ? ` (${pct.toFixed(1)}%)` : ''}</span></div>`;
+          if (needed === null) return;
+
+          const neededText = targetMetric.money
+            ? formatMoney(needed)
+            : formatNumber(Math.ceil(needed));
+
+          const pctNeeded = ownValue > 0 ? (needed / ownValue) * 100 : null;
+
+          html += `<div class="tds-row">
+            <span class="tds-row-label">${target.label}</span>
+            <span class="tds-row-value">${neededText}${pctNeeded !== null ? ` (${pctNeeded.toFixed(1)}%)` : ''}</span>
+          </div>`;
         });
-        html += `</div>`;
-      }
-    }
+      });
+
+      html += `</div>`;
+}
 
     const financialFieldCount = [
       hasDailyIncome,
