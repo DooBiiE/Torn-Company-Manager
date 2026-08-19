@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Company Management Suite
 // @namespace    torn-company-management-suite
-// @version      1.3.28
+// @version      1.3.29
 // @description  Local-only company management dashboard for Torn directors, embedded in the Jobs page. No company data ever leaves your browser; only your Torn User ID is checked against a public license list.
 // @author       DooBiiE
 // @match        https://www.torn.com/*
@@ -67,7 +67,7 @@
   // TornPDA does not always expose the legacy GM_info object that desktop
   // userscript managers provide. Try both common metadata APIs, then use the
   // release version as a PDA-safe fallback so the UI never shows vunknown.
-  const TDS_VERSION_FALLBACK = '1.3.28';
+  const TDS_VERSION_FALLBACK = '1.3.29';
   const TDS_VERSION =
     (typeof GM_info !== 'undefined' && GM_info?.script?.version) ||
     (typeof GM !== 'undefined' && GM?.info?.script?.version) ||
@@ -3106,9 +3106,110 @@
     });
   }
 
+  function specialPositionEffect(special) {
+    const key = String(special || '').toLowerCase();
+
+    if (key === 'cleaner') {
+      return 'Helps maintain company environment.';
+    }
+    if (key === 'manager') {
+      return 'Increases the effectiveness of underperforming employees.';
+    }
+    if (key === 'marketer') {
+      return 'Increases the effectiveness of the advertising budget.';
+    }
+    if (key === 'secretary') {
+      return 'Shows detailed employee earnings / sales contribution.';
+    }
+    if (key === 'trainer') {
+      return 'Generates additional company trains based on trainer effectiveness.';
+    }
+
+    return null;
+  }
+
+  function inferSpecialPosition(positionName, typeId = null, typeName = null) {
+    const rawName = String(positionName || '').trim();
+    const name = normalizeFieldName(rawName);
+    const companyName = normalizeFieldName(typeName || '');
+
+    // First use role names that directly identify Torn's universal special
+    // positions. These work across company types.
+    const exactGeneric = new Map([
+      ['cleaner', 'Cleaner'],
+      ['janitor', 'Cleaner'],
+      ['kitchenassistant', 'Cleaner'],
+
+      ['manager', 'Manager'],
+      ['storemanager', 'Manager'],
+      ['linemanager', 'Manager'],
+      ['leaddeveloper', 'Manager'],
+      ['headchef', 'Manager'],
+      ['supervisor', 'Manager'],
+      ['teamleader', 'Manager'],
+      ['bosun', 'Manager'],
+
+      ['marketer', 'Marketer'],
+      ['marketingmanager', 'Marketer'],
+      ['marketingexecutive', 'Marketer'],
+      ['photographer', 'Marketer'],
+      ['spokesperson', 'Marketer'],
+
+      ['secretary', 'Secretary'],
+      ['receptionist', 'Secretary'],
+      ['accountant', 'Secretary'],
+      ['bookkeeper', 'Secretary'],
+      ['officeclerk', 'Secretary'],
+      ['companyliaison', 'Secretary'],
+      ['analyst', 'Secretary'],
+
+      ['trainer', 'Trainer'],
+      ['trainingadvisor', 'Trainer'],
+      ['trainingadviser', 'Trainer'],
+      ['consultant', 'Trainer'],
+      ['specialist', 'Trainer'],
+      ['teacher', 'Trainer'],
+      ['defenceconsultant', 'Trainer'],
+    ]);
+
+    if (exactGeneric.has(name)) return exactGeneric.get(name);
+
+    // Some titles are company-type specific and cannot safely be inferred from
+    // their words alone. Keep explicit fallbacks for known official Torn role
+    // tables when the API omits the Special field.
+    const isAdultNovelties =
+      Number(typeId) === 10 ||
+      companyName === 'adultnovelties';
+
+    if (isAdultNovelties) {
+      const adultNovelties = new Map([
+        ['humanresources', 'Trainer'],
+        ['hrofficer', 'Trainer'],
+        ['storemanager', 'Manager'],
+        ['marketingmanager', 'Marketer'],
+        ['receptionist', 'Secretary'],
+        ['cleaner', 'Cleaner'],
+        ['sexpert', null],
+        ['salesassistant', null],
+      ]);
+
+      if (adultNovelties.has(name)) return adultNovelties.get(name);
+    }
+
+    return null;
+  }
+
+  function resolvePositionSpecial(position, typeId = null, typeName = null) {
+    if (position?.special && !/^none$/i.test(String(position.special))) {
+      return String(position.special);
+    }
+
+    return inferSpecialPosition(position?.name, typeId, typeName);
+  }
+
   function classifyCompanyRole(position) {
     const name = String(position?.name || '');
-    const special = String(position?.special || '');
+    const special = String(position?.resolvedSpecial || position?.special || '');
 
     const reasons = [];
     let level = 'standard';
@@ -3255,7 +3356,7 @@
             position: position.name,
             current,
             projected,
-            text: `${position.name} would fall from ${current} to ${projected}; this role is classified as operationally important${position.special ? ` (${position.special})` : ''}.`
+            text: `${position.name} would fall from ${current} to ${projected}; this role is classified as operationally important${position.resolvedSpecial ? ` (${position.resolvedSpecial})` : ''}.`
           });
         }
       }
@@ -3288,7 +3389,13 @@
     const profile = findRaw(results, 'company', 'profile');
     const reference = findRaw(results, 'torn', 'companies');
     const typeId = numericValue(findValueDeep(profile, ['company_type', 'type_id', 'type']));
-    const positions = extractPositionRequirements(reference, typeId);
+    let positions = extractPositionRequirements(reference, typeId);
+    const typeName = resolveCompanyTypeName(reference, typeId);
+
+    positions = positions.map((position) => ({
+      ...position,
+      resolvedSpecial: resolvePositionSpecial(position, typeId, typeName),
+    }));
 
     let html = `<div class="tds-box tds-box-info">
       <strong>Employee Effectiveness:</strong> current Total EE is Torn's real value.
@@ -3324,6 +3431,7 @@
             <th>Role</th>
             <th>Current Staff</th>
             <th>Special Function</th>
+            <th>Special Effect</th>
             <th>Operational Classification</th>
             <th>Why</th>
           </tr>
@@ -3350,7 +3458,10 @@
       html += `<tr>
         <td><strong>${escapeHtml(role.position.name)}</strong></td>
         <td>${formatNumber(role.current)}</td>
-        <td>${role.position.special ? escapeHtml(role.position.special) : '—'}</td>
+        <td>${role.position.resolvedSpecial ? escapeHtml(role.position.resolvedSpecial) : 'None'}</td>
+        <td>${role.position.resolvedSpecial
+          ? escapeHtml(specialPositionEffect(role.position.resolvedSpecial) || 'Special effect recognised, description unavailable.')
+          : 'No special position effect'}</td>
         <td class="${cls}"><strong>${label}</strong></td>
         <td>${role.classification.reasons.length
           ? escapeHtml(role.classification.reasons.join(', '))
@@ -3379,7 +3490,7 @@
         html += `<div class="tds-row">
           <span class="tds-row-label">
             <strong>${escapeHtml(role.position.name)}</strong>
-            ${role.position.special ? `<span class="tds-v-dim"> · ${escapeHtml(role.position.special)}</span>` : ''}
+            ${role.position.resolvedSpecial ? `<span class="tds-v-dim"> · ${escapeHtml(role.position.resolvedSpecial)}</span>` : ''}
           </span>
           <span class="tds-row-value">
             ${classification} · ${formatNumber(role.current)} currently assigned
@@ -3391,10 +3502,10 @@
     }
 
     html += `<div class="tds-box tds-box-neutral" style="margin-top:10px;">
-      <strong>About “essential” roles:</strong> Torn's company reference data does not provide an official
-      <em>essential / mandatory</em> flag. The suite therefore distinguishes between roles Torn exposes with
-      operational special functions and obvious sales/revenue roles. These are shown as
-      <strong>Operationally Important</strong>, not falsely presented as official mandatory staffing requirements.
+      <strong>About role specials:</strong> the suite uses the Special value from Torn's company reference data when it is present.
+      If Torn omits that field, it falls back to known Torn special-position mappings for recognised role titles/company types.
+      Roles with no Torn special are shown as <strong>None</strong>.
+      Operationally Important is still a management classification, not an official mandatory-staffing flag.
     </div>`;
 
     html += `<div class="tds-box tds-box-warn">
