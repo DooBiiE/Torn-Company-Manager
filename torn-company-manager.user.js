@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Company Management Suite
 // @namespace    torn-company-management-suite
-// @version      1.1.1
+// @version      1.1.2
 // @description  Local-only company management dashboard for Torn directors, embedded in the Jobs page. No company data ever leaves your browser; only your Torn User ID is checked against a public license list.
 // @author       you
 // @match        https://www.torn.com/*
@@ -84,20 +84,19 @@
   const LICENSE_JSON_URL = 'https://raw.githubusercontent.com/DooBiiE/Torn-Company-Manager/refs/heads/main/licensed-users.json';
   const LICENSE_CACHE_TTL_MS = 60 * 60 * 1000; // 1h -- avoids hitting GitHub raw on every page load/navigation
 
-  // Torn's official Custom Key Builder deep-link format, confirmed against a
-  // real published example (title + one param per section, each a
-  // comma-separated selection list): the base URL, then &title=..., then
-  // &<section>=<selections>. Requesting company:detailed/stock/applications
-  // here is safe even for a non-director -- Torn evaluates the director-only
-  // restriction at QUERY time (per Diagnostics, that's error 7, "Incorrect
-  // ID-entity relation" -- a role check, not a permission-tier check), not
-  // at key-creation time. So one link works whether the requester is
-  // currently the director or not, and if their role changes later the same
-  // key starts returning that data automatically -- no need to regenerate it.
+  // Torn's Custom Key Builder deep-link format. The ONLY publicly confirmed
+  // working example uses `user`, `faction`, and `torn` as section params —
+  // nobody has published a working example using `company` this way, and a
+  // real test of an earlier version of this link (with `company=...` added)
+  // came back "Wrong format". Rather than guess at the right company
+  // selection tokens a second time, this link now only includes the parts
+  // that match the confirmed pattern (title + user + torn). The company
+  // selections (Profile, Employees, Detailed, Stock, Applications) have to
+  // be ticked manually on the page this opens — see the instructions next
+  // to the button in Settings.
   const CUSTOM_KEY_TITLE = 'Torn Company Management Suite';
   const CUSTOM_KEY_SECTIONS = {
     user: 'basic,workstats,log',
-    company: 'profile,employees,detailed,stock,applications',
     torn: 'companies',
   };
   function buildCustomKeyUrl() {
@@ -744,12 +743,15 @@
         </ul>
       </div>
       <div class="tds-box tds-box-neutral">
-        Rather than handing out a broad Full Access key, use Torn's own Custom Key Builder to request only the
-        selections this suite uses. It's safe to include the director-only ones even if you're not currently
-        the director \u2014 they'll simply stay BLOCKED until your role changes, at which point the same key
-        starts working for them automatically.
+        Rather than handing out a broad Full Access key, use Torn's Custom Key Builder to request only what
+        this suite uses. The button below opens it with your key title and the <code>user</code>/<code>torn</code>
+        selections pre-filled \u2014 that part is confirmed working. The <code>company</code> selections
+        <strong>could not be reliably pre-filled</strong> (an earlier attempt at this produced a "Wrong format"
+        error, and there's no confirmed example of doing this for the company section), so tick these five
+        boxes yourself once the page opens: <strong>Profile, Employees, Detailed, Stock, Applications</strong>
+        (exact on-page wording may differ slightly \u2014 look for the closest match under "Company").
       </div>
-      <button class="tds-btn-ghost" id="tds-custom-key-link">Generate Custom Key Request \u2197</button>
+      <button class="tds-btn-ghost" id="tds-custom-key-link">Open Custom Key Builder \u2197</button>
       <input class="tds-input" id="tds-keyinput" type="text" placeholder="Paste API key here" style="margin-top:8px;" />
       <div style="margin-top:8px; display:flex; gap:8px;">
         <button class="tds-btn" id="tds-savekey">Save key</button>
