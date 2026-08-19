@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Company Management Suite
 // @namespace    torn-company-management-suite
-// @version      1.1.11
+// @version      1.1.12
 // @description  Local-only company management dashboard for Torn directors, embedded in the Jobs page. No company data ever leaves your browser; only your Torn User ID is checked against a public license list.
 // @author       DooBiiE
 // @match        https://www.torn.com/*
@@ -65,7 +65,7 @@
   // TornPDA does not always expose the legacy GM_info object that desktop
   // userscript managers provide. Try both common metadata APIs, then use the
   // release version as a PDA-safe fallback so the UI never shows vunknown.
-  const TDS_VERSION_FALLBACK = '1.1.10';
+  const TDS_VERSION_FALLBACK = '1.1.12';
   const TDS_VERSION =
     (typeof GM_info !== 'undefined' && GM_info?.script?.version) ||
     (typeof GM !== 'undefined' && GM?.info?.script?.version) ||
@@ -669,9 +669,9 @@
       </div>
       <div id="tds-tabs">
         <button class="tds-tab tds-tab-active" data-tab="overview">OVERVIEW</button>
-        <button class="tds-tab" data-tab="finance">FINANCE</button>
+        <button class="tds-tab" data-tab="finance">COMPANY FINANCIALS</button>
         <button class="tds-tab" data-tab="training">TRAINING</button>
-        <button class="tds-tab" data-tab="benchmark">BENCHMARK</button>
+        <button class="tds-tab" data-tab="benchmark">COMPARE</button>
         <button class="tds-tab tds-tab-locked" data-tab="optimize" title="Needs a resolved position-fit formula (see tab)">OPTIMIZE</button>
         <button class="tds-tab" data-tab="settings">SETTINGS</button>
         <button class="tds-tab" data-tab="diagnostics">DIAGNOSTICS</button>
@@ -958,12 +958,27 @@
         ['company_bank', 'Company Bank']
       ];
       const shown = new Set();
+      const shownFieldNames = new Set();
+
+      // Torn can expose these three health values at different nesting levels
+      // depending on the API response shape. Pull them explicitly from the
+      // full profile (and detailed data when available) rather than relying on
+      // them being top-level scalar fields.
+      const healthMetrics = {
+        Popularity: findValueDeep(profile, ['popularity', 'company_popularity']) ?? findValueDeep(detailed, ['popularity', 'company_popularity']),
+        Efficiency: findValueDeep(profile, ['efficiency', 'company_efficiency']) ?? findValueDeep(detailed, ['efficiency', 'company_efficiency']),
+        Environment: findValueDeep(profile, ['environment', 'company_environment']) ?? findValueDeep(detailed, ['environment', 'company_environment'])
+      };
 
       for (const [key, label] of preferred) {
         const row = profileRows.find((r) => normalizeFieldName(r.key) === normalizeFieldName(key));
-        if (!row || shown.has(row.path)) continue;
+        const explicitHealthValue = Object.prototype.hasOwnProperty.call(healthMetrics, label)
+          ? healthMetrics[label]
+          : null;
+        if ((!row && explicitHealthValue === null) || (row && shown.has(row.path))) continue;
 
         let formatter = formatCompanyValue;
+        let value = row ? row.value : explicitHealthValue;
         if (label === 'Director') {
           formatter = (value) => formatDirectorName(value, employees, results);
         } else if (label === 'Type') {
@@ -972,10 +987,13 @@
           formatter = formatCompanyAge;
         } else if (label === 'Daily Income' || label === 'Weekly Income') {
           formatter = formatCurrency;
+        } else if (label === 'Popularity' || label === 'Efficiency' || label === 'Environment') {
+          formatter = formatPercent;
         }
 
-        html += companyOverviewRow(label, row.value, formatter);
-        shown.add(row.path);
+        html += companyOverviewRow(label, value, formatter);
+        if (row) shown.add(row.path);
+        shownFieldNames.add(normalizeFieldName(key));
       }
 
       // Always show roster size in the familiar current / capacity form when
@@ -992,6 +1010,7 @@
       for (const row of profileRows) {
         if (shown.has(row.path)) continue;
         const nk = normalizeFieldName(row.key);
+        if (shownFieldNames.has(nk)) continue;
         // These are already represented by the combined Employees row.
         if (/^(employeeshired|employeecount|employeescount|numemployees|employeescapacity|employeecapacity|maxemployees|maximumemployees|capacity)$/.test(nk)) continue;
 
@@ -1449,6 +1468,14 @@
     const n = numericValue(value);
     if (n === null) return formatCompanyValue(value);
     return `$${formatNumber(n)}`;
+  }
+
+  function formatPercent(value) {
+    if (value === undefined || value === null || value === '') return '—';
+    const text = String(value).trim();
+    if (text.endsWith('%')) return text;
+    const n = numericValue(value);
+    return n === null ? formatCompanyValue(value) : `${formatNumber(n)}%`;
   }
 
   function formatCompanyAge(value) {
