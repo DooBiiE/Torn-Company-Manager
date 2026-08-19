@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Company Management Suite
 // @namespace    torn-company-management-suite
-// @version      1.3.24
+// @version      1.3.25
 // @description  Local-only company management dashboard for Torn directors, embedded in the Jobs page. No company data ever leaves your browser; only your Torn User ID is checked against a public license list.
 // @author       DooBiiE
 // @match        https://www.torn.com/*
@@ -67,7 +67,7 @@
   // TornPDA does not always expose the legacy GM_info object that desktop
   // userscript managers provide. Try both common metadata APIs, then use the
   // release version as a PDA-safe fallback so the UI never shows vunknown.
-  const TDS_VERSION_FALLBACK = '1.3.24';
+  const TDS_VERSION_FALLBACK = '1.3.25';
   const TDS_VERSION =
     (typeof GM_info !== 'undefined' && GM_info?.script?.version) ||
     (typeof GM !== 'undefined' && GM?.info?.script?.version) ||
@@ -687,6 +687,30 @@
         padding-bottom: 8px;
       }
       .tds-stock-table tbody tr:last-child td { border-bottom: none; }
+      .tds-stock-summary {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+        gap: 8px;
+        margin: 10px 0;
+      }
+      .tds-stock-summary-card {
+        border: 1px solid var(--tds-border, #444);
+        border-radius: 6px;
+        padding: 10px;
+        background: var(--tds-panel-2, rgba(255,255,255,0.03));
+        text-align: center;
+      }
+      .tds-stock-summary-label {
+        font-size: 10px;
+        text-transform: uppercase;
+        letter-spacing: .6px;
+        opacity: .72;
+        margin-bottom: 4px;
+      }
+      .tds-stock-summary-value {
+        font-size: 17px;
+        font-weight: 700;
+      }
       .tds-spark { display: flex; align-items: flex-end; gap: 4px; height: 46px; margin: 6px 0; }
       .tds-spark-col { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 3px; }
       .tds-spark-bar { width: 100%; border-radius: 2px 2px 0 0; min-height: 2px; }
@@ -2278,6 +2302,133 @@
     return ((setPrice - costEach) / costEach) * 100;
   }
 
+  function stockSalesTrend(sold24, sold7) {
+    const day = sold24 !== null ? Math.max(0, Number(sold24) || 0) : null;
+    const week = sold7 !== null ? Math.max(0, Number(sold7) || 0) : null;
+
+    if (day === null || week === null) {
+      return { percent: null, label: 'No trend', className: '' };
+    }
+
+    const weeklyDailyAverage = week / 7;
+
+    if (weeklyDailyAverage <= 0) {
+      if (day > 0) return { percent: null, label: 'New demand', className: 'tds-v-good' };
+      return { percent: 0, label: 'Flat', className: '' };
+    }
+
+    const percent = ((day - weeklyDailyAverage) / weeklyDailyAverage) * 100;
+
+    if (percent >= 15) {
+      return { percent, label: `↑ ${percent.toFixed(0)}%`, className: 'tds-v-good' };
+    }
+
+    if (percent <= -15) {
+      return { percent, label: `↓ ${Math.abs(percent).toFixed(0)}%`, className: 'tds-v-bad' };
+    }
+
+    return { percent, label: `≈ ${percent >= 0 ? '+' : ''}${percent.toFixed(0)}%`, className: '' };
+  }
+
+  function stockRiskStatus(daysLeft, current, dailyRate) {
+    if (current !== null && current <= 0) {
+      return {
+        label: 'OUT OF STOCK',
+        className: 'tds-v-bad',
+        priority: 4,
+        reason: 'No stock remaining.'
+      };
+    }
+
+    if (dailyRate === null || dailyRate === undefined || dailyRate <= 0) {
+      return {
+        label: 'No recent demand',
+        className: '',
+        priority: 0,
+        reason: 'No usable recent daily sales rate.'
+      };
+    }
+
+    if (daysLeft === null) {
+      return {
+        label: 'Unknown',
+        className: '',
+        priority: 0,
+        reason: 'Stock cover could not be calculated.'
+      };
+    }
+
+    if (daysLeft <= 1) {
+      return {
+        label: 'Critical',
+        className: 'tds-v-bad',
+        priority: 4,
+        reason: `Approximately ${daysLeft.toFixed(1)} day of stock remaining.`
+      };
+    }
+
+    if (daysLeft <= 3) {
+      return {
+        label: 'Low',
+        className: 'tds-v-bad',
+        priority: 3,
+        reason: `Approximately ${daysLeft.toFixed(1)} days of stock remaining.`
+      };
+    }
+
+    if (daysLeft <= 7) {
+      return {
+        label: 'Watch',
+        className: '',
+        priority: 2,
+        reason: `Approximately ${daysLeft.toFixed(1)} days of stock remaining.`
+      };
+    }
+
+    if (daysLeft >= 30) {
+      return {
+        label: 'High cover',
+        className: '',
+        priority: 0,
+        reason: `Approximately ${daysLeft.toFixed(1)} days of stock remaining.`
+      };
+    }
+
+    return {
+      label: 'Healthy',
+      className: 'tds-v-good',
+      priority: 1,
+      reason: `Approximately ${daysLeft.toFixed(1)} days of stock remaining.`
+    };
+  }
+
+  function restockPriority(rec, risk, trend) {
+    if (!rec || rec.restock === null || rec.restock <= 0) {
+      return {
+        label: 'None',
+        className: '',
+        score: 0
+      };
+    }
+
+    let score = risk?.priority || 0;
+
+    if (trend?.percent !== null && trend.percent >= 15) score += 1;
+    if (rec.restock >= rec.target * 0.75) score += 1;
+
+    if (score >= 5) return { label: 'URGENT', className: 'tds-v-bad', score };
+    if (score >= 3) return { label: 'High', className: 'tds-v-bad', score };
+    if (score >= 2) return { label: 'Medium', className: '', score };
+    return { label: 'Low', className: '', score };
+  }
+
+  function stockInventoryValue(items) {
+    return items.reduce((sum, item) => {
+      if (typeof item.current !== 'number' || typeof item.setPrice !== 'number') return sum;
+      return sum + Math.max(0, item.current) * Math.max(0, item.setPrice);
+    }, 0);
+  }
+
   function pricingRecommendation(item, sold24, sold7, lastSoldPrice) {
     const setPrice = item.setPrice;
     const rrp = item.rrp;
@@ -2454,31 +2605,7 @@
       html += `<div class="tds-box tds-box-neutral">Parsed ${formatNumber(sales.parsedEvents)} stock-sale event(s) from company news. Oldest returned news: ${escapeHtml(coverage)}.</div>`;
     }
 
-    html += `<div style="overflow-x:auto;">
-      <table class="tds-table tds-stock-table">
-        <thead>
-          <tr>
-            <th>Product</th>
-            <th>Cost</th>
-            <th>RRP</th>
-            <th>Set Price</th>
-            <th>Last Sold</th>
-            <th>In Stock</th>
-            <th>Sold Daily</th>
-            <th>Sold 24h</th>
-            <th>Sold 7d</th>
-            <th>Days Left</th>
-            <th>Margin / Unit</th>
-            <th>Est. Daily Gross</th>
-            <th>Target Stock</th>
-            <th>Restock</th>
-            <th>Pricing</th>
-            <th>Suggested</th>
-          </tr>
-        </thead>
-        <tbody>`;
-
-    for (const item of items) {
+    const stockRows = items.map((item) => {
       const keyById = String(item.id || '');
       const keyByName = normalizeFieldName(item.name);
       const fromNews = sales.totals.get(keyById) || sales.totals.get(keyByName);
@@ -2503,14 +2630,166 @@
 
       const rec = restockRecommendation(item.current, sold24, sold7);
       const priceRec = pricingRecommendation(item, sold24, sold7, lastSoldPrice);
-
       const margin = stockGrossMargin(item.setPrice, item.costEach);
       const marginPct = stockMarginPercent(item.setPrice, item.costEach);
       const daysLeft = stockDaysRemaining(item.current, soldDaily);
+      const risk = stockRiskStatus(daysLeft, item.current, soldDaily);
+      const trend = stockSalesTrend(sold24, sold7);
+      const priority = restockPriority(rec, risk, trend);
+
       const estDailyGross =
         margin !== null && soldDaily !== null
           ? margin * soldDaily
           : null;
+
+      const estWeeklyGross =
+        estDailyGross !== null
+          ? estDailyGross * 7
+          : null;
+
+      return {
+        item,
+        sold24,
+        sold7,
+        soldDaily,
+        lastSoldPrice,
+        averageSoldPrice24,
+        rec,
+        priceRec,
+        margin,
+        marginPct,
+        daysLeft,
+        risk,
+        trend,
+        priority,
+        estDailyGross,
+        estWeeklyGross,
+      };
+    });
+
+    const totalStockUnits = stockRows.reduce(
+      (sum, row) => sum + (typeof row.item.current === 'number' ? Math.max(0, row.item.current) : 0),
+      0
+    );
+
+    const totalInventoryRetailValue = stockRows.reduce(
+      (sum, row) =>
+        sum +
+        (
+          typeof row.item.current === 'number' &&
+          typeof row.item.setPrice === 'number'
+            ? Math.max(0, row.item.current) * Math.max(0, row.item.setPrice)
+            : 0
+        ),
+      0
+    );
+
+    const estimatedDailyGrossTotal = stockRows.reduce(
+      (sum, row) => sum + (typeof row.estDailyGross === 'number' ? row.estDailyGross : 0),
+      0
+    );
+
+    const estimatedWeeklyGrossTotal = stockRows.reduce(
+      (sum, row) => sum + (typeof row.estWeeklyGross === 'number' ? row.estWeeklyGross : 0),
+      0
+    );
+
+    const restockItemCount = stockRows.filter(
+      (row) => row.rec && typeof row.rec.restock === 'number' && row.rec.restock > 0
+    ).length;
+
+    const urgentStockCount = stockRows.filter(
+      (row) => row.risk.priority >= 3
+    ).length;
+
+    const priceReviewCount = stockRows.filter(
+      (row) => row.priceRec.action === 'Consider raising' || row.priceRec.action === 'Consider lowering'
+    ).length;
+
+    html += `
+      <div class="tds-section-label">Stock intelligence</div>
+      <div class="tds-stock-summary">
+        <div class="tds-stock-summary-card">
+          <div class="tds-stock-summary-label">Products</div>
+          <div class="tds-stock-summary-value">${formatNumber(stockRows.length)}</div>
+        </div>
+        <div class="tds-stock-summary-card">
+          <div class="tds-stock-summary-label">Units In Stock</div>
+          <div class="tds-stock-summary-value">${formatNumber(totalStockUnits)}</div>
+        </div>
+        <div class="tds-stock-summary-card">
+          <div class="tds-stock-summary-label">Retail Stock Value</div>
+          <div class="tds-stock-summary-value">${formatCurrency(totalInventoryRetailValue)}</div>
+        </div>
+        <div class="tds-stock-summary-card">
+          <div class="tds-stock-summary-label">Est. Daily Gross</div>
+          <div class="tds-stock-summary-value">${formatCurrency(estimatedDailyGrossTotal)}</div>
+        </div>
+        <div class="tds-stock-summary-card">
+          <div class="tds-stock-summary-label">Est. Weekly Gross</div>
+          <div class="tds-stock-summary-value">${formatCurrency(estimatedWeeklyGrossTotal)}</div>
+        </div>
+        <div class="tds-stock-summary-card">
+          <div class="tds-stock-summary-label">Need Restock</div>
+          <div class="tds-stock-summary-value ${restockItemCount ? 'tds-v-bad' : 'tds-v-good'}">${formatNumber(restockItemCount)}</div>
+        </div>
+        <div class="tds-stock-summary-card">
+          <div class="tds-stock-summary-label">Low / Critical</div>
+          <div class="tds-stock-summary-value ${urgentStockCount ? 'tds-v-bad' : 'tds-v-good'}">${formatNumber(urgentStockCount)}</div>
+        </div>
+        <div class="tds-stock-summary-card">
+          <div class="tds-stock-summary-label">Price Reviews</div>
+          <div class="tds-stock-summary-value">${formatNumber(priceReviewCount)}</div>
+        </div>
+      </div>`;
+
+    html += `<div style="overflow-x:auto;">
+      <table class="tds-table tds-stock-table">
+        <thead>
+          <tr>
+            <th>Product</th>
+            <th>Cost</th>
+            <th>RRP</th>
+            <th>Set Price</th>
+            <th>Last Sold</th>
+            <th>In Stock</th>
+            <th>Sold Daily</th>
+            <th>Sold 24h</th>
+            <th>Sold 7d</th>
+            <th>Trend</th>
+            <th>Stock Status</th>
+            <th>Days Left</th>
+            <th>Margin / Unit</th>
+            <th>Est. Daily Gross</th>
+            <th>Est. Weekly Gross</th>
+            <th>Target Stock</th>
+            <th>Restock</th>
+            <th>Restock Priority</th>
+            <th>Pricing</th>
+            <th>Suggested</th>
+          </tr>
+        </thead>
+        <tbody>`;
+
+    for (const row of stockRows) {
+      const {
+        item,
+        sold24,
+        sold7,
+        soldDaily,
+        lastSoldPrice,
+        averageSoldPrice24,
+        rec,
+        priceRec,
+        margin,
+        marginPct,
+        daysLeft,
+        risk,
+        trend,
+        priority,
+        estDailyGross,
+        estWeeklyGross,
+      } = row;
 
       const restockText = rec
         ? (rec.restock === null ? '—' : formatNumber(rec.restock))
@@ -2530,11 +2809,15 @@
         <td>${soldDaily === null ? '—' : formatNumber(Math.round(soldDaily))}</td>
         <td>${sold24 === null ? '—' : formatNumber(Math.round(sold24))}</td>
         <td>${sold7 === null ? '—' : formatNumber(Math.round(sold7))}</td>
+        <td class="${trend.className}"><strong>${escapeHtml(trend.label)}</strong></td>
+        <td class="${risk.className}"><strong>${escapeHtml(risk.label)}</strong><div class="tds-v-dim">${escapeHtml(risk.reason)}</div></td>
         <td>${daysLeft === null ? '—' : `${daysLeft.toFixed(1)}d`}</td>
         <td>${margin === null ? '—' : `${formatCurrency(margin)}${marginPct !== null ? `<div class="tds-v-dim">${marginPct.toFixed(0)}%</div>` : ''}`}</td>
         <td>${estDailyGross === null ? '—' : formatCurrency(estDailyGross)}</td>
+        <td>${estWeeklyGross === null ? '—' : formatCurrency(estWeeklyGross)}</td>
         <td>${rec ? formatNumber(rec.target) : '—'}</td>
         <td><strong>${restockText}</strong></td>
+        <td class="${priority.className}"><strong>${escapeHtml(priority.label)}</strong></td>
         <td class="${priceRec.className}">
           <strong>${escapeHtml(priceRec.action)}</strong>
           <div class="tds-v-dim" style="max-width:240px;white-space:normal;">${escapeHtml(priceRec.reason)}</div>
@@ -2543,7 +2826,46 @@
       </tr>`;
     }
 
-    html += `</tbody></table></div>
+    html += `</tbody></table></div>`;
+
+    const attentionRows = [...stockRows]
+      .filter((row) =>
+        row.priority.score > 0 ||
+        row.priceRec.action === 'Consider raising' ||
+        row.priceRec.action === 'Consider lowering'
+      )
+      .sort((a, b) =>
+        b.priority.score - a.priority.score ||
+        (a.daysLeft ?? Number.POSITIVE_INFINITY) - (b.daysLeft ?? Number.POSITIVE_INFINITY)
+      )
+      .slice(0, 8);
+
+    if (attentionRows.length) {
+      html += `<div class="tds-section-label">Stock attention</div><div class="tds-card">`;
+
+      for (const row of attentionRows) {
+        const recText =
+          row.rec && row.rec.restock > 0
+            ? `Restock ${formatNumber(row.rec.restock)}`
+            : 'No restock needed';
+
+        const priceText =
+          row.priceRec.action !== 'Hold'
+            ? ` · ${escapeHtml(row.priceRec.action)}${row.priceRec.suggested !== null ? ` ${formatCurrency(row.priceRec.suggested)}` : ''}`
+            : '';
+
+        html += `<div class="tds-row">
+          <span class="tds-row-label"><strong>${escapeHtml(row.item.name)}</strong></span>
+          <span class="tds-row-value ${row.risk.className || row.priority.className}">
+            ${escapeHtml(row.risk.label)} · ${recText}${priceText}
+          </span>
+        </div>`;
+      }
+
+      html += `</div>`;
+    }
+
+    html += `
       <div class="tds-box tds-box-neutral" style="margin-top:10px;">
         <strong>Pricing recommendation rules:</strong> recent 24h sales are compared with the 7-day daily average, stock cover is considered, RRP is used when Torn supplies it, and an observed Last Sold Price is used when it can be parsed reliably.
         A recommendation only moves one dollar from the configured price so the tool stays conservative.
