@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Company Management Suite
 // @namespace    torn-company-management-suite
-// @version      1.3.22
+// @version      1.3.23
 // @description  Local-only company management dashboard for Torn directors, embedded in the Jobs page. No company data ever leaves your browser; only your Torn User ID is checked against a public license list.
 // @author       DooBiiE
 // @match        https://www.torn.com/*
@@ -67,7 +67,7 @@
   // TornPDA does not always expose the legacy GM_info object that desktop
   // userscript managers provide. Try both common metadata APIs, then use the
   // release version as a PDA-safe fallback so the UI never shows vunknown.
-  const TDS_VERSION_FALLBACK = '1.3.22';
+  const TDS_VERSION_FALLBACK = '1.3.23';
   const TDS_VERSION =
     (typeof GM_info !== 'undefined' && GM_info?.script?.version) ||
     (typeof GM !== 'undefined' && GM?.info?.script?.version) ||
@@ -3256,7 +3256,7 @@
 
   function getOwnCompanyCompareInfo(profile, results) {
     if (!profile || typeof profile !== 'object') {
-      return { id: null, typeId: null, typeName: null, rating: null };
+      return { id: null, name: null, typeId: null, typeName: null, rating: null };
     }
 
     // Prefer direct/wrapped company fields before doing a broad recursive
@@ -3270,6 +3270,7 @@
     }
 
     let id = null;
+    let name = null;
     let typeId = null;
     let typeName = null;
     let rating = null;
@@ -3277,6 +3278,13 @@
     for (const obj of candidates) {
       if (id === null) {
         id = numericValue(obj.id ?? obj.company_id ?? obj.companyId);
+      }
+
+      if (!name) {
+        const nameValue = obj.name ?? obj.company_name ?? obj.companyName;
+        if (nameValue !== null && nameValue !== undefined && String(nameValue).trim()) {
+          name = String(nameValue).trim();
+        }
       }
 
       if (rating === null) {
@@ -3299,11 +3307,18 @@
       rating = numericValue(findValueDeep(profile, ['rating', 'star_rating', 'stars']));
     }
 
+    if (!name) {
+      const deepName = findValueDeep(profile, ['name', 'company_name', 'companyName']);
+      if (deepName !== null && deepName !== undefined && String(deepName).trim()) {
+        name = String(deepName).trim();
+      }
+    }
+
     if (typeId !== null && !typeName) {
       typeName = resolveCompanyTypeName(findRaw(results, 'torn', 'companies'), typeId);
     }
 
-    return { id, typeId, typeName, rating };
+    return { id, name, typeId, typeName, rating };
   }
 
   function buildBenchmarkSearchFilters(typeId, tier, ownRating) {
@@ -3660,16 +3675,12 @@
     return value >= baseline ? 'tds-v-good' : 'tds-v-bad';
   }
 
-  function rankForMetric(rows, ownId, metric) {
+  function rankForMetric(rows, own, metric) {
     const ranked = rows
       .filter((row) => typeof row[metric] === 'number')
       .sort((a, b) => b[metric] - a[metric]);
 
-    const index = ranked.findIndex((row) =>
-      ownId !== null &&
-      row.id !== null &&
-      String(row.id) === String(ownId)
-    );
+    const index = ranked.findIndex((row) => isOwnCompareCompany(row, own));
 
     return {
       rows: ranked,
@@ -3693,6 +3704,27 @@
   function revenuePerCustomer(income, customers) {
     if (typeof income !== 'number' || typeof customers !== 'number' || customers <= 0) return null;
     return income / customers;
+  }
+
+  function normalizeCompareCompanyName(value) {
+    return String(value || '')
+      .trim()
+      .toLowerCase()
+      .replace(/\s+/g, ' ');
+  }
+
+  function isOwnCompareCompany(row, own) {
+    if (!row || !own) return false;
+
+    if (own.id !== null && row.id !== null &&
+        String(row.id) === String(own.id)) {
+      return true;
+    }
+
+    const ownName = normalizeCompareCompanyName(own.name);
+    const rowName = normalizeCompareCompanyName(row.name);
+
+    return Boolean(ownName && rowName && ownName === rowName);
   }
 
   async function renderBenchmarkResults(panel, data, own) {
@@ -3777,10 +3809,45 @@
       return (b[metric] ?? -1) - (a[metric] ?? -1);
     });
 
-    const ownIndex = ownId !== null
-      ? sorted.findIndex((row) => row.id !== null && String(row.id) === String(ownId))
-      : -1;
-    const ownRow = ownIndex >= 0 ? sorted[ownIndex] : null;
+    const ownIndex = sorted.findIndex((row) => isOwnCompareCompany(row, own));
+    let ownRow = ownIndex >= 0 ? sorted[ownIndex] : null;
+
+    if (!ownRow) {
+      const currentResults = state.lastResults;
+      const ownProfile = currentResults ? findRaw(currentResults, 'company', 'profile') : null;
+      const ownDetailed = currentResults ? findRaw(currentResults, 'company', 'detailed') : null;
+      const ownCombined = { ...(ownProfile || {}), ...(ownDetailed || {}) };
+
+      ownRow = {
+        id: own.id,
+        name: own.name,
+        rating: own.rating,
+        dailyIncome: numericValue(findValueDeep(ownCombined, ['daily_income', 'dailyIncome'])),
+        weeklyIncome: numericValue(findValueDeep(ownCombined, ['weekly_income', 'weeklyIncome'])),
+        dailyCustomers: numericValue(findValueDeep(ownCombined, ['daily_customers', 'dailyCustomers'])),
+        weeklyCustomers: numericValue(findValueDeep(ownCombined, ['weekly_customers', 'weeklyCustomers'])),
+      };
+
+      // Fill missing own-company financials from Snapshot too.
+      try {
+        const snapshotMap = await getCompareSnapshotFinancialMap();
+        const snap = own.id !== null ? snapshotMap.get(String(own.id)) : null;
+        if (snap) {
+          ownRow.dailyIncome = ownRow.dailyIncome ?? snap.dailyIncome;
+          ownRow.weeklyIncome = ownRow.weeklyIncome ?? snap.weeklyIncome;
+          ownRow.dailyCustomers = ownRow.dailyCustomers ?? snap.dailyCustomers;
+          ownRow.weeklyCustomers = ownRow.weeklyCustomers ?? snap.weeklyCustomers;
+        }
+      } catch (_) {}
+
+      const hasOwnData =
+        ownRow.dailyIncome !== null ||
+        ownRow.weeklyIncome !== null ||
+        ownRow.dailyCustomers !== null ||
+        ownRow.weeklyCustomers !== null;
+
+      if (!hasOwnData) ownRow = null;
+    }
 
     const avgWeeklyIncome = averageNumeric(sorted.map((r) => r.weeklyIncome));
     const medianWeeklyIncome = medianNumeric(sorted.map((r) => r.weeklyIncome));
@@ -3794,13 +3861,41 @@
       .sort((a, b) => b.value - a.value);
     const avgWeeklyRpc = averageNumeric(weeklyRpcRows.map((x) => x.value));
 
-    const dailyIncomeRank = rankForMetric(sorted, ownId, 'dailyIncome');
-    const dailyCustomersRank = rankForMetric(sorted, ownId, 'dailyCustomers');
-    const weeklyIncomeRank = rankForMetric(sorted, ownId, 'weeklyIncome');
-    const weeklyCustomersRank = rankForMetric(sorted, ownId, 'weeklyCustomers');
+    const dailyIncomeRank = rankForMetric(sorted, own, 'dailyIncome');
+    const dailyCustomersRank = rankForMetric(sorted, own, 'dailyCustomers');
+    const weeklyIncomeRank = rankForMetric(sorted, own, 'weeklyIncome');
+    const weeklyCustomersRank = rankForMetric(sorted, own, 'weeklyCustomers');
 
     const medianDailyCustomers = medianNumeric(sorted.map((r) => r.dailyCustomers));
     const medianWeeklyCustomers = medianNumeric(sorted.map((r) => r.weeklyCustomers));
+
+    function resolveRankFromValue(rankInfo, ownValue, metricName) {
+      if (rankInfo.rank !== null || typeof ownValue !== 'number') return rankInfo;
+      const rows = [...rankInfo.rows].sort((a, b) => b[metricName] - a[metricName]);
+      let index = rows.findIndex((row) => typeof row[metricName] === 'number' && row[metricName] <= ownValue);
+      if (index < 0) index = rows.length;
+      return {
+        ...rankInfo,
+        rows,
+        rank: index + 1,
+        total: rows.length + 1,
+        ownIndex: index,
+        ownRow,
+      };
+    }
+
+    const resolvedDailyIncomeRank = ownRow
+      ? resolveRankFromValue(dailyIncomeRank, ownRow.dailyIncome, 'dailyIncome')
+      : dailyIncomeRank;
+    const resolvedDailyCustomersRank = ownRow
+      ? resolveRankFromValue(dailyCustomersRank, ownRow.dailyCustomers, 'dailyCustomers')
+      : dailyCustomersRank;
+    const resolvedWeeklyIncomeRank = ownRow
+      ? resolveRankFromValue(weeklyIncomeRank, ownRow.weeklyIncome, 'weeklyIncome')
+      : weeklyIncomeRank;
+    const resolvedWeeklyCustomersRank = ownRow
+      ? resolveRankFromValue(weeklyCustomersRank, ownRow.weeklyCustomers, 'weeklyCustomers')
+      : weeklyCustomersRank;
 
     const tierLabel =
       tier === 'same'
@@ -3818,8 +3913,13 @@
     </div><div class="tds-card">`;
     html += `<div class="tds-row"><span class="tds-row-label">Selected rating</span><span class="tds-row-value">${escapeHtml(tierLabel)}</span></div>`;
     html += `<div class="tds-row"><span class="tds-row-label">Companies returned</span><span class="tds-row-value">${formatNumber(sorted.length)}</span></div>`;
-    if (ownIndex >= 0 && metric) {
-      html += `<div class="tds-row"><span class="tds-row-label">Your rank by ${metricLabel}</span><span class="tds-row-value">#${ownIndex + 1} / ${sorted.length}</span></div>`;
+    if (ownRow && metric) {
+      const topRankInfo = metric === 'weeklyIncome'
+        ? resolvedWeeklyIncomeRank
+        : resolvedDailyIncomeRank;
+      if (topRankInfo.rank !== null) {
+        html += `<div class="tds-row"><span class="tds-row-label">Your rank by ${metricLabel}</span><span class="tds-row-value">#${topRankInfo.rank} / ${topRankInfo.total}</span></div>`;
+      }
     }
     html += `</div>`;
 
@@ -3839,7 +3939,7 @@
           value: ownRow.dailyIncome,
           average: avgDailyIncome,
           median: medianNumeric(sorted.map((r) => r.dailyIncome)),
-          rank: dailyIncomeRank,
+          rank: resolvedDailyIncomeRank,
           money: true,
         },
         {
@@ -3847,7 +3947,7 @@
           value: ownRow.dailyCustomers,
           average: avgDailyCustomers,
           median: medianDailyCustomers,
-          rank: dailyCustomersRank,
+          rank: resolvedDailyCustomersRank,
           money: false,
         },
         {
@@ -3855,7 +3955,7 @@
           value: ownRow.weeklyIncome,
           average: avgWeeklyIncome,
           median: medianWeeklyIncome,
-          rank: weeklyIncomeRank,
+          rank: resolvedWeeklyIncomeRank,
           money: true,
         },
         {
@@ -3863,7 +3963,7 @@
           value: ownRow.weeklyCustomers,
           average: avgWeeklyCustomers,
           median: medianWeeklyCustomers,
-          rank: weeklyCustomersRank,
+          rank: resolvedWeeklyCustomersRank,
           money: false,
         },
       ];
@@ -3918,10 +4018,10 @@
       html += `<div class="tds-section-label">Targets</div><div class="tds-card">`;
 
       const targetMetrics = [
-        { label: 'Weekly Income', metric: 'weeklyIncome', rankInfo: weeklyIncomeRank, money: true },
-        { label: 'Weekly Customers', metric: 'weeklyCustomers', rankInfo: weeklyCustomersRank, money: false },
-        { label: 'Daily Income', metric: 'dailyIncome', rankInfo: dailyIncomeRank, money: true },
-        { label: 'Daily Customers', metric: 'dailyCustomers', rankInfo: dailyCustomersRank, money: false },
+        { label: 'Weekly Income', metric: 'weeklyIncome', rankInfo: resolvedWeeklyIncomeRank, money: true },
+        { label: 'Weekly Customers', metric: 'weeklyCustomers', rankInfo: resolvedWeeklyCustomersRank, money: false },
+        { label: 'Daily Income', metric: 'dailyIncome', rankInfo: resolvedDailyIncomeRank, money: true },
+        { label: 'Daily Customers', metric: 'dailyCustomers', rankInfo: resolvedDailyCustomersRank, money: false },
       ];
 
       targetMetrics.forEach((targetMetric) => {
