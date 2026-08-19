@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Company Management Suite
 // @namespace    torn-company-management-suite
-// @version      1.3.39
+// @version      1.3.40
 // @description  Local-only company management dashboard for Torn directors, embedded in the Jobs page. No company data ever leaves your browser; only your Torn User ID is checked against a public license list.
 // @author       DooBiiE
 // @match        https://www.torn.com/*
@@ -67,7 +67,7 @@
   // TornPDA does not always expose the legacy GM_info object that desktop
   // userscript managers provide. Try both common metadata APIs, then use the
   // release version as a PDA-safe fallback so the UI never shows vunknown.
-  const TDS_VERSION_FALLBACK = '1.3.39';
+  const TDS_VERSION_FALLBACK = '1.3.40';
   const TDS_VERSION =
     (typeof GM_info !== 'undefined' && GM_info?.script?.version) ||
     (typeof GM !== 'undefined' && GM?.info?.script?.version) ||
@@ -2948,8 +2948,8 @@
 
     if (backfillButton) {
       const todayKey = isoDayKey(Date.now());
-      const lastBackfillDay = tdsGetValue(STORAGE_KEY_HISTORY_BACKFILL_DAY, '');
-      const lastBackfillResult = tdsGetValue(STORAGE_KEY_HISTORY_BACKFILL_RESULT, null);
+      const lastBackfillDay = GM_getValue(STORAGE_KEY_HISTORY_BACKFILL_DAY, '');
+      const lastBackfillResult = GM_getValue(STORAGE_KEY_HISTORY_BACKFILL_RESULT, null);
 
       if (lastBackfillDay === todayKey) {
         backfillButton.disabled = true;
@@ -2968,11 +2968,17 @@
       }
 
       backfillButton.addEventListener('click', async () => {
+        console.log('[TDS] Historical backfill button clicked');
         const currentResults = state.lastResults;
         const own = extractOwnCompanyInfo(currentResults);
 
         if (own.id === null) {
-          if (backfillStatus) backfillStatus.textContent = 'Company ID unavailable.';
+          if (backfillStatus) {
+            backfillStatus.textContent = 'Company ID unavailable — cannot start backfill.';
+            backfillStatus.classList.remove('tds-v-dim');
+            backfillStatus.classList.add('tds-v-bad');
+          }
+          console.warn('[TDS] Historical backfill aborted: company ID unavailable');
           return;
         }
 
@@ -2986,6 +2992,8 @@
           backfillDetail.textContent =
             'This performs read-only Torn API requests. No company actions are submitted.';
         }
+
+        console.log('[TDS] Historical backfill starting for company', own.id);
 
         try {
           const result = await backfillCompanyPerformanceHistory(
@@ -3011,8 +3019,8 @@
             }
           );
 
-          tdsSetValue(STORAGE_KEY_HISTORY_BACKFILL_DAY, isoDayKey(Date.now()));
-          tdsSetValue(STORAGE_KEY_HISTORY_BACKFILL_RESULT, {
+          GM_setValue(STORAGE_KEY_HISTORY_BACKFILL_DAY, isoDayKey(Date.now()));
+          GM_setValue(STORAGE_KEY_HISTORY_BACKFILL_RESULT, {
             saved: result.saved,
             unavailable: result.unavailable,
             requested: result.requested,
