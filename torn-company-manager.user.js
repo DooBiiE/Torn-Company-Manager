@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Company Management Suite
 // @namespace    torn-company-management-suite
-// @version      1.1.12
+// @version      1.2.0
 // @description  Local-only company management dashboard for Torn directors, embedded in the Jobs page. No company data ever leaves your browser; only your Torn User ID is checked against a public license list.
 // @author       DooBiiE
 // @match        https://www.torn.com/*
@@ -38,14 +38,16 @@
  *        HISTORICAL = from a locally stored earlier snapshot
  *        BLOCKED = this key/role cannot access this data (shown, not hidden)
  *
- * TABS THAT ARE STUBBED (LOCKED), NOT FAKED:
- *   Optimize needs each employee's raw working stats in a role they don't
- *   currently hold -- Torn does not expose that to a director's key. Rather
- *   than fake it, it stays locked until an opt-in flow exists.
+ * OPTIMIZE / STOCK MANAGEMENT:
+ *   Optimize uses the working stats now returned by company/employees plus
+ *   position requirements from torn/companies. It reports requirement-fit
+ *   coverage; it does not pretend that this is Torn's hidden EE formula.
+ *   Stock Management combines company/stock with company/news when available
+ *   to show recent unit sales and a clearly-labelled derived restock target.
  *
  * REQUIRED API KEY LEVEL:
  *   Full Access (or a Custom key covering company: profile/employees/
- *   detailed/stock/applications and user: basic/workstats/log) is needed for
+ *   detailed/stock/news/applications and user: basic/workstats/log) is needed for
  *   full functionality. A Public/Minimal key will show BLOCKED on most tabs
  *   -- the Diagnostics tab always shows exactly which selections work.
  *
@@ -65,7 +67,7 @@
   // TornPDA does not always expose the legacy GM_info object that desktop
   // userscript managers provide. Try both common metadata APIs, then use the
   // release version as a PDA-safe fallback so the UI never shows vunknown.
-  const TDS_VERSION_FALLBACK = '1.1.12';
+  const TDS_VERSION_FALLBACK = '1.2.0';
   const TDS_VERSION =
     (typeof GM_info !== 'undefined' && GM_info?.script?.version) ||
     (typeof GM !== 'undefined' && GM?.info?.script?.version) ||
@@ -95,7 +97,7 @@
   // the actual key creation on its own Settings page.
   //
   // Required selections for this suite:
-  //   company: profile, employees, detailed, stock, applications
+  //   company: profile, employees, detailed, stock, news, applications
   //   user:    basic, workstats, log
   //   torn:    companies
   //
@@ -105,7 +107,7 @@
   // key creation and must then paste the generated key into this script.
   const CUSTOM_KEY_TITLE = 'Torn Company Management Suite';
   const CUSTOM_KEY_SELECTIONS = {
-    company: ['profile', 'employees', 'detailed', 'stock', 'applications'],
+    company: ['profile', 'employees', 'detailed', 'stock', 'news', 'applications'],
     user: ['basic', 'workstats', 'log'],
     torn: ['companies'],
   };
@@ -126,6 +128,7 @@
     { section: 'company', selections: 'employees', label: 'Employee roster' },
     { section: 'company', selections: 'detailed', label: 'Company financials' },
     { section: 'company', selections: 'stock', label: 'Company stock' },
+    { section: 'company', selections: 'news', label: 'Company news / sales history' },
     { section: 'company', selections: 'applications', label: 'Pending applications' },
     { section: 'user', selections: 'basic', label: 'Your own basic profile' },
     { section: 'user', selections: 'workstats', label: 'Your own working stats' },
@@ -622,6 +625,7 @@
     diagnosticRunning: false,
     panel: null,
     benchmark: { tier: 'same', cache: {} }, // cache keyed by categoryId -> { timestamp, data }
+    stock: { loading: false, newsCache: null, newsCacheAt: 0 },
   };
 
   function isJobsPage() {
@@ -670,15 +674,17 @@
       <div id="tds-tabs">
         <button class="tds-tab tds-tab-active" data-tab="overview">OVERVIEW</button>
         <button class="tds-tab" data-tab="finance">COMPANY FINANCIALS</button>
+        <button class="tds-tab" data-tab="stock">STOCK</button>
         <button class="tds-tab" data-tab="training">TRAINING</button>
         <button class="tds-tab" data-tab="benchmark">COMPARE</button>
-        <button class="tds-tab tds-tab-locked" data-tab="optimize" title="Needs a resolved position-fit formula (see tab)">OPTIMIZE</button>
+        <button class="tds-tab" data-tab="optimize">OPTIMIZE</button>
         <button class="tds-tab" data-tab="settings">SETTINGS</button>
         <button class="tds-tab" data-tab="diagnostics">DIAGNOSTICS</button>
       </div>
       <div id="tds-body">
         <div class="tds-tabpanel" data-tabpanel="overview"></div>
         <div class="tds-tabpanel" data-tabpanel="finance" hidden></div>
+        <div class="tds-tabpanel" data-tabpanel="stock" hidden></div>
         <div class="tds-tabpanel" data-tabpanel="training" hidden></div>
         <div class="tds-tabpanel" data-tabpanel="benchmark" hidden></div>
         <div class="tds-tabpanel" data-tabpanel="optimize" hidden></div>
@@ -709,10 +715,11 @@
     renderSettingsTab(panel);
     renderDiagnosticsTab(panel, null);
     renderOverviewTab(panel, null, null);
-    renderLockedTabs(panel);
     renderFinanceTab(panel);
+    renderStockTab(panel);
     renderTrainingTab(panel);
     renderBenchmarkTab(panel);
+    renderOptimizeTab(panel);
     switchTab(panel, 'overview');
 
     return panel;
@@ -723,17 +730,9 @@
     panel.querySelectorAll('.tds-tabpanel').forEach((p) => {
       p.hidden = p.dataset.tabpanel !== tabName;
     });
-  }
-
-  function renderLockedTabs(panel) {
-    const lockedHtml = (label, reason) => `
-      <div class="tds-box tds-box-neutral">
-        <strong>${label} is locked.</strong> ${reason}
-      </div>`;
-    panel.querySelector('[data-tabpanel="optimize"]').innerHTML = lockedHtml(
-      'Optimize',
-      'This needs each employee\u2019s raw working stats (manual/intelligence/endurance) to compute their effectiveness in a <em>different</em> position \u2014 Torn does not expose other employees\u2019 raw stats to the director\u2019s key, only their effectiveness in their <em>current</em> role. This tab will support employees who opt in with a scoped read-only key of their own. Not built yet.'
-    );
+    // Sales history can require an extra company/news API request. Load it only
+    // when the Stock tab is actually opened, not on every Torn page refresh.
+    if (tabName === 'stock') renderStockTab(panel).catch((err) => console.error('[TDS] Stock tab failed:', err));
   }
 
   function renderSettingsTab(panel) {
@@ -764,7 +763,7 @@
         <strong>Create the API key for this program.</strong><br>
         This opens Torn's official custom-key generator with the permissions used by
         <strong>Torn Company Management Suite</strong> already selected:
-        <strong>Company: Profile, Employees, Detailed, Stock, Applications</strong>;
+        <strong>Company: Profile, Employees, Detailed, Stock, News, Applications</strong>;
         <strong>User: Basic, Workstats, Log</strong>;
         <strong>Torn: Companies</strong>.<br><br>
         Torn will handle the actual key creation. Review the selections on Torn's page,
@@ -1128,7 +1127,7 @@
   //     sends only the numeric User ID (already public within Torn itself),
   //     and never touches the API key or any company data.
   // ---------------------------------------------------------------------
-  const LICENSE_GATED_TABS = ['overview', 'finance', 'training', 'benchmark'];
+  const LICENSE_GATED_TABS = ['overview', 'finance', 'stock', 'training', 'benchmark', 'optimize'];
 
   function findOwnUserId(results) {
     const basic = findRaw(results, 'user', 'basic');
@@ -1817,6 +1816,383 @@
   }
 
   // =======================================================================
+  // STOCK MANAGEMENT TAB
+  // =======================================================================
+  const STOCK_NEWS_CACHE_MS = 5 * 60 * 1000;
+
+  function deepObjectEntries(raw) {
+    const out = [];
+    const seen = new WeakSet();
+    function walk(value, path = []) {
+      if (!value || typeof value !== 'object' || seen.has(value)) return;
+      seen.add(value);
+      out.push({ value, path });
+      if (Array.isArray(value)) value.forEach((child, i) => walk(child, [...path, String(i)]));
+      else Object.entries(value).forEach(([key, child]) => walk(child, [...path, key]));
+    }
+    walk(raw);
+    return out;
+  }
+
+  function pickNumeric(obj, names) {
+    if (!obj || typeof obj !== 'object') return null;
+    for (const name of names) {
+      const wanted = normalizeFieldName(name);
+      const entry = Object.entries(obj).find(([k, v]) => normalizeFieldName(k) === wanted && numericValue(v) !== null);
+      if (entry) return numericValue(entry[1]);
+    }
+    return null;
+  }
+
+  function pickText(obj, names) {
+    if (!obj || typeof obj !== 'object') return null;
+    for (const name of names) {
+      const wanted = normalizeFieldName(name);
+      const entry = Object.entries(obj).find(([k, v]) => normalizeFieldName(k) === wanted && (typeof v === 'string' || typeof v === 'number'));
+      if (entry && String(entry[1]).trim()) return String(entry[1]).trim();
+    }
+    return null;
+  }
+
+  function extractStockItems(stockRaw) {
+    if (!stockRaw) return [];
+    const candidates = [];
+    const seenKeys = new Set();
+
+    for (const { value, path } of deepObjectEntries(stockRaw)) {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) continue;
+      const name = pickText(value, ['name', 'item_name', 'stock_name', 'product_name']);
+      const id = pickText(value, ['id', 'item_id', 'stock_id', 'product_id']) || (path.length ? path[path.length - 1] : null);
+      const current = pickNumeric(value, ['amount', 'quantity', 'qty', 'stock', 'in_stock', 'instock', 'available', 'inventory']);
+      const price = pickNumeric(value, ['price', 'selling_price', 'sell_price', 'rrp']);
+      const sold24 = pickNumeric(value, ['sold_24h', 'sold24h', 'sold_day', 'sold_today', 'daily_sold', 'daily_sales', 'sales_day']);
+      const sold7 = pickNumeric(value, ['sold_7d', 'sold7d', 'sold_week', 'weekly_sold', 'weekly_sales', 'sales_week']);
+
+      if (!name || (current === null && sold24 === null && sold7 === null)) continue;
+      const key = `${id || ''}|${name}`.toLowerCase();
+      if (seenKeys.has(key)) continue;
+      seenKeys.add(key);
+      candidates.push({ id, name, current, price, sold24, sold7, raw: value });
+    }
+
+    return candidates.sort((a, b) => a.name.localeCompare(b.name));
+  }
+
+  function flattenNewsEntries(newsRaw) {
+    if (!newsRaw) return [];
+    const rows = [];
+    const seen = new Set();
+    for (const { value, path } of deepObjectEntries(newsRaw)) {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) continue;
+      const timestamp = pickNumeric(value, ['timestamp', 'time', 'created_at', 'date']);
+      const text = pickText(value, ['text', 'news', 'message', 'description', 'event', 'title']);
+      const id = pickText(value, ['id', 'news_id', 'event_id']) || path.join('.');
+      if (!text || !timestamp) continue;
+      const key = `${id}|${timestamp}|${text}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      rows.push({ id, timestamp, text, raw: value });
+    }
+    return rows.sort((a, b) => b.timestamp - a.timestamp);
+  }
+
+  function parseSaleFromNews(entry, stockItems) {
+    const raw = entry.raw || {};
+    const text = String(entry.text || '');
+    if (!/(sold|sale|customer|purchased|bought)/i.test(text)) return null;
+
+    let qty = pickNumeric(raw, ['quantity', 'qty', 'amount', 'sold', 'units', 'count']);
+    let itemName = pickText(raw, ['item_name', 'stock_name', 'product_name', 'item', 'product']);
+
+    const patterns = [
+      /(?:sold|sale of)\s+(\d[\d,]*)\s+(?:x\s+)?(.+?)(?:\s+(?:for|at|to|worth)\b|[.!]|$)/i,
+      /(\d[\d,]*)\s+(?:x\s+)?(.+?)\s+(?:were\s+|was\s+)?sold\b/i,
+      /(.+?)\s*[:\-]\s*(\d[\d,]*)\s+(?:sold|sales)\b/i,
+    ];
+    if (qty === null || !itemName) {
+      for (const re of patterns) {
+        const m = text.match(re);
+        if (!m) continue;
+        if (/^\D/.test(m[1])) {
+          itemName = itemName || m[1].trim();
+          qty = qty ?? Number(String(m[2]).replace(/,/g, ''));
+        } else {
+          qty = qty ?? Number(String(m[1]).replace(/,/g, ''));
+          itemName = itemName || m[2].trim();
+        }
+        break;
+      }
+    }
+    if (!Number.isFinite(qty) || qty <= 0 || !itemName) return null;
+
+    // Prefer a current stock item name so minor wording differences in news
+    // aggregate into the same row.
+    const normalizedNewsName = normalizeFieldName(itemName);
+    const match = stockItems.find((item) => {
+      const n = normalizeFieldName(item.name);
+      return n === normalizedNewsName || n.includes(normalizedNewsName) || normalizedNewsName.includes(n);
+    });
+    return { timestamp: entry.timestamp, quantity: qty, name: match?.name || itemName, id: match?.id || null };
+  }
+
+  function aggregateSales(newsRaw, stockItems) {
+    const nowSec = Math.floor(Date.now() / 1000);
+    const dayAgo = nowSec - 86400;
+    const weekAgo = nowSec - 7 * 86400;
+    const totals = new Map();
+    const entries = flattenNewsEntries(newsRaw);
+    let parsedEvents = 0;
+
+    for (const entry of entries) {
+      const sale = parseSaleFromNews(entry, stockItems);
+      if (!sale) continue;
+      parsedEvents += 1;
+      const key = String(sale.id || normalizeFieldName(sale.name));
+      const row = totals.get(key) || { name: sale.name, sold24: 0, sold7: 0 };
+      if (sale.timestamp >= weekAgo) row.sold7 += sale.quantity;
+      if (sale.timestamp >= dayAgo) row.sold24 += sale.quantity;
+      totals.set(key, row);
+    }
+
+    const oldestTimestamp = entries.length ? Math.min(...entries.map((e) => e.timestamp)) : null;
+    return { totals, parsedEvents, newsEntries: entries.length, oldestTimestamp };
+  }
+
+  async function fetchCompanyNewsForStock() {
+    if (state.stock.newsCache && Date.now() - state.stock.newsCacheAt < STOCK_NEWS_CACHE_MS) return state.stock.newsCache;
+    const now = Math.floor(Date.now() / 1000);
+    const from = now - 7 * 86400;
+    let data;
+    try {
+      data = await ApiClient.call('company', 'news', '', { from, to: now });
+    } catch (err) {
+      // Some API versions ignore/rename the window parameters. Fall back to
+      // the normal news selection before declaring the history unavailable.
+      data = await ApiClient.call('company', 'news');
+    }
+    state.stock.newsCache = data;
+    state.stock.newsCacheAt = Date.now();
+    return data;
+  }
+
+  function restockRecommendation(current, sold24, sold7) {
+    if (sold24 === null && sold7 === null) return null;
+    const day = Math.max(0, Number(sold24) || 0);
+    const week = Math.max(0, Number(sold7) || 0);
+    if (day === 0 && week === 0) return { target: 0, restock: 0, baseline: 0 };
+
+    // Use the faster of the recent one-day run-rate and the observed seven-day
+    // total, then add a 20% safety buffer. This is a recommendation, not a Torn
+    // API field, and is labelled DERIVED in the UI.
+    const baseline = Math.max(week, day * 7);
+    const target = Math.ceil(baseline * 1.20);
+    const restock = current === null ? null : Math.max(0, target - Math.max(0, current));
+    return { target, restock, baseline };
+  }
+
+  async function renderStockTab(panel, { refresh = false } = {}) {
+    const el = panel.querySelector('[data-tabpanel="stock"]');
+    if (!el) return;
+    const results = state.lastResults;
+    if (!results) {
+      el.innerHTML = `<div class="tds-box tds-box-neutral">Run Diagnostics once so Stock Management can read your company stock.</div>`;
+      return;
+    }
+
+    const stockRaw = findRaw(results, 'company', 'stock');
+    const blocked = findBlockedReason(results, 'company', 'stock');
+    if (!stockRaw) {
+      el.innerHTML = `<div class="tds-box tds-box-danger"><strong>Company stock unavailable.</strong> ${escapeHtml(blocked || 'No company/stock data was returned.')}</div>`;
+      return;
+    }
+
+    const items = extractStockItems(stockRaw);
+
+    // Avoid an extra live news call during startup/diagnostic hydration. The
+    // current stock data is already available; sales history is fetched lazily
+    // when the user opens this tab.
+    if (el.hidden && !refresh) {
+      el.innerHTML = `<div class="tds-box tds-box-neutral">Stock data is ready. Open this tab to load the last 24 hours / 7 days of sales history and calculate restock targets.</div>`;
+      return;
+    }
+
+    if (!items.length) {
+      el.innerHTML = `<div class="tds-box tds-box-warn"><strong>Stock data was returned, but its item structure was not recognised yet.</strong><br>Open Diagnostics and check the fields shown for Company stock. The raw response is deliberately not guessed into fake item rows.</div>`;
+      return;
+    }
+
+    el.innerHTML = `<div class="tds-box tds-box-neutral">Loading recent sales history…</div>`;
+    let sales = { totals: new Map(), parsedEvents: 0, newsEntries: 0, oldestTimestamp: null };
+    let newsError = null;
+    try {
+      if (refresh) {
+        state.stock.newsCache = null;
+        state.stock.newsCacheAt = 0;
+      }
+      const diagnosticNews = findRaw(results, 'company', 'news');
+      const newsRaw = diagnosticNews || await fetchCompanyNewsForStock();
+      sales = aggregateSales(newsRaw, items);
+    } catch (err) {
+      newsError = err;
+    }
+
+    let html = `
+      <div class="tds-box tds-box-info">
+        <strong>Restock recommendation:</strong> target = 120% of the higher of <em>last 7 days sold</em> or <em>last 24 hours × 7</em>. This gives roughly one week of fast-moving stock plus a 20% buffer. The target and restock quantity are <strong>DERIVED</strong>, not values returned by Torn.
+      </div>`;
+
+    if (newsError) {
+      html += `<div class="tds-box tds-box-warn"><strong>Item-level sales history unavailable.</strong> ${escapeHtml(newsError.reason || 'company/news could not be read with this key')}. Current stock is still shown. Add <code>company: news</code> to the Custom key and rerun Diagnostics to enable the 24h / 7d columns.</div>`;
+    } else if (!sales.parsedEvents) {
+      html += `<div class="tds-box tds-box-warn">Company news was accessible (${formatNumber(sales.newsEntries)} entries inspected), but no item-sale events were recognised. If Torn exposes the sold counts directly inside <code>company/stock</code>, those values are used below; otherwise the sales columns remain unavailable rather than being estimated from stock movement.</div>`;
+    } else {
+      const coverage = sales.oldestTimestamp ? formatTimestampRelative(sales.oldestTimestamp * 1000) : 'unknown';
+      html += `<div class="tds-box tds-box-neutral">Parsed ${formatNumber(sales.parsedEvents)} stock-sale event(s) from company news. Oldest returned news: ${escapeHtml(coverage)}. If Torn only returns part of the week, the 7-day figure is naturally partial.</div>`;
+    }
+
+    html += `<div style="overflow-x:auto;"><table class="tds-table">
+      <thead><tr><th>Item</th><th style="text-align:right;">In Stock</th><th style="text-align:right;">Sold 24h</th><th style="text-align:right;">Sold 7d</th><th style="text-align:right;">Target Stock</th><th style="text-align:right;">Restock</th></tr></thead><tbody>`;
+
+    for (const item of items) {
+      const keyById = String(item.id || '');
+      const keyByName = normalizeFieldName(item.name);
+      const fromNews = sales.totals.get(keyById) || sales.totals.get(keyByName);
+      const sold24 = item.sold24 !== null ? item.sold24 : (fromNews ? fromNews.sold24 : null);
+      const sold7 = item.sold7 !== null ? item.sold7 : (fromNews ? fromNews.sold7 : null);
+      const rec = restockRecommendation(item.current, sold24, sold7);
+      const restockText = rec ? (rec.restock === null ? '—' : formatNumber(rec.restock)) : '—';
+      html += `<tr>
+        <td><strong>${escapeHtml(item.name)}</strong>${item.price !== null ? `<div class="tds-v-dim">Price: ${escapeHtml(formatCurrency(item.price))}</div>` : ''}</td>
+        <td class="tds-num">${item.current === null ? '—' : formatNumber(item.current)}</td>
+        <td class="tds-num">${sold24 === null ? '—' : formatNumber(sold24)}</td>
+        <td class="tds-num">${sold7 === null ? '—' : formatNumber(sold7)}</td>
+        <td class="tds-num">${rec ? formatNumber(rec.target) : '—'}</td>
+        <td class="tds-num"><strong>${restockText}</strong></td>
+      </tr>`;
+    }
+    html += `</tbody></table></div><div style="margin-top:10px;"><button class="tds-btn-ghost" id="tds-stock-refresh">Refresh sales</button></div>`;
+    el.innerHTML = html;
+    el.querySelector('#tds-stock-refresh')?.addEventListener('click', () => renderStockTab(panel, { refresh: true }));
+  }
+
+  // =======================================================================
+  // OPTIMIZE TAB — position requirement fit, not a fabricated EE formula
+  // =======================================================================
+  function findCompanyTypeReferenceNode(reference, typeId) {
+    if (!reference || typeId === null || typeId === undefined) return null;
+    const wanted = String(typeId);
+    const seen = new WeakSet();
+    let best = null;
+    function walk(value) {
+      if (best || !value || typeof value !== 'object' || seen.has(value)) return;
+      seen.add(value);
+      if (!Array.isArray(value) && Object.prototype.hasOwnProperty.call(value, wanted)) {
+        const candidate = value[wanted];
+        if (candidate && typeof candidate === 'object') { best = candidate; return; }
+      }
+      if (!Array.isArray(value)) {
+        const id = findValueDeep(value, ['id', 'type_id', 'company_type']);
+        if (id !== null && String(id) === wanted) { best = value; return; }
+      }
+      for (const child of Object.values(value)) {
+        if (child && typeof child === 'object') walk(child);
+        if (best) return;
+      }
+    }
+    walk(reference);
+    return best;
+  }
+
+  function extractPositionRequirements(reference, typeId) {
+    const root = findCompanyTypeReferenceNode(reference, typeId) || reference;
+    if (!root) return [];
+    const positions = [];
+    const seen = new Set();
+    for (const { value, path } of deepObjectEntries(root)) {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) continue;
+      const name = pickText(value, ['name', 'position', 'position_name', 'title']) || (path.length ? path[path.length - 1] : null);
+      const manual = pickNumeric(value, ['manual_labor', 'manual', 'man_required', 'manual_required', 'man']);
+      const intelligence = pickNumeric(value, ['intelligence', 'int_required', 'intelligence_required', 'int']);
+      const endurance = pickNumeric(value, ['endurance', 'end_required', 'endurance_required', 'end']);
+      const statCount = [manual, intelligence, endurance].filter((v) => v !== null && v > 0).length;
+      if (!name || statCount < 1) continue;
+      const key = normalizeFieldName(name);
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      positions.push({ name: String(name), manual, intelligence, endurance });
+    }
+    return positions;
+  }
+
+  function employeePositionFit(emp, position) {
+    const actual = {
+      manual: numericValue(emp.manual_labor) ?? 0,
+      intelligence: numericValue(emp.intelligence) ?? 0,
+      endurance: numericValue(emp.endurance) ?? 0,
+    };
+    const req = { manual: position.manual, intelligence: position.intelligence, endurance: position.endurance };
+    const ratios = [];
+    let shortfall = 0;
+    let requiredCount = 0;
+    for (const key of Object.keys(req)) {
+      if (req[key] === null || req[key] <= 0) continue;
+      requiredCount += 1;
+      const ratio = actual[key] / req[key];
+      ratios.push(Math.min(1, ratio));
+      shortfall += Math.max(0, req[key] - actual[key]) / req[key];
+    }
+    if (!requiredCount) return null;
+    const coverage = Math.round((ratios.reduce((a, b) => a + b, 0) / requiredCount) * 100);
+    return { coverage, shortfall, requiredCount };
+  }
+
+  function renderOptimizeTab(panel) {
+    const el = panel.querySelector('[data-tabpanel="optimize"]');
+    if (!el) return;
+    const results = state.lastResults;
+    if (!results) {
+      el.innerHTML = `<div class="tds-box tds-box-neutral">Run Diagnostics once so Optimize can read your employee working stats.</div>`;
+      return;
+    }
+    const employees = extractEmployeesEntries(findRaw(results, 'company', 'employees'));
+    const profile = findRaw(results, 'company', 'profile');
+    const reference = findRaw(results, 'torn', 'companies');
+    const typeId = numericValue(findValueDeep(profile, ['company_type', 'type_id', 'type']));
+    const positions = extractPositionRequirements(reference, typeId);
+
+    let html = `<div class="tds-box tds-box-info"><strong>How Optimize works:</strong> this version compares each employee's Manual Labor, Intelligence and Endurance against the position requirements returned by <code>torn/companies</code>. The Fit % means <strong>requirement coverage</strong>; it is not presented as Torn's actual effectiveness formula.</div>`;
+    if (!employees.length) {
+      el.innerHTML = html + `<div class="tds-box tds-box-danger">No employee working-stat data is available.</div>`;
+      return;
+    }
+    if (!positions.length) {
+      html += `<div class="tds-box tds-box-warn">I couldn't find position stat requirements in the current <code>torn/companies</code> response for company type ${escapeHtml(String(typeId ?? 'unknown'))}. The tab is unlocked, but I won't invent position requirements. Your current employee effectiveness is shown below instead.</div>`;
+      html += `<div class="tds-card">`;
+      for (const employee of employees) {
+        const ee = findEffectivenessField(employee.raw);
+        html += `<div class="tds-row"><span class="tds-row-label"><strong>${escapeHtml(employee.name)}</strong> — ${escapeHtml(employee.position || 'Employee')}</span><span class="tds-row-value">${ee ? formatNumber(ee.value) : '—'}</span></div>`;
+      }
+      html += `</div>`;
+      el.innerHTML = html;
+      return;
+    }
+
+    html += `<div class="tds-section-label">Suggested position fit</div><div style="overflow-x:auto;"><table class="tds-table"><thead><tr><th>Employee</th><th>Current</th><th>Best requirement fit</th><th style="text-align:right;">Fit</th><th style="text-align:right;">Current EE</th></tr></thead><tbody>`;
+    for (const employee of employees) {
+      const ranked = positions
+        .map((position) => ({ position, fit: employeePositionFit(employee.raw, position) }))
+        .filter((row) => row.fit)
+        .sort((a, b) => b.fit.coverage - a.fit.coverage || a.fit.shortfall - b.fit.shortfall);
+      const best = ranked[0];
+      const ee = findEffectivenessField(employee.raw);
+      html += `<tr><td><strong>${escapeHtml(employee.name)}</strong></td><td>${escapeHtml(employee.position || '—')}</td><td>${best ? escapeHtml(best.position.name) : '—'}</td><td class="tds-num">${best ? `${best.fit.coverage}%` : '—'}</td><td class="tds-num">${ee ? formatNumber(ee.value) : '—'}</td></tr>`;
+    }
+    html += `</tbody></table></div>`;
+    html += `<div class="tds-box tds-box-neutral" style="margin-top:10px;">Position suggestions are intentionally conservative: they answer “which published stat requirements does this employee cover best?” They do <strong>not</strong> claim a predicted EE value until Torn's exact cross-position effectiveness formula is verified.</div>`;
+    el.innerHTML = html;
+  }
+
+  // =======================================================================
   // TRAINING TAB
   // =======================================================================
   function renderTrainingTab(panel) {
@@ -2096,8 +2472,10 @@
       renderOverviewTab(panel, results, verdict);
       renderDiagnosticsTab(panel, results);
       await renderFinanceTab(panel);
+      await renderStockTab(panel);
       renderTrainingTab(panel);
       renderBenchmarkTab(panel);
+      renderOptimizeTab(panel);
       startFooterTicker(panel);
       await checkLicense(panel);
       return true;
@@ -2145,8 +2523,10 @@
       renderOverviewTab(panel, results, verdict);
       renderDiagnosticsTab(panel, results);
       await renderFinanceTab(panel);
+      await renderStockTab(panel);
       renderTrainingTab(panel);
       renderBenchmarkTab(panel);
+      renderOptimizeTab(panel);
       startFooterTicker(panel);
       await checkLicense(panel, { force });
     } finally {
