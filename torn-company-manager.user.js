@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Company Management Suite
 // @namespace    torn-company-management-suite
-// @version      1.2.3
+// @version      1.2.7
 // @description  Local-only company management dashboard for Torn directors, embedded in the Jobs page. No company data ever leaves your browser; only your Torn User ID is checked against a public license list.
 // @author       DooBiiE
 // @match        https://www.torn.com/*
@@ -67,7 +67,7 @@
   // TornPDA does not always expose the legacy GM_info object that desktop
   // userscript managers provide. Try both common metadata APIs, then use the
   // release version as a PDA-safe fallback so the UI never shows vunknown.
-  const TDS_VERSION_FALLBACK = '1.2.3';
+  const TDS_VERSION_FALLBACK = '1.2.7';
   const TDS_VERSION =
     (typeof GM_info !== 'undefined' && GM_info?.script?.version) ||
     (typeof GM !== 'undefined' && GM?.info?.script?.version) ||
@@ -97,7 +97,7 @@
   // the actual key creation on its own Settings page.
   //
   // Required selections for this suite:
-  //   company: profile, employees, detailed, stock, news, applications
+  //   company: profile, employees, detailed, stock, news, applications, companies
   //   user:    basic, workstats, log
   //   torn:    companies
   //
@@ -107,7 +107,7 @@
   // key creation and must then paste the generated key into this script.
   const CUSTOM_KEY_TITLE = 'Torn Company Management Suite';
   const CUSTOM_KEY_SELECTIONS = {
-    company: ['profile', 'employees', 'detailed', 'stock', 'news', 'applications'],
+    company: ['profile', 'employees', 'detailed', 'stock', 'news', 'applications', 'companies', 'search'],
     user: ['basic', 'workstats', 'log'],
     torn: ['companies'],
   };
@@ -201,7 +201,60 @@
       return result;
     }
 
-    return { call };
+    function rawCallV2(path, extraParams = {}) {
+      const key = GM_getValue(STORAGE_KEY_APIKEY, '');
+      if (!key) return Promise.reject({ blocked: true, reason: 'No API key configured yet.' });
+
+      // Torn API v2 / Swagger uses header authentication. Do NOT append the
+      // secret API key to the query string here; doing so can return error 2
+      // ("Incorrect key") even though the same key works with our v1 calls.
+      const params = new URLSearchParams({ ...extraParams });
+      const cleanPath = String(path || '').replace(/^\/+/, '');
+      const query = params.toString();
+      const url = `${API_BASE}/v2/${cleanPath}${query ? `?${query}` : ''}`;
+
+      return new Promise((resolve, reject) => {
+        GM_xmlhttpRequest({
+          method: 'GET',
+          url,
+          headers: {
+            Authorization: `ApiKey ${key}`,
+          },
+          timeout: 15000,
+          onload: (res) => {
+            let json;
+            try {
+              json = JSON.parse(res.responseText);
+            } catch (e) {
+              reject({ blocked: true, reason: 'Response was not valid JSON — Torn API may be down.' });
+              return;
+            }
+            if (json.error) {
+              reject({ blocked: true, code: json.error.code, reason: json.error.error || json.error.message });
+              return;
+            }
+            resolve(json);
+          },
+          onerror: () => reject({ blocked: true, reason: 'Network error contacting api.torn.com' }),
+          ontimeout: () => reject({ blocked: true, reason: 'Request to api.torn.com timed out' }),
+        });
+      });
+    }
+
+    function callV2(path, extraParams = {}) {
+      const run = () => {
+        const wait = Math.max(0, MIN_CALL_INTERVAL_MS - (Date.now() - lastCallAt));
+        return new Promise((resolve) => setTimeout(resolve, wait)).then(() => {
+          lastCallAt = Date.now();
+          return rawCallV2(path, extraParams);
+        });
+      };
+      const result = queue.then(run, run);
+      queue = result.then(() => {}, () => {});
+      return result;
+    }
+
+    return { call, callV2 };
   })();
 
   // ---------------------------------------------------------------------
@@ -504,6 +557,12 @@
         padding-bottom: 8px;
       }
       .tds-optimize-table tbody tr:last-child td { border-bottom: none; }
+      .tds-compare-table th,
+      .tds-compare-table td {
+        text-align: center !important;
+        vertical-align: middle;
+      }
+      .tds-compare-table td.tds-num { text-align: center !important; }
       .tds-spark { display: flex; align-items: flex-end; gap: 4px; height: 46px; margin: 6px 0; }
       .tds-spark-col { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 3px; }
       .tds-spark-bar { width: 100%; border-radius: 2px 2px 0 0; min-height: 2px; }
@@ -772,7 +831,7 @@
         <strong>Create the API key for this program.</strong><br>
         This opens Torn's official custom-key generator with the permissions used by
         <strong>Torn Company Management Suite</strong> already selected:
-        <strong>Company: Profile, Employees, Detailed, Stock, News, Applications</strong>;
+        <strong>Company: Profile, Employees, Detailed, Stock, News, Applications, Companies, Search</strong>;
         <strong>User: Basic, Workstats, Log</strong>;
         <strong>Torn: Companies</strong>.<br><br>
         Torn will handle the actual key creation. Review the selections on Torn's page,
@@ -2424,160 +2483,448 @@
   }
 
   // =======================================================================
-  // BENCHMARK TAB
+  // COMPARE TAB
   // =======================================================================
-  const BENCHMARK_CACHE_TTL_MS = 4 * 60 * 60 * 1000; // 4 hours, matches reference tool's own stated caching
+  const BENCHMARK_CACHE_TTL_MS = 4 * 60 * 60 * 1000;
 
-  async function fetchBenchmarkCompanies(categoryId) {
-    // Param name for filtering `company -> companies` by type is confirmed
-    // to exist (Torn's own changelog: "pass a specific category, only 1 per
-    // request") but the exact query key isn't independently verified here —
-    // try the documented wording first, fall back once, and surface the
-    // real error rather than silently mis-filtering if neither works.
-    try {
-      return await ApiClient.call('company', 'companies', '', { category: categoryId });
-    } catch (err) {
-      if (err.code === 4 || err.code === 6) {
-        return await ApiClient.call('company', 'companies', '', { cat: categoryId });
-      }
-      throw err;
+  function getOwnCompanyCompareInfo(profile, results) {
+    if (!profile || typeof profile !== 'object') {
+      return { id: null, typeId: null, typeName: null, rating: null };
     }
+
+    const candidates = [profile];
+    for (const key of ['company', 'profile', 'data']) {
+      if (profile[key] && typeof profile[key] === 'object' && !Array.isArray(profile[key])) {
+        candidates.push(profile[key]);
+      }
+    }
+
+    let id = null;
+    let typeId = null;
+    let typeName = null;
+    let rating = null;
+
+    for (const obj of candidates) {
+      if (id === null) {
+        id = numericValue(obj.id ?? obj.company_id ?? obj.companyId);
+      }
+
+      if (rating === null) {
+        rating = numericValue(obj.rating ?? obj.star_rating ?? obj.stars);
+      }
+
+      const typeValue = obj.company_type ?? obj.type_id ?? obj.companyType ?? obj.type;
+      if (typeValue && typeof typeValue === 'object') {
+        if (typeId === null) typeId = numericValue(typeValue.id ?? typeValue.type_id ?? typeValue.type);
+        if (!typeName) typeName = typeValue.name ?? typeValue.type_name ?? null;
+      } else if (typeId === null) {
+        typeId = numericValue(typeValue);
+      }
+    }
+
+    if (typeId === null) {
+      typeId = numericValue(findValueDeep(profile, ['company_type', 'type_id', 'companyType']));
+    }
+    if (rating === null) {
+      rating = numericValue(findValueDeep(profile, ['rating', 'star_rating', 'stars']));
+    }
+
+    if (typeId !== null && !typeName) {
+      typeName = resolveCompanyTypeName(findRaw(results, 'torn', 'companies'), typeId);
+    }
+
+    return { id, typeId, typeName, rating };
+  }
+
+  function buildCompareFilters(typeId, tier, ownRating) {
+    const filters = [`type:Equal:${typeId}`];
+
+    if (tier === 'same' && ownRating !== null) {
+      filters.push(`rating:=:${ownRating}`);
+    } else if (tier === 'mid') {
+      filters.push('rating:>=:3', 'rating:<=:5');
+    } else if (tier === 'top') {
+      filters.push('rating:>=:8', 'rating:<=:10');
+    }
+
+    return filters.join(',');
+  }
+
+  async function fetchBenchmarkCompanies(typeId, tier, ownRating, offset = 0) {
+    // company/search is the correct v2 endpoint for Compare because Torn
+    // explicitly exposes filtering by company type, rating, daily/weekly
+    // income and daily/weekly customers here.
+    const filters = buildCompareFilters(typeId, tier, ownRating);
+    return ApiClient.callV2('company/search', {
+      filters,
+      limit: 100,
+      offset,
+      striptags: 'true',
+    });
+  }
+
+  function extractCompareCompanies(data) {
+    if (!data || typeof data !== 'object') return [];
+
+    for (const key of ['companies', 'company_search', 'results', 'data']) {
+      const value = data[key];
+      if (Array.isArray(value)) return value;
+      if (value && typeof value === 'object' && !Array.isArray(value)) {
+        const values = Object.values(value).filter((x) => x && typeof x === 'object');
+        if (values.length) return values;
+      }
+    }
+
+    const seen = new WeakSet();
+    let found = null;
+
+    function walk(value) {
+      if (found || !value || typeof value !== 'object' || seen.has(value)) return;
+      seen.add(value);
+
+      if (Array.isArray(value) && value.length && value.every((x) => x && typeof x === 'object')) {
+        const keys = new Set(value.flatMap((x) => Object.keys(x)));
+        if ([...keys].some((k) => /company|name|daily.*income|weekly.*income|rating/i.test(k))) {
+          found = value;
+          return;
+        }
+      }
+
+      for (const child of Object.values(value)) {
+        if (child && typeof child === 'object') walk(child);
+        if (found) return;
+      }
+    }
+
+    walk(data);
+    return found || [];
+  }
+
+  function compareField(row, names, pattern = null) {
+    if (!row || typeof row !== 'object') return null;
+
+    for (const name of names) {
+      if (Object.prototype.hasOwnProperty.call(row, name) &&
+          row[name] !== null &&
+          row[name] !== undefined) {
+        return row[name];
+      }
+    }
+
+    if (pattern) {
+      const entry = Object.entries(row).find(([k, v]) =>
+        pattern.test(k) && v !== null && v !== undefined
+      );
+      if (entry) return entry[1];
+    }
+
+    return null;
+  }
+
+  function normalizeCompareCompany(row) {
+    return {
+      raw: row,
+      id: numericValue(compareField(
+        row,
+        ['id', 'company_id', 'companyId'],
+        /^id$|company.*id/i
+      )),
+      name: compareField(
+        row,
+        ['name', 'company_name', 'companyName'],
+        /^name$|company.*name/i
+      ),
+      rating: numericValue(compareField(
+        row,
+        ['rating', 'stars', 'star_rating', 'starRating'],
+        /^rating$|^stars$|star.*rating/i
+      )),
+      dailyIncome: numericValue(compareField(
+        row,
+        ['daily_income', 'dailyIncome'],
+        /daily.*income/i
+      )),
+      weeklyIncome: numericValue(compareField(
+        row,
+        ['weekly_income', 'weeklyIncome'],
+        /weekly.*income/i
+      )),
+      dailyCustomers: numericValue(compareField(
+        row,
+        ['daily_customers', 'dailyCustomers'],
+        /daily.*customer/i
+      )),
+      weeklyCustomers: numericValue(compareField(
+        row,
+        ['weekly_customers', 'weeklyCustomers'],
+        /weekly.*customer/i
+      )),
+      employees: numericValue(compareField(
+        row,
+        ['employees', 'employees_current', 'employeesCurrent'],
+        /^employees$|employees.*current/i
+      )),
+    };
+  }
+
+  function compareTierLabel(tier, ownRating) {
+    if (tier === 'same') return ownRating !== null ? `Same Rating (${ownRating}★)` : 'Same Rating';
+    if (tier === 'mid') return '3–5★';
+    if (tier === 'top') return '8–10★';
+    return 'All Ratings';
   }
 
   function renderBenchmarkTab(panel) {
     const el = panel.querySelector('[data-tabpanel="benchmark"]');
     const results = state.lastResults;
     const profile = results ? findRaw(results, 'company', 'profile') : null;
+    const own = getOwnCompanyCompareInfo(profile, results);
 
-    const ownType = profile && Object.entries(profile).find(([k]) => /company_type|type/i.test(k))?.[1];
-    const ownId = profile && Object.entries(profile).find(([k]) => /^id$/i.test(k))?.[1];
-    const ownRatingEntry = profile && Object.entries(profile).find(([k, v]) => typeof v === 'number' && /rating/i.test(k));
-    const ownRating = ownRatingEntry ? ownRatingEntry[1] : null;
+    const typeLabel = own.typeName
+      ? `${escapeHtml(String(own.typeName))} (${escapeHtml(String(own.typeId))})`
+      : own.typeId !== null
+        ? `Company type ${escapeHtml(String(own.typeId))}`
+        : 'Not detected';
 
     let html = `
       <div class="tds-box tds-box-neutral">
-        Uses <code>company/companies</code>, filtered to one category (your company type) and sorted by income \u2014 this is <strong>public data, works for any key</strong>, not director-only. Cached ${BENCHMARK_CACHE_TTL_MS / 3600000}h locally. Costs 1 API call per reload.
+        Compare uses Torn API v2's <code>/company/search</code> endpoint so company type,
+        star rating and financial/customer comparison fields come from the same search response.
+        This comparison does not require director access.
       </div>
-      <div class="tds-row" style="margin-bottom:8px;">
-        <span class="tds-row-label">Company type (category ID)</span>
-        <input class="tds-input" style="width:90px;" id="tds-bench-category" type="number" value="${ownType ?? ''}" placeholder="e.g. 20" />
+
+      <div class="tds-card">
+        <div class="tds-row">
+          <span class="tds-row-label">Detected company type</span>
+          <span class="tds-row-value">${typeLabel}</span>
+        </div>
+        ${own.rating !== null
+          ? `<div class="tds-row"><span class="tds-row-label">Your rating</span><span class="tds-row-value">${escapeHtml(String(own.rating))}★</span></div>`
+          : ''}
       </div>
+
       <div class="tds-segmented">
-        <div class="tds-segment ${state.benchmark.tier === 'same' ? 'tds-segment-active' : ''}" data-tier="same">SAME RATING${ownRating ? ` (${ownRating}\u2605)` : ''}</div>
-        <div class="tds-segment ${state.benchmark.tier === 'mid' ? 'tds-segment-active' : ''}" data-tier="mid">3\u20135\u2605</div>
-        <div class="tds-segment ${state.benchmark.tier === 'top' ? 'tds-segment-active' : ''}" data-tier="top">8\u201310\u2605 TOP</div>
+        <div class="tds-segment ${state.benchmark.tier === 'same' ? 'tds-segment-active' : ''}" data-tier="same">SAME RATING${own.rating !== null ? ` (${own.rating}★)` : ''}</div>
+        <div class="tds-segment ${state.benchmark.tier === 'mid' ? 'tds-segment-active' : ''}" data-tier="mid">3–5★</div>
+        <div class="tds-segment ${state.benchmark.tier === 'top' ? 'tds-segment-active' : ''}" data-tier="top">8–10★ TOP</div>
+        <div class="tds-segment ${state.benchmark.tier === 'all' ? 'tds-segment-active' : ''}" data-tier="all">ALL RATINGS</div>
       </div>
-      <button class="tds-btn" id="tds-bench-reload">\u21bb Reload</button>
+
+      <button class="tds-btn" id="tds-bench-reload">↻ Refresh Compare</button>
       <div id="tds-bench-results" style="margin-top:10px;"></div>
     `;
+
     el.innerHTML = html;
 
     el.querySelectorAll('[data-tier]').forEach((seg) => {
       seg.addEventListener('click', () => {
         state.benchmark.tier = seg.dataset.tier;
-        renderBenchmarkTab(panel);
+
+        el.querySelectorAll('[data-tier]').forEach((button) => {
+          button.classList.toggle('tds-segment-active', button === seg);
+        });
+
+        runBenchmark(panel);
       });
     });
 
-    el.querySelector('#tds-bench-reload').addEventListener('click', () => runBenchmark(panel));
+    el.querySelector('#tds-bench-reload').addEventListener('click', () =>
+      runBenchmark(panel, { force: true })
+    );
 
-    // Auto-render from cache if we have one for the current category, so
-    // switching tiers doesn't force a fresh API call.
-    const categoryId = el.querySelector('#tds-bench-category').value;
-    const cached = categoryId && state.benchmark.cache[categoryId];
-    if (cached) renderBenchmarkResults(panel, cached.data, ownId, ownRating);
+    if (own.typeId === null) {
+      el.querySelector('#tds-bench-results').innerHTML =
+        `<div class="tds-box tds-box-warn">I couldn't detect your company type ID from company/profile, so Compare cannot build the Torn search filter.</div>`;
+      return;
+    }
+
+    if (state.benchmark.tier === 'same' && own.rating === null) {
+      state.benchmark.tier = 'all';
+      el.querySelectorAll('[data-tier]').forEach((button) => {
+        button.classList.toggle('tds-segment-active', button.dataset.tier === 'all');
+      });
+    }
+
+    setTimeout(() => runBenchmark(panel), 0);
   }
 
-  async function runBenchmark(panel) {
+  async function runBenchmark(panel, { force = false } = {}) {
     const el = panel.querySelector('[data-tabpanel="benchmark"]');
-    const categoryId = el.querySelector('#tds-bench-category').value;
+    if (!el) return;
+
+    const results = state.lastResults;
+    const profile = results ? findRaw(results, 'company', 'profile') : null;
+    const own = getOwnCompanyCompareInfo(profile, results);
     const resultsEl = el.querySelector('#tds-bench-results');
-    if (!categoryId) {
-      resultsEl.innerHTML = `<div class="tds-box tds-box-warn">Enter a company type/category ID first \u2014 it should prefill automatically once the diagnostic has read your own company/profile.</div>`;
+
+    if (own.typeId === null) {
+      if (resultsEl) {
+        resultsEl.innerHTML =
+          `<div class="tds-box tds-box-warn">Company type could not be detected.</div>`;
+      }
       return;
     }
 
-    const cached = state.benchmark.cache[categoryId];
-    if (cached && Date.now() - cached.timestamp < BENCHMARK_CACHE_TTL_MS) {
-      const profile = state.lastResults ? findRaw(state.lastResults, 'company', 'profile') : null;
-      const ownId = profile && Object.entries(profile).find(([k]) => /^id$/i.test(k))?.[1];
-      const ownRatingEntry = profile && Object.entries(profile).find(([k, v]) => typeof v === 'number' && /rating/i.test(k));
-      renderBenchmarkResults(panel, cached.data, ownId, ownRatingEntry ? ownRatingEntry[1] : null);
+    const tier = state.benchmark.tier || 'same';
+    const cacheKey = `${own.typeId}:${tier}:${tier === 'same' ? own.rating ?? 'unknown' : ''}`;
+    const cached = state.benchmark.cache[cacheKey];
+
+    if (!force &&
+        cached &&
+        Date.now() - cached.timestamp < BENCHMARK_CACHE_TTL_MS) {
+      renderBenchmarkResults(panel, cached.data, own, tier);
       return;
     }
 
-    resultsEl.innerHTML = `<div class="tds-box tds-box-neutral">Fetching\u2026</div>`;
+    if (resultsEl) {
+      resultsEl.innerHTML =
+        `<div class="tds-box tds-box-neutral">Fetching ${escapeHtml(String(own.typeName || `company type ${own.typeId}`))} — ${escapeHtml(compareTierLabel(tier, own.rating))}…</div>`;
+    }
+
     try {
-      const data = await fetchBenchmarkCompanies(categoryId);
-      state.benchmark.cache[categoryId] = { timestamp: Date.now(), data };
-      const profile = state.lastResults ? findRaw(state.lastResults, 'company', 'profile') : null;
-      const ownId = profile && Object.entries(profile).find(([k]) => /^id$/i.test(k))?.[1];
-      const ownRatingEntry = profile && Object.entries(profile).find(([k, v]) => typeof v === 'number' && /rating/i.test(k));
-      renderBenchmarkResults(panel, data, ownId, ownRatingEntry ? ownRatingEntry[1] : null);
+      const data = await fetchBenchmarkCompanies(own.typeId, tier, own.rating, 0);
+      state.benchmark.cache[cacheKey] = {
+        timestamp: Date.now(),
+        data,
+      };
+      renderBenchmarkResults(panel, data, own, tier);
     } catch (err) {
-      resultsEl.innerHTML = `<div class="tds-box tds-box-danger"><strong>Fetch failed:</strong> Torn error ${err.code ?? ''}: ${err.reason || 'unknown'}. If this is a "wrong fields" style error, the category parameter name for this selection needs manual verification against Torn's current Swagger spec \u2014 I tried the two most likely names and both failed.</div>`;
+      if (!resultsEl) return;
+
+      const permissionHint = err.code === 16
+        ? `<br><br><strong>Custom-key note:</strong> your current key may not include Company → Search. Generate the updated Custom API Key from Settings once.`
+        : '';
+
+      resultsEl.innerHTML =
+        `<div class="tds-box tds-box-danger"><strong>Compare fetch failed:</strong> Torn error ${err.code ?? ''}: ${escapeHtml(String(err.reason || 'unknown'))}.${permissionHint}</div>`;
     }
   }
 
-  function renderBenchmarkResults(panel, data, ownId, ownRating) {
+  function renderBenchmarkResults(panel, data, own, tier) {
     const el = panel.querySelector('[data-tabpanel="benchmark"] #tds-bench-results');
     if (!el) return;
 
-    const listKey = Object.keys(data).find((k) => Array.isArray(data[k]) || typeof data[k] === 'object');
-    const raw = listKey ? data[listKey] : data;
-    const rows = Array.isArray(raw) ? raw : Object.values(raw || {});
+    const rawRows = extractCompareCompanies(data);
+    const rows = rawRows.map(normalizeCompareCompany);
 
-    if (!rows.length || typeof rows[0] !== 'object') {
-      el.innerHTML = `<div class="tds-box tds-box-warn">Response didn\u2019t look like a company list (fields: ${Object.keys(data).join(', ')}). Not rendering a ranking against an unverified shape \u2014 paste this back and I\u2019ll fix the parsing.</div>`;
+    if (!rows.length) {
+      el.innerHTML = `
+        <div class="tds-card">
+          <div class="tds-row"><span class="tds-row-label">Company type</span><span class="tds-row-value">${escapeHtml(String(own.typeName || own.typeId))}</span></div>
+          <div class="tds-row"><span class="tds-row-label">Selected rating</span><span class="tds-row-value">${escapeHtml(compareTierLabel(tier, own.rating))}</span></div>
+          <div class="tds-row"><span class="tds-row-label">Companies returned</span><span class="tds-row-value">0</span></div>
+        </div>
+        <div class="tds-box tds-box-neutral">Torn returned no companies matching this search filter.</div>`;
       return;
     }
 
-    const ratingKey = Object.keys(rows[0]).find((k) => /rating/i.test(k));
-    const incomeKey = Object.keys(rows[0]).find((k) => /daily.*profit|daily.*income/i.test(k)) ||
-      Object.keys(rows[0]).find((k) => /weekly.*profit|weekly.*income/i.test(k));
-    const nameKey = Object.keys(rows[0]).find((k) => /^name$/i.test(k));
-    const idKey = Object.keys(rows[0]).find((k) => /^id$/i.test(k));
-
-    if (!incomeKey) {
-      el.innerHTML = `<div class="tds-box tds-box-warn">Couldn\u2019t find an income field on these entries (fields present: ${Object.keys(rows[0]).join(', ')}). Ranking needs one \u2014 tell me the real field name and I\u2019ll wire it in.</div>`;
-      return;
-    }
-
-    const tier = state.benchmark.tier;
-    const filtered = rows.filter((r) => {
-      const rating = ratingKey ? r[ratingKey] : null;
-      if (rating === null) return true;
-      if (tier === 'same') return ownRating !== null ? rating === ownRating : true;
-      if (tier === 'mid') return rating >= 3 && rating <= 5;
-      if (tier === 'top') return rating >= 8;
+    // The search endpoint is already filtered server-side. This secondary
+    // check protects the UI if Torn ever returns an out-of-band row.
+    const filtered = rows.filter((row) => {
+      if (tier === 'all') return true;
+      if (row.rating === null) return true;
+      if (tier === 'same') {
+        return own.rating === null || row.rating === own.rating;
+      }
+      if (tier === 'mid') return row.rating >= 3 && row.rating <= 5;
+      if (tier === 'top') return row.rating >= 8 && row.rating <= 10;
       return true;
     });
 
-    const sorted = [...filtered].sort((a, b) => (b[incomeKey] || 0) - (a[incomeKey] || 0));
-    const capped = rows.length >= 100;
+    const usableRows = filtered.length ? filtered : rows;
 
-    let html = '';
-    html += `<div class="tds-card">`;
-    html += `<div class="tds-row"><span class="tds-row-label">Companies fetched (this category)</span><span class="tds-row-value">${rows.length}${capped ? '+' : ''}</span></div>`;
-    html += `<div class="tds-row"><span class="tds-row-label">Matching this tier</span><span class="tds-row-value">${filtered.length}</span></div>`;
-    if (ownId !== null && ownId !== undefined) {
-      const rank = sorted.findIndex((r) => idKey && String(r[idKey]) === String(ownId));
-      html += `<div class="tds-row"><span class="tds-row-label">Your rank (by ${incomeKey})</span><span class="tds-row-value">${rank >= 0 ? `#${rank + 1} / ${sorted.length}` : '<span class="tds-v-dim">not found in this fetch</span>'}</span></div>`;
-    }
-    html += '</div>';
+    const hasDailyIncome = usableRows.some((r) => r.dailyIncome !== null);
+    const hasWeeklyIncome = usableRows.some((r) => r.weeklyIncome !== null);
+    const hasDailyCustomers = usableRows.some((r) => r.dailyCustomers !== null);
+    const hasWeeklyCustomers = usableRows.some((r) => r.weeklyCustomers !== null);
 
-    if (capped) {
-      html += `<div class="tds-box tds-box-warn">This category returned the API\u2019s 100-row cap \u2014 there may be more companies beyond what\u2019s shown. Ranking below is only within these ${rows.length}.</div>`;
-    }
+    const metric = hasWeeklyIncome
+      ? 'weeklyIncome'
+      : hasDailyIncome
+        ? 'dailyIncome'
+        : null;
 
-    html += `<div class="tds-section-label">Top ${Math.min(10, sorted.length)} by ${incomeKey}</div>`;
-    html += '<table class="tds-table"><thead><tr><th>#</th><th>Company</th>' + (ratingKey ? '<th>\u2605</th>' : '') + `<th>${incomeKey}</th></tr></thead><tbody>`;
-    sorted.slice(0, 10).forEach((r, i) => {
-      const isYou = idKey && String(r[idKey]) === String(ownId);
-      html += `<tr style="${isYou ? 'color:var(--tds-accent,#3ddc84);font-weight:700;' : ''}"><td>${i + 1}</td><td>${escapeHtml(String(nameKey ? r[nameKey] : r[idKey] ?? '?'))}${isYou ? ' (you)' : ''}</td>${ratingKey ? `<td>${r[ratingKey]}</td>` : ''}<td class="tds-num">${formatMoney(r[incomeKey])}</td></tr>`;
+    const metricLabel = metric === 'weeklyIncome'
+      ? 'Weekly Income'
+      : metric === 'dailyIncome'
+        ? 'Daily Income'
+        : 'Company';
+
+    const sorted = [...usableRows].sort((a, b) => {
+      if (!metric) return String(a.name || '').localeCompare(String(b.name || ''));
+      return (b[metric] ?? -1) - (a[metric] ?? -1);
     });
-    html += '</tbody></table>';
 
+    const ownIndex = own.id !== null
+      ? sorted.findIndex((row) =>
+          row.id !== null && String(row.id) === String(own.id)
+        )
+      : -1;
+
+    let html = `<div class="tds-card">`;
+    html += `<div class="tds-row"><span class="tds-row-label">Company type</span><span class="tds-row-value">${escapeHtml(String(own.typeName || own.typeId))}${own.typeName ? ` (${escapeHtml(String(own.typeId))})` : ''}</span></div>`;
+    html += `<div class="tds-row"><span class="tds-row-label">Selected rating</span><span class="tds-row-value">${escapeHtml(compareTierLabel(tier, own.rating))}</span></div>`;
+    html += `<div class="tds-row"><span class="tds-row-label">Companies returned</span><span class="tds-row-value">${formatNumber(sorted.length)}</span></div>`;
+
+    if (ownIndex >= 0 && metric) {
+      html += `<div class="tds-row"><span class="tds-row-label">Your rank by ${metricLabel}</span><span class="tds-row-value">#${ownIndex + 1} / ${sorted.length}</span></div>`;
+    }
+
+    html += `</div>`;
+
+    const availableFinancialFields = [
+      hasDailyIncome ? 'Daily income' : null,
+      hasWeeklyIncome ? 'Weekly income' : null,
+      hasDailyCustomers ? 'Daily customers' : null,
+      hasWeeklyCustomers ? 'Weekly customers' : null,
+    ].filter(Boolean);
+
+    if (!availableFinancialFields.length) {
+      html += `<div class="tds-box tds-box-warn">
+        Torn returned the companies, but this response did not contain daily/weekly income or customer figures.
+        Compare will still show company/rating data rather than inventing financial values.
+      </div>`;
+    } else {
+      html += `<div class="tds-box tds-box-info">
+        Financial fields available from Torn in this response: <strong>${escapeHtml(availableFinancialFields.join(', '))}</strong>.
+      </div>`;
+    }
+
+    if (rows.length >= 100) {
+      html += `<div class="tds-box tds-box-warn">
+        This search returned 100 companies, which is Torn's per-request limit. Additional matching companies may exist on later pages.
+      </div>`;
+    }
+
+    html += `<div class="tds-section-label">Top ${Math.min(25, sorted.length)}${metric ? ` — ${metricLabel}` : ''}</div>`;
+    html += `<div style="overflow-x:auto;"><table class="tds-table tds-compare-table"><thead><tr>
+      <th>#</th>
+      <th>Company</th>
+      <th>★</th>
+      ${hasDailyIncome ? '<th>Daily Income</th>' : ''}
+      ${hasWeeklyIncome ? '<th>Weekly Income</th>' : ''}
+      ${hasDailyCustomers ? '<th>Daily Customers</th>' : ''}
+      ${hasWeeklyCustomers ? '<th>Weekly Customers</th>' : ''}
+    </tr></thead><tbody>`;
+
+    sorted.slice(0, 25).forEach((row, i) => {
+      const isYou =
+        own.id !== null &&
+        row.id !== null &&
+        String(row.id) === String(own.id);
+
+      html += `<tr style="${isYou ? 'color:var(--tds-accent,#3ddc84);font-weight:700;' : ''}">
+        <td>${i + 1}</td>
+        <td>${escapeHtml(String(row.name ?? `#${row.id ?? '?'}`))}${isYou ? ' (you)' : ''}</td>
+        <td>${row.rating !== null ? `${escapeHtml(String(row.rating))}★` : '—'}</td>
+        ${hasDailyIncome ? `<td class="tds-num">${row.dailyIncome !== null ? formatMoney(row.dailyIncome) : '—'}</td>` : ''}
+        ${hasWeeklyIncome ? `<td class="tds-num">${row.weeklyIncome !== null ? formatMoney(row.weeklyIncome) : '—'}</td>` : ''}
+        ${hasDailyCustomers ? `<td class="tds-num">${row.dailyCustomers !== null ? formatNumber(row.dailyCustomers) : '—'}</td>` : ''}
+        ${hasWeeklyCustomers ? `<td class="tds-num">${row.weeklyCustomers !== null ? formatNumber(row.weeklyCustomers) : '—'}</td>` : ''}
+      </tr>`;
+    });
+
+    html += `</tbody></table></div>`;
     el.innerHTML = html;
   }
 
