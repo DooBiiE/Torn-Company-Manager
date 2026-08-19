@@ -1,178 +1,4513 @@
 // ==UserScript==
-// @name         Torn Company Management Suite PDA Parser Diagnostic
+// @name         Torn Company Management Suite
 // @namespace    torn-company-management-suite
-// @version      1.3.12
-// @description  PDA parser diagnostic for Torn Company Management Suite
+// @version      1.3.13
+// @updateURL    https://raw.githubusercontent.com/DooBiiE/Torn-Company-Manager/main/torn-company-manager.user.js
+// @downloadURL  https://raw.githubusercontent.com/DooBiiE/Torn-Company-Manager/main/torn-company-manager.user.js
+// @description  Local-only company management dashboard for Torn directors, embedded in the Jobs page. No company data ever leaves your browser; only your Torn User ID is checked against a public license list.
 // @author       DooBiiE
 // @match        https://www.torn.com/*
+// @grant        GM_xmlhttpRequest
+// @grant        GM_setValue
+// @grant        GM_getValue
+// @grant        GM_deleteValue
+// @connect      api.torn.com
+// @connect      raw.githubusercontent.com
 // @run-at       document-end
 // ==/UserScript==
+
+/**
+ * ============================================================================
+ * TORN COMPANY MANAGEMENT SUITE
+ * ============================================================================
+ *
+ * WHAT THIS DOES:
+ *   1. Stores your API key ONLY in this browser (Tampermonkey local storage,
+ *      via GM_setValue). It is never sent anywhere except https://api.torn.com.
+ *   2. Runs a live "capability diagnostic" against every selection this system
+ *      uses, and records -- with the REAL error code/message Torn returns --
+ *      exactly what your current key can and can't access. The Diagnostics
+ *      tab always shows this; nothing about it gates whether the tab exists.
+ *   3. Checks your own Torn User ID (read from user/basic, EXACT) against a
+ *      public license list hosted on GitHub -- see LICENSE_JSON_URL below.
+ *      Only the numeric User ID is sent in that request; no API key, no
+ *      company data. Everything else in the suite stays fully local.
+ *   4. For whatever the API key can access, renders a read-only dashboard and
+ *      takes a local snapshot (IndexedDB) so history builds up from today.
+ *   5. Everything is tagged with its accuracy classification:
+ *        EXACT = straight from a Torn API field this session
+ *        DERIVED = computed purely from EXACT values
+ *        HISTORICAL = from a locally stored earlier snapshot
+ *        BLOCKED = this key/role cannot access this data (shown, not hidden)
+ *
+ * OPTIMIZE / STOCK MANAGEMENT:
+ *   Optimize uses the working stats now returned by company/employees plus
+ *   position requirements from torn/companies. It reports requirement-fit
+ *   coverage; it does not pretend that this is Torn's hidden EE formula.
+ *   Stock Management combines company/stock with company/news when available
+ *   to show recent unit sales and a clearly-labelled derived restock target.
+ *
+ * REQUIRED API KEY LEVEL:
+ *   Full Access (or a Custom key covering company: profile/employees/
+ *   detailed/stock/news/applications and user: basic/workstats/log) is needed for
+ *   full functionality. A Public/Minimal key will show BLOCKED on most tabs
+ *   -- the Diagnostics tab always shows exactly which selections work.
+ *
+ * INSTALL: Tampermonkey/Violentmonkey -> Create new script -> paste this file.
+ * ============================================================================
+ */
 
 (function () {
   'use strict';
 
-  var SOURCE_PARTS = [
-"\n\n/**\n * ============================================================================\n * TORN COMPANY MANAGEMENT SUITE\n * ============================================================================\n *\n * WHAT THIS DOES:\n *   1. Stores your API key ONLY in this browser (Tampermonkey local storage,\n *      via GM_setValue). It is never sent anywhere except https://api.torn.com.\n *   2. Runs a live \"capability diagnostic\" against every selection this system\n *      uses, and records -- with the REAL error code/message Torn returns --\n *      exactly what your current key can and can't access. The Diagnostics\n *      tab always shows this; nothing about it gates whether the tab exists.\n *   3. Checks your own Torn User ID (read from user/basic, EXACT) against a\n *      public license list hosted on GitHub -- see LICENSE_JSON_URL below.\n *      Only the numeric User ID is sent in that request; no API key, no\n *      company data. Everything else in the suite stays fully local.\n *   4. For whatever the API key can access, renders a read-only dashboard and\n *      takes a local snapshot (IndexedDB) so history builds up from today.\n *   5. Everything is tagged with its accuracy classification:\n *        EXACT = straight from a Torn API field this session\n *        DERIVED = computed purely from EXACT values\n *        HISTORICAL = from a locally stored earlier snapshot\n *        BLOCKED = this key/role cannot access this data (shown, not hidden)\n *\n * OPTIMIZE / STOCK MANAGEMENT:\n *   Optimize uses the working stats now returned by company/employees plus\n *   position requirements from torn/companies. It reports requirement-fit\n *   coverage; it does not pretend that this is Torn's hidden EE formula.\n *   Stock Management combines company/stock with company/news when available\n",
-" *   to show recent unit sales and a clearly-labelled derived restock target.\n *\n * REQUIRED API KEY LEVEL:\n *   Full Access (or a Custom key covering company: profile/employees/\n *   detailed/stock/news/applications and user: basic/workstats/log) is needed for\n *   full functionality. A Public/Minimal key will show BLOCKED on most tabs\n *   -- the Diagnostics tab always shows exactly which selections work.\n *\n * INSTALL: Tampermonkey/Violentmonkey -> Create new script -> paste this file.\n * ============================================================================\n */\n\n(function () {\n  'use strict';\n\n  // ---------------------------------------------------------------------\n  // 0. CONSTANTS\n  // ---------------------------------------------------------------------\n  const API_BASE = 'https://api.torn.com';\n  // Read the UI version from userscript metadata when available. TornPDA may\n  // not expose that metadata API, so a release fallback is provided below.\n  // TornPDA does not always expose the legacy GM_info object that desktop\n  // userscript managers provide. Try both common metadata APIs, then use the\n  // release version as a PDA-safe fallback so the UI never shows vunknown.\n  const TDS_VERSION_FALLBACK = '1.3.6';\n// Update distribution uses the same GitHub-hosted .user.js for both version\n// checks and downloads. Release process: bump @version + this fallback, then\n// replace torn-company-manager.user.js on the main branch.\n\n  const TDS_VERSION =\n    (typeof GM_info !== 'undefined' && GM_info?.script?.version) ||\n    (typeof GM !== 'undefined' && GM?.info?.script?.version) ||\n    TDS_VERSION_FALLBACK;\n  const STORAGE_KEY_APIKEY = 'tds_api_key';\n  const STORAGE_KEY_LAST_RUN_AT = 'tds_last_run_at';\n  const STORAGE_KEY_THEME = 'tds_theme';\n  const STORAGE_KEY_L",
-"ICENSE_CACHE = 'tds_license_cache';\n\n  // TornPDA normally supplies the underscore-style GM storage functions, but\n  // keep a localStorage fallback so a missing/changed PDA GM shim cannot stop\n  // the entire dashboard from mounting. Desktop Tampermonkey/Violentmonkey\n  // continues to use the normal GM functions.\n  function tdsGetValue(key, fallback = null) {\n    try {\n      if (typeof GM_getValue === 'function') return GM_getValue(key, fallback);\n    } catch (err) {\n      console.warn('[TDS] GM_getValue failed; using localStorage fallback:', err);\n    }\n    try {\n      const raw = localStorage.getItem(`tds_fallback_${key}`);\n      return raw === null ? fallback : JSON.parse(raw);\n    } catch (_) {\n      return fallback;\n    }\n  }\n\n  function tdsSetValue(key, value) {\n    try {\n      if (typeof GM_setValue === 'function') {\n        GM_setValue(key, value);\n        return;\n      }\n    } catch (err) {\n      console.warn('[TDS] GM_setValue failed; using localStorage fallback:', err);\n    }\n    try {\n      localStorage.setItem(`tds_fallback_${key}`, JSON.stringify(value));\n    } catch (_) {}\n  }\n\n  function tdsDeleteValue(key) {\n    try {\n      if (typeof GM_deleteValue === 'function') {\n        GM_deleteValue(key);\n        return;\n      }\n    } catch (err) {\n      console.warn('[TDS] GM_deleteValue failed; using localStorage fallback:', err);\n    }\n    try {\n      localStorage.removeItem(`tds_fallback_${key}`);\n    } catch (_) {}\n  }\n\n  const MIN_CALL_INTERVAL_MS = 800; // ~75 req/min ceiling, well under Torn's 100/min cap\n  const DB_NAME = 'torn_director_system';\n  const DB_VERSION = 1;\n\n  // Public list of licensed Torn User IDs. Only the numeric User ID (read\n  // from user/basic, EXACT) is compared against this -- no API key or\n  // company data is ever sent here. Ex",
-"pected shape (propose this to whoever\n  // maintains the file if it isn't already in this form):\n  //   [ { \"userId\": 4237873, \"status\": \"active\" }, { \"userId\": 1234567, \"status\": \"expired\" } ]\n  // A \"status\" of anything other than \"active\"/\"expired\" (or a User ID not\n  // present in the list at all) is treated as not licensed -- this never\n  // guesses a license into existence.\n  const LICENSE_JSON_URL = 'https://raw.githubusercontent.com/DooBiiE/Torn-Company-Manager/refs/heads/main/licensed-users.json';\n  const LICENSE_CACHE_TTL_MS = 60 * 60 * 1000; // 1h -- avoids hitting GitHub raw on every page load/navigation\n\n  // CUSTOM API KEY\n  // Torn supports an official custom-key creation URL. The fragment below\n  // pre-selects exactly the permissions this suite uses, then Torn handles\n  // the actual key creation on its own Settings page.\n  //\n  // Required selections for this suite:\n  //   company: profile, employees, detailed, stock, news, applications, companies\n  //   user:    basic, workstats, log\n  //   torn:    companies\n  //\n  // IMPORTANT: this does not create or expose the secret key itself. It only\n  // opens Torn's own key-generation flow with the required selections and\n  // application name pre-filled. The user remains on Torn's site throughout\n  // key creation and must then paste the generated key into this script.\n  const CUSTOM_KEY_TITLE = 'Torn Company Management Suite';\n  const CUSTOM_KEY_SELECTIONS = {\n    company: ['profile', 'employees', 'detailed', 'stock', 'news', 'applications', 'companies', 'search', 'snapshot'],\n    user: ['basic', 'workstats', 'log'],\n    torn: ['companies'],\n  };\n\n  function buildCustomKeyUrl() {\n    const parts = [\n      'https://www.torn.com/preferences.php#tab=api?step=addNewKey',\n      `company=${CUSTOM_KEY_SELECTIONS.c",
-"ompany.join(',')}`,\n      `user=${CUSTOM_KEY_SELECTIONS.user.join(',')}`,\n      `torn=${CUSTOM_KEY_SELECTIONS.torn.join(',')}`,\n      `title=${encodeURIComponent(CUSTOM_KEY_TITLE)}`,\n    ];\n    return parts.join('&');\n  }\n\n  const PROBE_PLAN = [\n    { section: 'company', selections: 'profile', label: 'Company profile' },\n    { section: 'company', selections: 'employees', label: 'Employee roster' },\n    { section: 'company', selections: 'detailed', label: 'Company financials' },\n    { section: 'company', selections: 'stock', label: 'Company stock' },\n    { section: 'company', selections: 'news', label: 'Company news / sales history' },\n    { section: 'company', selections: 'applications', label: 'Pending applications' },\n    { section: 'user', selections: 'basic', label: 'Your own basic profile' },\n    { section: 'user', selections: 'workstats', label: 'Your own working stats' },\n    { section: 'user', selections: 'log', label: 'Your own personal event log' },\n    { section: 'torn', selections: 'companies', label: 'Reference: company types & positions' },\n  ];\n\n  // Theme presets \u2014 ONLY the accent (brand/interactive) color changes here.\n  // Semantic colors (green=good, red=bad, amber=warning) stay fixed on\n  // purpose so the UI doesn't lose its meaning when you switch themes.\n  const THEME_PRESETS = {\n    green:  { accent: '#3ddc84', accentDim: 'rgba(61, 220, 132, 0.14)' },\n    blue:   { accent: '#4da3ff', accentDim: 'rgba(77, 163, 255, 0.14)' },\n    purple: { accent: '#b18cff', accentDim: 'rgba(177, 140, 255, 0.14)' },\n    amber:  { accent: '#f5a623', accentDim: 'rgba(245, 166, 35, 0.14)' },\n    cyan:   { accent: '#39d0d8', accentDim: 'rgba(57, 208, 216, 0.14)' },\n    pink:   { accent: '#ff6bb5', accentDim: 'rgba(255, 107, 181, 0.14)' },\n  };\n\n  // -------------------",
-"--------------------------------------------------\n  // 1. API CLIENT \u2014 queued, rate-limited, validated, never fabricates\n  // ---------------------------------------------------------------------\n  const ApiClient = (() => {\n    let queue = Promise.resolve();\n    let lastCallAt = 0;\n\n    function rawCall(section, selections, id = '', extraParams = {}) {\n      const key = tdsGetValue(STORAGE_KEY_APIKEY, '');\n      if (!key) return Promise.reject({ blocked: true, reason: 'No API key configured yet.' });\n\n      const path = id ? `${section}/${id}` : section;\n      const params = new URLSearchParams({ selections, key, ...extraParams });\n      const url = `${API_BASE}/${path}?${params.toString()}`;\n\n      return new Promise((resolve, reject) => {\n        GM_xmlhttpRequest({\n          method: 'GET',\n          url,\n          timeout: 15000,\n          onload: (res) => {\n            let json;\n            try {\n              json = JSON.parse(res.responseText);\n            } catch (e) {\n              reject({ blocked: true, reason: 'Response was not valid JSON \u2014 Torn API may be down.' });\n              return;\n            }\n            if (json.error) {\n              reject({ blocked: true, code: json.error.code, reason: json.error.error });\n              return;\n            }\n            resolve(json);\n          },\n          onerror: () => reject({ blocked: true, reason: 'Network error contacting api.torn.com' }),\n          ontimeout: () => reject({ blocked: true, reason: 'Request to api.torn.com timed out' }),\n        });\n      });\n    }\n\n    function call(section, selections, id = '', extraParams = {}) {\n      const run = () => {\n        const wait = Math.max(0, MIN_CALL_INTERVAL_MS - (Date.now() - lastCallAt));\n        return new Promise((resolve) => setTimeout(resolve, wait",
-")).then(() => {\n          lastCallAt = Date.now();\n          return rawCall(section, selections, id, extraParams);\n        });\n      };\n      const result = queue.then(run, run);\n      queue = result.then(() => {}, () => {});\n      return result;\n    }\n\n    function rawCallV2(path, extraParams = {}) {\n      const key = tdsGetValue(STORAGE_KEY_APIKEY, '');\n      if (!key) return Promise.reject({ blocked: true, reason: 'No API key configured yet.' });\n\n      // Torn API v2 / Swagger uses header authentication. Do NOT append the\n      // secret API key to the query string here; doing so can return error 2\n      // (\"Incorrect key\") even though the same key works with our v1 calls.\n      const params = new URLSearchParams({ ...extraParams });\n      const cleanPath = String(path || '').replace(/^\\/+/, '');\n      const query = params.toString();\n      const url = `${API_BASE}/v2/${cleanPath}${query ? `?${query}` : ''}`;\n\n      return new Promise((resolve, reject) => {\n        GM_xmlhttpRequest({\n          method: 'GET',\n          url,\n          headers: {\n            Authorization: `ApiKey ${key}`,\n          },\n          timeout: 15000,\n          onload: (res) => {\n            let json;\n            try {\n              json = JSON.parse(res.responseText);\n            } catch (e) {\n              reject({ blocked: true, reason: 'Response was not valid JSON \u2014 Torn API may be down.' });\n              return;\n            }\n            if (json.error) {\n              reject({ blocked: true, code: json.error.code, reason: json.error.error || json.error.message });\n              return;\n            }\n            resolve(json);\n          },\n          onerror: () => reject({ blocked: true, reason: 'Network error contacting api.torn.com' }),\n          ontimeout: () => reject({ blocked: t",
-"rue, reason: 'Request to api.torn.com timed out' }),\n        });\n      });\n    }\n\n    function callV2(path, extraParams = {}) {\n      const run = () => {\n        const wait = Math.max(0, MIN_CALL_INTERVAL_MS - (Date.now() - lastCallAt));\n        return new Promise((resolve) => setTimeout(resolve, wait)).then(() => {\n          lastCallAt = Date.now();\n          return rawCallV2(path, extraParams);\n        });\n      };\n      const result = queue.then(run, run);\n      queue = result.then(() => {}, () => {});\n      return result;\n    }\n\n    function rawCallV2Text(path, extraParams = {}) {\n      const key = tdsGetValue(STORAGE_KEY_APIKEY, '');\n      if (!key) return Promise.reject({ blocked: true, reason: 'No API key configured yet.' });\n\n      const params = new URLSearchParams({ ...extraParams });\n      const cleanPath = String(path || '').replace(/^\\/+/, '');\n      const query = params.toString();\n      const url = `${API_BASE}/v2/${cleanPath}${query ? `?${query}` : ''}`;\n\n      return new Promise((resolve, reject) => {\n        GM_xmlhttpRequest({\n          method: 'GET',\n          url,\n          headers: {\n            Authorization: `ApiKey ${key}`,\n            Accept: 'text/csv, text/plain, */*',\n          },\n          timeout: 20000,\n          onload: (res) => {\n            const body = String(res.responseText || '');\n            // Snapshot errors may still arrive as JSON even though success is CSV.\n            const trimmed = body.trim();\n            if (trimmed.startsWith('{')) {\n              try {\n                const json = JSON.parse(trimmed);\n                if (json.error) {\n                  reject({\n                    blocked: true,\n                    code: json.error.code,\n                    reason: json.error.error || json.error.message || 'Torn API er",
-"ror',\n                  });\n                  return;\n                }\n              } catch (_) {}\n            }\n            resolve(body);\n          },\n          onerror: () => reject({ blocked: true, reason: 'Network error contacting api.torn.com' }),\n          ontimeout: () => reject({ blocked: true, reason: 'Request to api.torn.com timed out' }),\n        });\n      });\n    }\n\n    function callV2Text(path, extraParams = {}) {\n      const run = () => {\n        const wait = Math.max(0, MIN_CALL_INTERVAL_MS - (Date.now() - lastCallAt));\n        return new Promise((resolve) => setTimeout(resolve, wait)).then(() => {\n          lastCallAt = Date.now();\n          return rawCallV2Text(path, extraParams);\n        });\n      };\n      const result = queue.then(run, run);\n      queue = result.then(() => {}, () => {});\n      return result;\n    }\n\n    return { call, callV2, callV2Text };\n  })();\n\n  // ---------------------------------------------------------------------\n  // 2. LOCAL STORAGE (IndexedDB) \u2014 snapshots only, nothing leaves the browser\n  // ---------------------------------------------------------------------\n  const LocalDB = (() => {\n    let dbPromise = null;\n\n    function open() {\n      if (dbPromise) return dbPromise;\n      dbPromise = new Promise((resolve, reject) => {\n        const req = indexedDB.open(DB_NAME, DB_VERSION);\n        req.onupgradeneeded = () => {\n          const db = req.result;\n          if (!db.objectStoreNames.contains('snapshots')) {\n            const store = db.createObjectStore('snapshots', { keyPath: 'id', autoIncrement: true });\n            store.createIndex('timestamp', 'timestamp');\n          }\n          if (!db.objectStoreNames.contains('diagnostics')) {\n            db.createObjectStore('diagnostics', { keyPath: 'timestamp' });\n         ",
-" }\n        };\n        req.onsuccess = () => resolve(req.result);\n        req.onerror = () => reject(req.error);\n      });\n      return dbPromise;\n    }\n\n    async function put(storeName, value) {\n      const db = await open();\n      return new Promise((resolve, reject) => {\n        const tx = db.transaction(storeName, 'readwrite');\n        tx.objectStore(storeName).put(value);\n        tx.oncomplete = () => resolve();\n        tx.onerror = () => reject(tx.error);\n      });\n    }\n\n    async function getAll(storeName) {\n      const db = await open();\n      return new Promise((resolve, reject) => {\n        const tx = db.transaction(storeName, 'readonly');\n        const req = tx.objectStore(storeName).getAll();\n        req.onsuccess = () => resolve(req.result || []);\n        req.onerror = () => reject(req.error);\n      });\n    }\n\n    async function deleteKey(storeName, key) {\n      const db = await open();\n      return new Promise((resolve, reject) => {\n        const tx = db.transaction(storeName, 'readwrite');\n        tx.objectStore(storeName).delete(key);\n        tx.oncomplete = () => resolve();\n        tx.onerror = () => reject(tx.error);\n      });\n    }\n\n    async function getLatest(storeName, sortField = 'timestamp') {\n      const all = await getAll(storeName);\n      if (!all.length) return null;\n      return all.reduce((latest, row) =>\n        !latest || (Number(row?.[sortField]) || 0) > (Number(latest?.[sortField]) || 0)\n          ? row\n          : latest, null);\n    }\n\n    async function clear(storeName) {\n      const db = await open();\n      return new Promise((resolve, reject) => {\n        const tx = db.transaction(storeName, 'readwrite');\n        tx.objectStore(storeName).clear();\n        tx.oncomplete = () => resolve();\n        tx.onerror = () => reject(tx.error);",
-"\n      });\n    }\n\n    return { put, getAll, deleteKey, getLatest, clear };\n  })();\n\n  const MAX_SNAPSHOTS = 120; // matches the \"120 max stored locally\" retention policy\n\n  async function pruneSnapshots() {\n    const all = await LocalDB.getAll('snapshots');\n    if (all.length <= MAX_SNAPSHOTS) return;\n    all.sort((a, b) => a.timestamp - b.timestamp);\n    const toRemove = all.slice(0, all.length - MAX_SNAPSHOTS);\n    for (const row of toRemove) await LocalDB.deleteKey('snapshots', row.id);\n  }\n\n  // ---------------------------------------------------------------------\n  // 3. DIAGNOSTIC RUNNER\n  // ---------------------------------------------------------------------\n  async function runDiagnostic(onEach) {\n    const results = [];\n    for (const probe of PROBE_PLAN) {\n      try {\n        const data = await ApiClient.call(probe.section, probe.selections);\n        const r = { ...probe, status: 'ok', sampleKeys: extractTopLevelKeys(data), raw: data };\n        results.push(r);\n        onEach?.(r);\n      } catch (err) {\n        const r = { ...probe, status: 'blocked', code: err.code, reason: err.reason || 'Unknown error' };\n        results.push(r);\n        onEach?.(r);\n      }\n    }\n    await LocalDB.put('diagnostics', { timestamp: Date.now(), results });\n    return results;\n  }\n\n  function extractTopLevelKeys(obj) {\n    if (!obj || typeof obj !== 'object') return [];\n    return Object.keys(obj);\n  }\n\n  async function takeSnapshotFromDiagnostic(results) {\n    const snapshot = { timestamp: Date.now(), source: 'api' };\n    for (const r of results) {\n      if (r.status === 'ok') snapshot[`${r.section}_${r.selections}`] = r.raw;\n    }\n    if (Object.keys(snapshot).length > 2) {\n      await LocalDB.put('snapshots', snapshot);\n      await pruneSnapshots();\n    }\n    return snapsho",
-"t;\n  }\n\n  // ---------------------------------------------------------------------\n  // 3b. ACCESS VERDICT \u2014 DERIVED purely from the real statuses above\n  // ---------------------------------------------------------------------\n  function classifyAccess(results) {\n    const byKey = (section, selections) =>\n      results.find((r) => r.section === section && r.selections === selections);\n\n    const financials = byKey('company', 'detailed');\n    const stock = byKey('company', 'stock');\n    const applications = byKey('company', 'applications');\n    const roster = byKey('company', 'employees');\n\n    const directorSignals = [financials, stock, applications].filter(Boolean);\n    const directorOkCount = directorSignals.filter((r) => r.status === 'ok').length;\n    const directorBlockedCount = directorSignals.filter((r) => r.status === 'blocked').length;\n\n    if (directorOkCount === directorSignals.length && directorSignals.length > 0) {\n      return {\n        level: 'director',\n        headline: 'Director-level access confirmed',\n        detail: 'company/detailed, company/stock, and company/applications all returned real data. This key can drive the full system.',\n      };\n    }\n    if (roster?.status === 'ok' && directorOkCount === 0 && directorBlockedCount > 0) {\n      return {\n        level: 'employee',\n        headline: 'Employee-level access only',\n        detail: 'Roster is visible, but financials/stock/applications are blocked (' +\n          directorSignals.map((r) => `${r.selections}: ${r.reason || 'blocked'}`).join('; ') +\n          '). This is a role check (are you the director of this company), not a key-tier limit \u2014 ' +\n          'a higher-access key on the same non-director account will not unlock these.',\n      };\n    }\n    if (directorOkCount > 0 && directorOkCoun",
-"t < directorSignals.length) {\n      return {\n        level: 'partial',\n        headline: 'Partial / custom access',\n        detail: 'Some director-level selections succeeded, others didn\\u2019t \\u2014 looks like a Custom key missing a selection, not a role limit.',\n      };\n    }\n    return {\n      level: 'unknown',\n      headline: 'Access level unclear',\n      detail: 'Not enough successful probes to classify yet. Check the Diagnostics tab.',\n    };\n  }\n\n  // ---------------------------------------------------------------------\n  // 4. STYLES \u2014 matches the reference \"Company Manager\" design language\n  // ---------------------------------------------------------------------\n  function injectStyles() {\n    const css = `\n      /* Embedded Management Suite -- lives inside Torn's own Jobs page, not\n         an overlay. Structural colours (background/border/text) below are\n         CSS variables with these dark-theme values as fallbacks; detectTornColours()\n         overwrites them at runtime by sampling Torn's own page chrome, so the\n         panel matches whichever skin (light or dark) the player is using.\n         --tds-accent / --tds-accent-dim are the user-selectable theme colour\n         (Settings tab) and are never touched by colour detection. Semantic\n         colours (green/red/amber meaning good/bad/warning) are fixed on\n         purpose and are not part of either system. */\n      #tds-panel {\n        width: 100%; box-sizing: border-box; margin: 14px 0 18px;\n        background: var(--tds-bg, #2b2b2b); color: var(--tds-fg, #d8d8d8);\n        border: 1px solid var(--tds-border, #1a1a1a);\n        border-radius: 10px; overflow: hidden; font: 13px/1.45 -apple-system, 'Segoe UI', sans-serif;\n        box-shadow: 0 4px 18px rgba(0,0,0,.22);\n        position: relative; z-ind",
-"ex: 20;\n      }\n      #tds-header {\n        display: flex; align-items: center; justify-content: space-between; gap: 12px;\n        padding: 12px 14px; background: var(--tds-bg-alt, #383838); border-bottom: 1px solid var(--tds-border, #1a1a1a);\n      }\n      #tds-header .tds-brand { display: flex; align-items: baseline; gap: 7px; min-width: 0; flex-wrap: wrap; }\n      #tds-header .tds-brand-dot { color: var(--tds-accent, #3ddc84); font-size: 13px; }\n      #tds-header .tds-brand-name {\n        color: var(--tds-accent, #3ddc84); font-weight: 800; font-size: 13px; letter-spacing: .04em;\n      }\n      #tds-header .tds-brand-version { color: var(--tds-text-faintest, #888888); font-size: 10.5px; }\n      #tds-header .tds-brand-subtitle { color: var(--tds-text-subtle, #969696); font-size: 10.5px; margin-left: 4px; }\n      #tds-header-icons { display: flex; gap: 6px; flex-shrink: 0; }\n      #tds-header-icons button {\n        min-width: 30px; height: 28px; display: flex; align-items: center; justify-content: center;\n        background: transparent; color: var(--tds-text-icon, #aaaaaa); border: 1px solid var(--tds-border-strong, #4a4a4a); border-radius: 6px;\n        cursor: pointer; font-size: 12px; padding: 0 8px;\n      }\n      #tds-header-icons button:hover { background: var(--tds-bg-hover, #404040); color: var(--tds-fg, #d8d8d8); }\n\n      #tds-tabs {\n        display: flex; flex-wrap: wrap; gap: 2px; padding: 9px 12px 0;\n        border-bottom: 1px solid var(--tds-border, #1a1a1a); background: var(--tds-bg, #2b2b2b);\n      }\n      .tds-tab {\n        background: transparent; border: none; color: var(--tds-text-dim, #999999); font: 700 10.5px/1 -apple-system, sans-serif;\n        letter-spacing: .05em; padding: 0 5px 10px; margin-right: 12px; cursor: pointer;\n        border-bottom: 2",
-"px solid transparent;\n      }\n      .tds-tab:hover { color: var(--tds-text-mid, #b5b5b5); }\n      .tds-tab.tds-tab-active { color: var(--tds-accent, #3ddc84); border-bottom-color: var(--tds-accent, #3ddc84); }\n      .tds-tab.tds-tab-locked { color: var(--tds-text-disabled, #666666); cursor: default; }\n      .tds-tab.tds-tab-locked:hover { color: var(--tds-text-disabled, #666666); }\n\n      #tds-body { padding: 14px; box-sizing: border-box; }\n      .tds-tabpanel[hidden] { display: none; }\n      .tds-section-label {\n        font: 700 10.5px/1 -apple-system, sans-serif; letter-spacing: .08em; color: var(--tds-text-faint, #9a9a9a);\n        text-transform: uppercase; margin: 16px 0 8px;\n      }\n      .tds-section-label:first-child { margin-top: 0; }\n      .tds-employee-subheading { font-weight: 800 !important; text-decoration: underline; text-underline-offset: 2px; }\n      .tds-card { background: var(--tds-bg-card, #323232); border: 1px solid var(--tds-border, #1a1a1a); border-radius: 8px; padding: 12px 14px; margin-bottom: 10px; }\n      .tds-card-title { color: var(--tds-text-icon, #aaaaaa); font-size: 11.5px; margin-bottom: 6px; }\n      .tds-row { display: flex; justify-content: space-between; align-items: center; padding: 3px 0; gap: 10px; }\n      .tds-row-label { color: var(--tds-text-mid, #b5b5b5); }\n      .tds-row-value { font-weight: 700; color: var(--tds-text-strong, #f0f0f0); }\n      .tds-v-good { color: #3ddc84 !important; }\n      .tds-v-bad { color: #ff5c5c !important; }\n      .tds-v-warn { color: #f5a623 !important; }\n      .tds-v-dim { color: var(--tds-text-dim, #999999) !important; font-weight: 400 !important; }\n      .tds-box { border-radius: 7px; padding: 10px 12px; margin-bottom: 10px; font-size: 12px; line-height: 1.5; }\n      .tds-box-info { background: rgb",
-"a(61,220,132,.07); border: 1px solid rgba(61,220,132,.28); color: #a9e8c1; }\n      .tds-box-warn { background: rgba(245,166,35,.09); border: 1px solid rgba(245,166,35,.3); color: #f0c584; }\n      .tds-box-danger { background: rgba(255,92,92,.08); border: 1px solid rgba(255,92,92,.3); color: #ffb3b3; }\n      .tds-box-neutral { background: var(--tds-bg-card, #323232); border: 1px solid var(--tds-border, #1a1a1a); color: var(--tds-text-mid, #b5b5b5); }\n      .tds-box strong { color: inherit; }\n      .tds-badge { display: inline-flex; align-items: center; font: 700 10px/1 -apple-system, sans-serif; padding: 3px 7px; border-radius: 5px; white-space: nowrap; letter-spacing: .02em; }\n      .tds-badge-ok { background: rgba(61,220,132,.14); color: #3ddc84; border: 1px solid rgba(61,220,132,.3); }\n      .tds-badge-blocked { background: rgba(255,92,92,.12); color: #ff8b8b; border: 1px solid rgba(255,92,92,.28); }\n      .tds-badge-neutral { background: var(--tds-bg-hover, #404040); color: var(--tds-text-icon, #aaaaaa); border: 1px solid var(--tds-border-strong, #4a4a4a); }\n      .tds-employee-row { padding: 9px 0; border-bottom: 1px solid var(--tds-border-soft, #242424); }\n      .tds-employee-row:last-child { border-bottom: none; }\n      .tds-employee-row > summary { cursor: pointer; list-style: none; }\n      .tds-employee-row > summary::-webkit-details-marker { display: none; }\n      .tds-employee-row > summary::marker { content: ''; }\n      .tds-employee-chevron {\n        display: inline-block; font-size: 10px; color: var(--tds-text-dim, #999999);\n        transition: transform .15s ease; transform: rotate(0deg);\n      }\n      .tds-employee-row[open] .tds-employee-chevron { transform: rotate(90deg); }\n      .tds-employee-row[open] > summary { margin-bottom: 2px; }\n      .tds-emplo",
-"yee-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; }\n      .tds-employee-name { font-weight: 700; color: var(--tds-text-strong, #f0f0f0); font-size: 13px; }\n      .tds-employee-meta { color: var(--tds-text-dim, #999999); font-size: 11px; margin-top: 1px; }\n      .tds-diag-row { display: flex; justify-content: space-between; align-items: flex-start; padding: 8px 0; border-bottom: 1px solid var(--tds-border-soft, #242424); gap: 10px; }\n      .tds-diag-row:last-child { border-bottom: none; }\n      .tds-diag-label { color: var(--tds-text-mid2, #cfcfcf); font-size: 12px; }\n      .tds-diag-reason { color: var(--tds-text-dim, #999999); font-size: 11px; margin-top: 2px; }\n      .tds-btn { background: var(--tds-accent, #3ddc84); color: #06110a; border: none; border-radius: 6px; padding: 8px 12px; font: 700 12px/1 -apple-system, sans-serif; cursor: pointer; letter-spacing: .02em; }\n      .tds-btn:hover { filter: brightness(1.08); }\n      .tds-btn-ghost { background: transparent; color: var(--tds-text-mid, #b5b5b5); border: 1px solid var(--tds-border-strong, #4a4a4a); border-radius: 6px; padding: 8px 12px; font: 600 12px/1 -apple-system, sans-serif; cursor: pointer; }\n      .tds-btn-ghost:hover { background: var(--tds-bg-hover, #404040); color: var(--tds-fg, #d8d8d8); }\n      .tds-input { width: 100%; background: var(--tds-bg, #2b2b2b); color: var(--tds-text-strong, #f0f0f0); border: 1px solid var(--tds-border-strong, #4a4a4a); border-radius: 6px; padding: 8px 9px; box-sizing: border-box; font: 12.5px monospace; }\n      .tds-input:focus { outline: none; border-color: var(--tds-accent, #3ddc84); }\n      .tds-swatches { display: flex; gap: 8px; margin-top: 8px; }\n      .tds-swatch { width: 26px; height: 26px; border-radius: 50%; cursor: poin",
-"ter; border: 2px solid transparent; }\n      .tds-swatch.tds-swatch-active { border-color: var(--tds-fg, #fff); }\n      .tds-segmented { display: flex; gap: 4px; margin-bottom: 10px; flex-wrap: wrap; }\n      .tds-segment { flex: 1; min-width: 90px; text-align: center; background: var(--tds-bg-card, #323232); color: var(--tds-text-icon, #aaaaaa); border: 1px solid var(--tds-border-strong, #4a4a4a); border-radius: 6px; padding: 8px 6px; font: 700 10.5px/1 -apple-system, sans-serif; letter-spacing: .03em; cursor: pointer; }\n      .tds-segment:hover { background: var(--tds-bg-hover, #404040); }\n      .tds-segment.tds-segment-active { background: var(--tds-accent-dim, rgba(61,220,132,.14)); color: var(--tds-accent, #3ddc84); border-color: var(--tds-accent, #3ddc84); }\n      .tds-table { width: 100%; border-collapse: collapse; font-size: 12px; }\n      .tds-table th { text-align: left; color: var(--tds-text-faint, #9a9a9a); font-size: 10px; letter-spacing: .05em; text-transform: uppercase; padding: 4px 6px; border-bottom: 1px solid var(--tds-border, #1a1a1a); }\n      .tds-table td { padding: 5px 6px; border-bottom: 1px solid var(--tds-border-soft, #242424); color: var(--tds-fg, #d8d8d8); }\n      .tds-table tr:last-child td { border-bottom: none; }\n      .tds-table td.tds-num { text-align: right; font-variant-numeric: tabular-nums; }\n      .tds-optimize-table th,\n      .tds-optimize-table td { text-align: center !important; vertical-align: middle; }\n      .tds-optimize-table td.tds-num { text-align: center !important; }\n      .tds-optimize-table tbody tr td {\n        border-bottom: 1px solid var(--tds-border-strong, #4a4a4a);\n        padding-top: 8px;\n        padding-bottom: 8px;\n      }\n      .tds-optimize-table tbody tr:last-child td { border-bottom: none; }\n      .tds-compare",
-"-table th,\n      .tds-compare-table td {\n        text-align: center !important;\n        vertical-align: middle;\n      }\n      .tds-compare-table td.tds-num { text-align: center !important; }\n      .tds-training-debt-table th,\n      .tds-training-debt-table td {\n        text-align: center !important;\n        vertical-align: middle;\n      }\n      .tds-training-debt-table tbody tr td {\n        border-bottom: 1px solid var(--tds-border-strong, #4a4a4a);\n        padding-top: 8px;\n        padding-bottom: 8px;\n      }\n      .tds-training-debt-table tbody tr:last-child td { border-bottom: none; }\n      .tds-stock-table th,\n      .tds-stock-table td {\n        text-align: center !important;\n        vertical-align: middle;\n      }\n      .tds-stock-table tbody tr td {\n        border-bottom: 1px solid var(--tds-border-strong, #4a4a4a);\n        padding-top: 8px;\n        padding-bottom: 8px;\n      }\n      .tds-stock-table tbody tr:last-child td { border-bottom: none; }\n      .tds-spark { display: flex; align-items: flex-end; gap: 4px; height: 46px; margin: 6px 0; }\n      .tds-spark-col { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 3px; }\n      .tds-spark-bar { width: 100%; border-radius: 2px 2px 0 0; min-height: 2px; }\n      .tds-spark-bar.tds-bar-pos { background: var(--tds-accent, #3ddc84); }\n      .tds-spark-bar.tds-bar-neg { background: #ff5c5c; }\n      .tds-spark-label { font-size: 9px; color: var(--tds-text-faintest, #888888); }\n      #tds-footer { display: flex; justify-content: space-between; align-items: center; padding: 8px 12px; border-top: 1px solid var(--tds-border, #1a1a1a); background: var(--tds-bg-alt, #383838); font-size: 10.5px; color: var(--tds-text-faintest, #888888); }\n      #tds-footer .tds-footer-status { color: var(--tds-accent, #3",
-"ddc84); }\n      #tds-mount-error { margin: 14px 0; }\n\n      @media (max-width: 700px) {\n        #tds-header { align-items: flex-start; }\n        #tds-header .tds-brand { flex-wrap: wrap; }\n        #tds-header .tds-brand-subtitle { display: none; }\n        #tds-tabs { overflow-x: auto; flex-wrap: nowrap; scrollbar-width: thin; }\n        .tds-tab { flex: 0 0 auto; }\n        #tds-body { padding: 10px; }\n        .tds-row { align-items: flex-start; }\n      }\n    `;\n    const style = document.createElement('style');\n    style.id = 'tds-styles';\n    style.textContent = css;\n    document.head.appendChild(style);\n  }\n\n\n  // ---------------------------------------------------------------------\n  // 4b. TORN COLOUR DETECTION -- match the page's own skin, don't guess it\n  // ---------------------------------------------------------------------\n  // Torn ships more than one skin (at least a light default and a dark\n  // theme) and I don't have a verified, current list of their exact hex\n  // values -- guessing would risk a wrong-looking panel on whichever skin\n  // I guessed wrong for. Instead this samples REAL computed colours from\n  // Torn's own page chrome at runtime and derives a matching palette\n  // algorithmically. If detection fails for any reason it silently falls\n  // back to the dark palette hardcoded as the var() defaults in the CSS\n  // above -- so a failure here never breaks the panel, only its skin-match.\n  function parseRgbColor(str) {\n    const m = /rgba?\\(\\s*([\\d.]+)\\s*,\\s*([\\d.]+)\\s*,\\s*([\\d.]+)\\s*(?:,\\s*([\\d.]+))?\\)/.exec(str || '');\n    if (!m) return null;\n    return { r: +m[1], g: +m[2], b: +m[3], a: m[4] !== undefined ? +m[4] : 1 };\n  }\n\n  function shadeColor(c, amt) {\n    const clamp = (v) => Math.max(0, Math.min(255, v));\n    return { r: clamp(c.r + amt), ",
-"g: clamp(c.g + amt), b: clamp(c.b + amt) };\n  }\n\n  function rgbToCss(c) {\n    return `rgb(${Math.round(c.r)}, ${Math.round(c.g)}, ${Math.round(c.b)})`;\n  }\n\n  function detectTornColours() {\n    try {\n      const candidates = ['#skin-container', '.content-wrapper', '#mainContainer', '#top-page-links-wrap', 'body'];\n      let probe = null;\n      for (const sel of candidates) {\n        const el = document.querySelector(sel);\n        if (!el) continue;\n        const bg = parseRgbColor(getComputedStyle(el).backgroundColor);\n        if (bg && bg.a > 0 && !(bg.r === 0 && bg.g === 0 && bg.b === 0 && bg.a < 1)) { probe = el; break; }\n      }\n      if (!probe) return;\n\n      const cs = getComputedStyle(probe);\n      const bg = parseRgbColor(cs.backgroundColor);\n      if (!bg) return;\n\n      const luminance = (0.299 * bg.r + 0.587 * bg.g + 0.114 * bg.b) / 255;\n      const dark = luminance < 0.5;\n      const root = document.documentElement;\n\n      if (dark) {\n        // Keep the built-in dark palette (it already reads well on dark\n        // skins) but nudge every shade slightly toward Torn's actual\n        // background tone instead of leaving it a fixed, possibly\n        // mismatched dark navy.\n        const nudge = (fallback) => rgbToCss({\n          r: fallback.r * 0.6 + bg.r * 0.4,\n          g: fallback.g * 0.6 + bg.g * 0.4,\n          b: fallback.b * 0.6 + bg.b * 0.4,\n        });\n        root.style.setProperty('--tds-bg', nudge({ r: 43, g: 43, b: 43 }));\n        root.style.setProperty('--tds-bg-alt', nudge({ r: 56, g: 56, b: 56 }));\n        root.style.setProperty('--tds-bg-card', nudge({ r: 50, g: 50, b: 50 }));\n        root.style.setProperty('--tds-bg-hover', nudge({ r: 64, g: 64, b: 64 }));\n      } else {\n        // Light Torn skin: derive a full light palette FROM the sampl",
-"ed\n        // background rather than forcing the dark defaults onto a light\n        // page, where they'd look like a jarring floating dark box.\n        root.style.setProperty('--tds-bg', rgbToCss(bg));\n        root.style.setProperty('--tds-bg-alt', rgbToCss(shadeColor(bg, -10)));\n        root.style.setProperty('--tds-bg-card', rgbToCss(shadeColor(bg, -5)));\n        root.style.setProperty('--tds-bg-hover', rgbToCss(shadeColor(bg, -14)));\n        root.style.setProperty('--tds-border', rgbToCss(shadeColor(bg, -28)));\n        root.style.setProperty('--tds-border-soft', rgbToCss(shadeColor(bg, -16)));\n        root.style.setProperty('--tds-border-strong', rgbToCss(shadeColor(bg, -38)));\n        root.style.setProperty('--tds-fg', rgbToCss(shadeColor(bg, -110)));\n        root.style.setProperty('--tds-text-strong', rgbToCss(shadeColor(bg, -120)));\n        root.style.setProperty('--tds-text-mid', rgbToCss(shadeColor(bg, -75)));\n        root.style.setProperty('--tds-text-mid2', rgbToCss(shadeColor(bg, -80)));\n        root.style.setProperty('--tds-text-dim', rgbToCss(shadeColor(bg, -55)));\n        root.style.setProperty('--tds-text-faint', rgbToCss(shadeColor(bg, -60)));\n        root.style.setProperty('--tds-text-faintest', rgbToCss(shadeColor(bg, -45)));\n        root.style.setProperty('--tds-text-icon', rgbToCss(shadeColor(bg, -65)));\n        root.style.setProperty('--tds-text-subtle', rgbToCss(shadeColor(bg, -50)));\n        root.style.setProperty('--tds-text-disabled', rgbToCss(shadeColor(bg, -30)));\n      }\n    } catch (err) {\n      console.warn('[TDS] Torn colour detection skipped:', err);\n    }\n  }\n\n  function applyTheme(panelRoot, name) {\n    const theme = THEME_PRESETS[name] || THEME_PRESETS.green;\n    panelRoot.style.setProperty('--tds-accent', theme.accent);\n    panelRoot",
-".style.setProperty('--tds-accent-dim', theme.accentDim);\n  }\n\n  // ---------------------------------------------------------------------\n  // 5. UI STATE\n  // ---------------------------------------------------------------------\n  const state = {\n    lastResults: null,\n    lastVerdict: null,\n    lastRunAt: null,\n    diagnosticRunning: false,\n    panel: null,\n    benchmark: { tier: 'same', cache: {}, snapshot: null }, // cache keyed by categoryId -> { timestamp, data }\n    stock: { loading: false, newsCache: null, newsCacheAt: 0 },\n  };\n\n  function isJobsPage() {\n    // Desktop and TornPDA can expose slightly different URL shapes during\n    // WebView/SPA navigation. Match the real companies.php path even when\n    // there is a trailing slash, query string or hash route.\n    const path = String(window.location.pathname || '').replace(/\\/+$/, '');\n    if (/(?:^|\\/)companies\\.php$/i.test(path)) return true;\n    return /\\/companies\\.php(?:[?#]|$)/i.test(String(window.location.href || ''));\n  }\n\n  function findJobsMount() {\n    const anchors = [\n      '.companies-wrap',\n      '#companies-page',\n      '[class*=\"companies\"][class*=\"wrap\"]',\n      '.content-wrapper',\n      '#main-container',\n      '#mainContainer',\n      '.cont-gray',\n      'main',\n      '[role=\"main\"]',\n    ];\n\n    for (const selector of anchors) {\n      const el = document.querySelector(selector);\n      if (el && !el.closest('#tds-panel')) return el;\n    }\n\n    // TornPDA's mobile DOM can omit desktop wrapper classes. On the confirmed\n    // companies page, body is a safe last-resort mount rather than making the\n    // whole suite disappear.\n    return isJobsPage() ? document.body : null;\n  }\n\n  function removePanel() {\n    const panel = document.getElementById('tds-panel');\n    if (panel) panel.remove();\n   ",
-" state.panel = null;\n  }\n\n  function buildPanel(mount) {\n    const panel = document.createElement('section');\n    panel.id = 'tds-panel';\n    panel.setAttribute('aria-label', 'Torn Company Management Suite');\n    panel.innerHTML = `\n      <div id=\"tds-header\">\n        <div class=\"tds-brand\">\n          <span class=\"tds-brand-dot\">\\u25cb</span>\n          <span class=\"tds-brand-name\">TORN COMPANY MANAGEMENT SUITE</span>\n          <span class=\"tds-brand-version\">v${TDS_VERSION}</span>\n          <span class=\"tds-brand-subtitle\">Company Director Dashboard</span>\n        </div>\n        <div id=\"tds-header-icons\">\n          <button data-action=\"refresh\" title=\"Run Diagnostics Again\">\\u27f3</button>\n          <button data-action=\"tab-settings\" title=\"Settings\">\\u2699</button>\n        </div>\n      </div>\n      <div id=\"tds-tabs\">\n        <button class=\"tds-tab tds-tab-active\" data-tab=\"overview\">OVERVIEW</button>\n        <button class=\"tds-tab\" data-tab=\"finance\">COMPANY FINANCIALS</button>\n        <button class=\"tds-tab\" data-tab=\"stock\">STOCK</button>\n        <button class=\"tds-tab\" data-tab=\"training\">TRAINING</button>\n        <button class=\"tds-tab\" data-tab=\"benchmark\">COMPARE</button>\n        <button class=\"tds-tab\" data-tab=\"optimize\">EMPLOYEE EFFECTIVENESS</button>\n        <button class=\"tds-tab\" data-tab=\"settings\">SETTINGS</button>\n        <button class=\"tds-tab\" data-tab=\"diagnostics\">DIAGNOSTICS</button>\n      </div>\n      <div id=\"tds-body\">\n        <div class=\"tds-tabpanel\" data-tabpanel=\"overview\"></div>\n        <div class=\"tds-tabpanel\" data-tabpanel=\"finance\" hidden></div>\n        <div class=\"tds-tabpanel\" data-tabpanel=\"stock\" hidden></div>\n        <div class=\"tds-tabpanel\" data-tabpanel=\"training\" hidden></div>\n        <div class=\"tds-tabpanel\" data-tabpanel=\"b",
-"enchmark\" hidden></div>\n        <div class=\"tds-tabpanel\" data-tabpanel=\"optimize\" hidden></div>\n        <div class=\"tds-tabpanel\" data-tabpanel=\"settings\" hidden></div>\n        <div class=\"tds-tabpanel\" data-tabpanel=\"diagnostics\" hidden></div>\n      </div>\n      <div id=\"tds-footer\">\n        <span>Torn Company Management Suite v${TDS_VERSION}</span>\n        <span class=\"tds-footer-status\" id=\"tds-footer-status\">Last run: Never</span>\n      </div>\n    `;\n\n    // Put the suite into Torn's Jobs content rather than attaching an overlay to body.\n    mount.prepend(panel);\n    state.panel = panel;\n\n    applyTheme(panel, tdsGetValue(STORAGE_KEY_THEME, 'green'));\n\n    panel.querySelector('[data-action=\"tab-settings\"]').addEventListener('click', () => switchTab(panel, 'settings'));\n    panel.querySelector('[data-action=\"refresh\"]').addEventListener('click', () => runFullDiagnostic(panel, { force: true }));\n    panel.querySelectorAll('.tds-tab').forEach((btn) => {\n      btn.addEventListener('click', () => {\n        if (btn.classList.contains('tds-tab-locked')) return;\n        switchTab(panel, btn.dataset.tab);\n      });\n    });\n\n    renderSettingsTab(panel);\n    renderDiagnosticsTab(panel, null);\n    renderOverviewTab(panel, null, null);\n    renderFinanceTab(panel);\n    renderStockTab(panel);\n    renderTrainingTab(panel).catch((err) => console.error('[TDS] Training render failed:', err));\n    renderBenchmarkTab(panel);\n    renderOptimizeTab(panel);\n    switchTab(panel, 'overview');\n\n    return panel;\n  }\n\n  function switchTab(panel, tabName) {\n    panel.querySelectorAll('.tds-tab').forEach((b) => b.classList.toggle('tds-tab-active', b.dataset.tab === tabName));\n    panel.querySelectorAll('.tds-tabpanel').forEach((p) => {\n      p.hidden = p.dataset.tabpanel !== tabName;\n    });\n ",
-"   // Sales history can require an extra company/news API request. Load it only\n    // when the Stock tab is actually opened, not on every Torn page refresh.\n    if (tabName === 'stock') renderStockTab(panel).catch((err) => console.error('[TDS] Stock tab failed:', err));\n  }\n\n  function renderSettingsTab(panel) {\n    const el = panel.querySelector('[data-tabpanel=\"settings\"]');\n    const currentTheme = tdsGetValue(STORAGE_KEY_THEME, 'green');\n\n    el.innerHTML = `\n      <div class=\"tds-section-label\">API Key</div>\n      <div class=\"tds-box tds-box-neutral\">Stored only in this browser (Tampermonkey local storage). Never sent anywhere except api.torn.com.</div>\n      <div class=\"tds-box tds-box-warn\">\n        <strong>What actually gates each selection</strong> (confirmed by testing a real key at both Limited\n        and Full Access, not assumed):\n        <ul style=\"margin:6px 0 0 18px; padding:0;\">\n          <li><code>company: detailed, stock, applications</code> \\u2014 gated by <strong>being the company\n            director</strong>, not by key tier. These returned BLOCKED (Torn error 7, \"Incorrect ID-entity\n            relation\") even with a Full Access key belonging to a non-director. No key upgrade fixes this;\n            only the director's own key gets real data here.</li>\n          <li><code>user: log</code> (training history) \\u2014 <strong>is</strong> tier-gated: BLOCKED at Limited\n            (error 16, \"access level not high enough\"), ACCESSIBLE at Full.</li>\n          <li><code>company: profile, employees</code> and <code>user: basic, workstats</code> \\u2014 worked at\n            Limited already.</li>\n        </ul>\n      </div>\n      <div class=\"tds-box tds-box-neutral\">\n        Company financials/stock/applications only return real data if you're the company'",
-"s director.\n      </div>\n      <div class=\"tds-box tds-box-neutral\">\n        <strong>Create the API key for this program.</strong><br>\n        This opens Torn's official custom-key generator with the permissions used by\n        <strong>Torn Company Management Suite</strong> already selected:\n        <strong>Company: Profile, Employees, Detailed, Stock, News, Applications, Companies, Search, Snapshot</strong>;\n        <strong>User: Basic, Workstats, Log</strong>;\n        <strong>Torn: Companies</strong>.<br><br>\n        Torn will handle the actual key creation. Review the selections on Torn's page,\n        generate the key, then paste the new key into the box below. Custom keys should be\n        treated as sensitive credentials.\n      </div>\n      <button class=\"tds-btn\" id=\"tds-create-api-key\">Create Custom API Key \u2197</button>\n      <div style=\"position:relative; margin-top:8px;\">\n        <input class=\"tds-input\" id=\"tds-keyinput\" type=\"password\" autocomplete=\"off\" spellcheck=\"false\" placeholder=\"Paste API key here\" style=\"padding-right:76px; width:100%; box-sizing:border-box;\" />\n        <button type=\"button\" class=\"tds-btn-ghost\" id=\"tds-togglekey\" style=\"position:absolute; right:6px; top:50%; transform:translateY(-50%); padding:4px 8px; font-size:11px;\">Show</button>\n      </div>\n      <div style=\"margin-top:8px; display:flex; gap:8px;\">\n        <button class=\"tds-btn\" id=\"tds-savekey\">Save key</button>\n      </div>\n      <div class=\"tds-box tds-box-neutral\" style=\"margin-top:10px;\">\n        Once an API key is saved, the system can run automatically on startup. No UI action is required.\n      </div>\n\n      <div class=\"tds-section-label\">Diagnostics</div>\n      <div class=\"tds-box tds-box-neutral\">\n        Diagnostics are automatically run once and remembered across To",
-"rn page changes and browser refreshes.\n        Run them again manually whenever you want to refresh the capability check. The Diagnostics tab itself\n        is always available \\u2014 nothing about it is gated.\n      </div>\n      <button class=\"tds-btn-ghost\" id=\"tds-rerun-diagnostics\">Run Diagnostics Again</button>\n\n      <div class=\"tds-section-label\">License</div>\n      <div class=\"tds-card\">\n        <div class=\"tds-row\"><span class=\"tds-row-label\">Torn User ID</span><span class=\"tds-row-value\" id=\"tds-license-userid\">\\u2014</span></div>\n        <div class=\"tds-row\"><span class=\"tds-row-label\">Status</span><span class=\"tds-row-value\" id=\"tds-license-status-value\">\\u2014</span></div>\n        <div class=\"tds-row\"><span class=\"tds-row-label\">Last checked</span><span class=\"tds-row-value\" id=\"tds-license-checked\">\\u2014</span></div>\n        <div class=\"tds-row\" id=\"tds-license-reason-row\" style=\"display:none;\"><span class=\"tds-row-label\">Detail</span><span class=\"tds-row-value tds-v-dim\" id=\"tds-license-reason\" style=\"font-weight:400;\"></span></div>\n        <div style=\"margin-top:8px;\">\n          <button class=\"tds-btn-ghost\" id=\"tds-recheck-license\">Recheck license</button>\n        </div>\n      </div>\n      <div class=\"tds-box tds-box-neutral\">\n        Checked against a public list keyed by your Torn User ID, refreshed at most every\n        ${LICENSE_CACHE_TTL_MS / 3600000}h (cached locally in between). Only your numeric User ID is sent for\n        this check \\u2014 no API key, no company data, nothing else about you.\n      </div>\n\n      <div class=\"tds-section-label\">Color Theme</div>\n      <div class=\"tds-card\">\n        <div class=\"tds-card-title\">Accent color (affects highlights, tabs, buttons \\u2014 not the red/green/amber meaning colors)</div>\n        <div class=\"t",
-"ds-swatches\" id=\"tds-swatches\"></div>\n      </div>\n    `;\n\n    const keyInput = el.querySelector('#tds-keyinput');\n    const toggleKey = el.querySelector('#tds-togglekey');\n    keyInput.value = tdsGetValue(STORAGE_KEY_APIKEY, '');\n\n    // Keep the API key masked by default. It can be temporarily revealed\n    // with the Show button when the user needs to verify or edit it.\n    toggleKey.addEventListener('click', () => {\n      const visible = keyInput.type === 'text';\n      keyInput.type = visible ? 'password' : 'text';\n      toggleKey.textContent = visible ? 'Show' : 'Hide';\n    });\n\n    // Open Torn's official custom-key creation flow with this suite's\n    // required selections and title pre-filled. Torn performs the actual\n    // key generation; this script never sees the generated key until the\n    // user deliberately pastes it into the input below.\n    el.querySelector('#tds-create-api-key').addEventListener('click', () => {\n      const url = buildCustomKeyUrl();\n      window.open(url, '_blank', 'noopener');\n    });\n\n    el.querySelector('#tds-savekey').addEventListener('click', async () => {\n      const key = keyInput.value.trim();\n      tdsSetValue(STORAGE_KEY_APIKEY, key);\n      keyInput.style.borderColor = 'var(--tds-accent)';\n      setTimeout(() => (keyInput.style.borderColor = ''), 600);\n      if (key && !state.diagnosticRunning) {\n        try {\n          await runFullDiagnostic(panel, { force: true });\n        } catch (err) {\n          console.error('[TDS] Run after API key save failed:', err);\n        }\n      }\n    });\n\n    const rerunButton = el.querySelector('#tds-rerun-diagnostics');\n    rerunButton.addEventListener('click', async () => {\n      if (state.diagnosticRunning) return;\n      try {\n        await runFullDiagnostic(panel, { force: true });\n    ",
-"  } catch (err) {\n        console.error('[TDS] Manual diagnostic run failed:', err);\n      }\n    });\n\n    el.querySelector('#tds-recheck-license').addEventListener('click', () => {\n      checkLicense(panel, { force: true }).catch((err) => console.error('[TDS] License recheck failed:', err));\n    });\n    renderLicenseStatusInSettings(panel);\n\n    const swatchWrap = el.querySelector('#tds-swatches');\n    Object.entries(THEME_PRESETS).forEach(([name, theme]) => {\n      const sw = document.createElement('div');\n      sw.className = 'tds-swatch' + (name === currentTheme ? ' tds-swatch-active' : '');\n      sw.style.background = theme.accent;\n      sw.title = name;\n      sw.addEventListener('click', () => {\n        tdsSetValue(STORAGE_KEY_THEME, name);\n        applyTheme(panel, name);\n        swatchWrap.querySelectorAll('.tds-swatch').forEach((s) => s.classList.remove('tds-swatch-active'));\n        sw.classList.add('tds-swatch-active');\n      });\n      swatchWrap.appendChild(sw);\n    });\n  }\n\n  function renderDiagnosticsTab(panel, results) {\n    const el = panel.querySelector('[data-tabpanel=\"diagnostics\"]');\n    if (!results) {\n      el.innerHTML = `<div class=\"tds-box tds-box-neutral\">Diagnostics run automatically on first use and can be rerun from Settings or the refresh button in the header. This shows exactly what your current key can access \\u2014 every row reflects a real response from api.torn.com.</div>`;\n      return;\n    }\n    let html = '<div class=\"tds-section-label\">Capability check</div>';\n    for (const r of results) {\n      if (r.status === 'ok') {\n        html += `\n          <div class=\"tds-diag-row\">\n            <div>\n              <div class=\"tds-diag-label\">${r.label}</div>\n              <div class=\"tds-diag-reason\">Fields: ${r.sampleKeys.join(', ')}</div>",
-"\n            </div>\n            <span class=\"tds-badge tds-badge-ok\">ACCESSIBLE</span>\n          </div>`;\n      } else {\n        html += `\n          <div class=\"tds-diag-row\">\n            <div>\n              <div class=\"tds-diag-label\">${r.label}</div>\n              <div class=\"tds-diag-reason\">Torn error ${r.code ?? ''}: ${r.reason}</div>\n            </div>\n            <span class=\"tds-badge tds-badge-blocked\">BLOCKED</span>\n          </div>`;\n      }\n    }\n    el.innerHTML = html;\n  }\n\n  function renderOverviewTab(panel, results, verdict) {\n    const el = panel.querySelector('[data-tabpanel=\"overview\"]');\n    if (!results || !verdict) {\n      el.innerHTML = `<div class=\"tds-box tds-box-neutral\">No data yet. Add your API key in Settings, then run Diagnostics.</div>`;\n      return;\n    }\n\n    let html = '';\n    const boxClass = verdict.level === 'director' ? 'tds-box-info' : verdict.level === 'unknown' ? 'tds-box-danger' : 'tds-box-warn';\n    html += `<div class=\"tds-box ${boxClass}\"><strong>${escapeHtml(verdict.headline)}</strong><br>${escapeHtml(verdict.detail)}</div>`;\n\n    const profile = findRaw(results, 'company', 'profile');\n    const detailed = findRaw(results, 'company', 'detailed');\n    const employeesRaw = findRaw(results, 'company', 'employees');\n    const employees = extractEmployeesEntries(employeesRaw);\n\n    // Show every usable scalar value returned by company/profile, rather than\n    // maintaining a small hard-coded list. This means new fields Torn adds to\n    // the profile automatically appear here too. Employee objects/collections\n    // are excluded because the Employees section below renders them properly.\n    if (profile) {\n      const profileRows = collectDisplayFields(profile, {\n        skipObjectKeys: ['employees', 'employee', 'positions']\n   ",
-"   });\n\n      const capacity = numericValue(findValueDeep(profile, [\n        'employees_capacity', 'employee_capacity', 'max_employees',\n        'maximum_employees', 'capacity'\n      ]));\n      const employeeCount = employees.length || numericValue(findValueDeep(profile, [\n        'employees_hired', 'employee_count', 'employees_count', 'num_employees'\n      ]));\n\n      html += '<div class=\"tds-section-label\">Company</div><div class=\"tds-card\">';\n\n      // Put the most useful/common company fields first, then append every\n      // other scalar field returned by Torn that has not already been shown.\n      const preferred = [\n        ['name', 'Name'], ['company_name', 'Name'], ['type', 'Type'], ['company_type', 'Type'],\n        ['director', 'Director'], ['days_old', 'Company Age'], ['age', 'Company Age'],\n        ['popularity', 'Popularity'], ['efficiency', 'Efficiency'], ['environment', 'Environment'],\n        ['rating', 'Rating'], ['trains_available', 'Trains Available'], ['trains', 'Trains'],\n        ['daily_income', 'Daily Income'], ['daily_customers', 'Daily Customers'],\n        ['weekly_income', 'Weekly Income'], ['weekly_customers', 'Weekly Customers'],\n        ['company_bank', 'Company Bank']\n      ];\n      const shown = new Set();\n      const shownFieldNames = new Set();\n\n      // Torn can expose these three health values at different nesting levels\n      // depending on the API response shape. Pull them explicitly from the\n      // full profile (and detailed data when available) rather than relying on\n      // them being top-level scalar fields.\n      const healthMetrics = {\n        Popularity: findValueDeep(profile, ['popularity', 'company_popularity']) ?? findValueDeep(detailed, ['popularity', 'company_popularity']),\n        Efficiency: findValueDeep(profile, [",
-"'efficiency', 'company_efficiency']) ?? findValueDeep(detailed, ['efficiency', 'company_efficiency']),\n        Environment: findValueDeep(profile, ['environment', 'company_environment']) ?? findValueDeep(detailed, ['environment', 'company_environment'])\n      };\n\n      for (const [key, label] of preferred) {\n        const row = profileRows.find((r) => normalizeFieldName(r.key) === normalizeFieldName(key));\n        const explicitHealthValue = Object.prototype.hasOwnProperty.call(healthMetrics, label)\n          ? healthMetrics[label]\n          : null;\n        if ((!row && explicitHealthValue === null) || (row && shown.has(row.path))) continue;\n\n        let formatter = formatCompanyValue;\n        let value = row ? row.value : explicitHealthValue;\n        if (label === 'Director') {\n          formatter = (value) => formatDirectorName(value, employees, results);\n        } else if (label === 'Type') {\n          formatter = (value) => formatCompanyType(value, results);\n        } else if (label === 'Company Age') {\n          formatter = formatCompanyAge;\n        } else if (label === 'Daily Income' || label === 'Weekly Income') {\n          formatter = formatCurrency;\n        } else if (label === 'Popularity' || label === 'Efficiency' || label === 'Environment') {\n          formatter = formatPercent;\n        }\n\n        html += companyOverviewRow(label, value, formatter);\n        if (row) shown.add(row.path);\n        shownFieldNames.add(normalizeFieldName(key));\n      }\n\n      // Always show roster size in the familiar current / capacity form when\n      // either side is known, even if Torn exposes those values under different\n      // field names.\n      if (employeeCount !== null || capacity !== null) {\n        html += companyOverviewRow('Employees', employeeCount, () => {\n      ",
-"    if (employeeCount !== null && capacity !== null) return `${formatNumber(employeeCount)} / ${formatNumber(capacity)}`;\n          if (employeeCount !== null) return formatNumber(employeeCount);\n          return `\u2014 / ${formatNumber(capacity)}`;\n        });\n      }\n\n      for (const row of profileRows) {\n        if (shown.has(row.path)) continue;\n        const nk = normalizeFieldName(row.key);\n        if (shownFieldNames.has(nk)) continue;\n        // These are already represented by the combined Employees row.\n        if (/^(employeeshired|employeecount|employeescount|numemployees|employeescapacity|employeecapacity|maxemployees|maximumemployees|capacity)$/.test(nk)) continue;\n\n        let formatter = formatCompanyValue;\n        if (/^(dailyincome|weeklyincome)$/.test(nk)) formatter = formatCurrency;\n        if (/^(daysold|age)$/.test(nk)) formatter = formatCompanyAge;\n        html += companyOverviewRow(row.label, row.value, formatter);\n        shown.add(row.path);\n      }\n      html += '</div>';\n    }\n\n    // company/detailed is director-only. If the key can access it, include all\n    // scalar fields here as part of Overview as requested. If Torn blocks it,\n    // the existing access notice at the top already explains why.\n    if (detailed) {\n      const detailedRows = collectDisplayFields(detailed, {\n        skipObjectKeys: ['employees', 'employee', 'positions']\n      });\n      if (detailedRows.length) {\n        html += '<div class=\"tds-section-label\">Company Details</div><div class=\"tds-card\">';\n        for (const row of detailedRows) {\n          const nk = normalizeFieldName(row.key);\n          const formatter = /^(dailyincome|weeklyincome)$/.test(nk) ? formatCurrency : formatCompanyValue;\n          html += companyOverviewRow(row.label, row.value, formatter);\n      ",
-"  }\n        html += '</div>';\n      }\n    }\n\n    html += '<div class=\"tds-section-label\">Employees</div>';\n    if (employees.length > 0) {\n      html += '<div class=\"tds-card\">';\n\n      employees.slice(0, 15).forEach((employee) => {\n        const emp = employee.raw;\n        const effectiveness = emp.effectiveness && typeof emp.effectiveness === 'object'\n          ? emp.effectiveness\n          : null;\n        const lastAction = emp.last_action && typeof emp.last_action === 'object'\n          ? emp.last_action\n          : null;\n        const status = emp.status && typeof emp.status === 'object'\n          ? emp.status\n          : null;\n\n        // Torn exposes two different concepts here:\n        //   last_action.status -> Online / Idle / Offline presence\n        //   status.state       -> player state such as Okay / Hospital / Traveling\n        //   status.description -> human-readable detail for that state\n        const onlineStatus = lastAction?.status || '\u2014';\n        const playerState = status?.state || '\u2014';\n        const stateDetail = status?.description || '\u2014';\n\n        html += `\n          <details class=\"tds-employee-row\">\n            <summary class=\"tds-employee-summary\">\n              <div class=\"tds-employee-top\">\n                <div>\n                  <div class=\"tds-employee-name\">${escapeHtml(String(employee.name))}</div>\n                  <div class=\"tds-employee-meta\">${escapeHtml(String(employee.position || 'Employee'))}</div>\n                </div>\n                <div style=\"display:flex; align-items:center; gap:8px;\">\n                  <span class=\"tds-badge tds-badge-neutral\">${escapeHtml(String(onlineStatus))}</span>\n                  <span class=\"tds-employee-chevron\">\\u25b8</span>\n                </div>\n              </div>\n            </summary>\n\n ",
-"           <div class=\"tds-card\" style=\"margin:8px 0 0;\">\n              <div class=\"tds-row\"><span class=\"tds-row-label\">Days employed</span><span class=\"tds-row-value\">${formatNumber(emp.days_in_company)}</span></div>\n              <div class=\"tds-section-label tds-employee-subheading\" style=\"margin-top:10px;\">Working Stats</div>\n              <div class=\"tds-row\"><span class=\"tds-row-label\">Manual Labor</span><span class=\"tds-row-value\">${formatNumber(emp.manual_labor)}</span></div>\n              <div class=\"tds-row\"><span class=\"tds-row-label\">Intelligence</span><span class=\"tds-row-value\">${formatNumber(emp.intelligence)}</span></div>\n              <div class=\"tds-row\"><span class=\"tds-row-label\">Endurance</span><span class=\"tds-row-value\">${formatNumber(emp.endurance)}</span></div>\n\n              ${effectiveness ? `\n                <div class=\"tds-section-label tds-employee-subheading\" style=\"margin-top:10px;\">Effectiveness</div>\n                <div class=\"tds-row\"><span class=\"tds-row-label\">Working Stats</span><span class=\"tds-row-value\">${formatNumber(effectiveness.working_stats)}</span></div>\n                <div class=\"tds-row\"><span class=\"tds-row-label\">Settled In</span><span class=\"tds-row-value\">${formatNumber(effectiveness.settled_in)}</span></div>\n                <div class=\"tds-row\"><span class=\"tds-row-label\">Director Education</span><span class=\"tds-row-value\">${formatNumber(effectiveness.director_education)}</span></div>\n                <div class=\"tds-row\"><span class=\"tds-row-label\">Addiction</span><span class=\"tds-row-value\">${formatNumber(effectiveness.addiction)}</span></div>\n                <div class=\"tds-row\"><span class=\"tds-row-label\">Total</span><span class=\"tds-row-value\">${formatNumber(effectiveness.total)}</span></div>\n              ` ",
-": ''}\n\n              ${status || lastAction ? `\n                <div class=\"tds-section-label tds-employee-subheading\" style=\"margin-top:10px;\">Status</div>\n                <div class=\"tds-row\"><span class=\"tds-row-label\">Online Status</span><span class=\"tds-row-value\">${escapeHtml(String(onlineStatus))}</span></div>\n                <div class=\"tds-row\"><span class=\"tds-row-label\">State</span><span class=\"tds-row-value\">${escapeHtml(String(playerState))}</span></div>\n                <div class=\"tds-row\"><span class=\"tds-row-label\">Detail</span><span class=\"tds-row-value\">${escapeHtml(String(stateDetail))}</span></div>\n                <div class=\"tds-row\"><span class=\"tds-row-label\">Last action</span><span class=\"tds-row-value\">${escapeHtml(String(lastAction?.relative || formatTimestampRelative(lastAction?.timestamp)))}</span></div>\n              ` : ''}\n            </div>\n          </details>`;\n      });\n\n      if (employees.length > 15) {\n        html += `<div class=\"tds-box tds-box-neutral\" style=\"margin-top:10px;\">Showing the first 15 employees of ${employees.length} returned by the API.</div>`;\n      }\n      html += '</div>';\n    } else {\n      html += `<div class=\"tds-box tds-box-neutral\">No employee records could be mapped from the company/employees response. Diagnostics shows the actual response fields so the parser can be extended without displaying raw JSON.</div>`;\n    }\n\n    el.innerHTML = html;\n  }\n\n  function escapeHtml(str) {\n    return str.replace(/[&<>\"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '\"': '&quot;', \"'\": '&#39;' }[c]));\n  }\n\n  // ---------------------------------------------------------------------\n  // 5c. LICENSE CHECK -- Torn User ID against a public GitHub-hosted list.\n  //     Fully separate from the Torn API: uses raw.githubu",
-"sercontent.com,\n  //     sends only the numeric User ID (already public within Torn itself),\n  //     and never touches the API key or any company data.\n  // ---------------------------------------------------------------------\n  const LICENSE_GATED_TABS = ['overview', 'finance', 'stock', 'training', 'benchmark', 'optimize'];\n\n  function findOwnUserId(results) {\n    const basic = findRaw(results, 'user', 'basic');\n    if (!basic) return null;\n    const key = Object.keys(basic).find((k) =>\n      /^(player_id|user_id|id)$/i.test(k) && (typeof basic[k] === 'number' || typeof basic[k] === 'string'));\n    if (!key) return null;\n    const n = Number(basic[key]);\n    return Number.isFinite(n) ? n : null;\n  }\n\n  function fetchLicenseList() {\n    return new Promise((resolve, reject) => {\n      GM_xmlhttpRequest({\n        method: 'GET',\n        url: LICENSE_JSON_URL,\n        timeout: 15000,\n        onload: (res) => {\n          let parsed;\n          try {\n            parsed = JSON.parse(res.responseText);\n          } catch (e) {\n            reject({\n              reason: `licensed-users.json is not valid JSON yet. Expected an array like `\n                + `[{\"userId\":4237873,\"status\":\"active\"}]. Current content starts with: `\n                + `\"${String(res.responseText).slice(0, 80)}\"`,\n            });\n            return;\n          }\n          const list = Array.isArray(parsed) ? parsed : (Array.isArray(parsed?.users) ? parsed.users : null);\n          if (!list) {\n            reject({ reason: 'licensed-users.json parsed as JSON but isn\\u2019t an array of {userId, status} entries yet.' });\n            return;\n          }\n          resolve(list);\n        },\n        onerror: () => reject({ reason: 'Network error contacting raw.githubusercontent.com' }),\n        ontimeout: () => re",
-"ject({ reason: 'Timed out contacting raw.githubusercontent.com' }),\n      });\n    });\n  }\n\n  function licenseStatusMeta(status) {\n    switch (status) {\n      case 'active': return { label: 'ACTIVE', cls: 'tds-v-good' };\n      case 'expired': return { label: 'EXPIRED', cls: 'tds-v-bad' };\n      case 'unlicensed': return { label: 'NOT LICENSED', cls: 'tds-v-bad' };\n      default: return { label: 'UNKNOWN', cls: 'tds-v-warn' };\n    }\n  }\n\n  async function checkLicense(panel, { force = false } = {}) {\n    const results = state.lastResults;\n    const userId = results ? findOwnUserId(results) : null;\n\n    if (!userId) {\n      state.license = {\n        status: 'unknown',\n        reason: 'Torn User ID not available yet \\u2014 run Diagnostics with an API key first (needs user/basic).',\n        checkedAt: Date.now(),\n        userId: null,\n      };\n      applyLicenseGate(panel);\n      return;\n    }\n\n    const cached = tdsGetValue(STORAGE_KEY_LICENSE_CACHE, null);\n    if (!force && cached && cached.userId === userId && (Date.now() - cached.checkedAt) < LICENSE_CACHE_TTL_MS) {\n      state.license = cached;\n      applyLicenseGate(panel);\n      return;\n    }\n\n    try {\n      const list = await fetchLicenseList();\n      const entry = list.find((row) => Number(row.userId ?? row.user_id ?? row.id) === userId);\n      const rawStatus = String(entry?.status ?? entry?.flag ?? entry?.state ?? '').toLowerCase();\n      const status = !entry ? 'unlicensed'\n        : rawStatus === 'active' ? 'active'\n        : rawStatus === 'expired' ? 'expired'\n        : 'unknown';\n      state.license = { status, checkedAt: Date.now(), userId, source: 'github' };\n      if (status === 'unknown' && entry) {\n        state.license.reason = `Entry found but status field (\"${entry.status ?? entry.flag ?? entry.state}\"",
-") wasn\\u2019t \"active\" or \"expired\".`;\n      }\n    } catch (err) {\n      state.license = {\n        status: 'unknown',\n        reason: err.reason || 'License check failed.',\n        checkedAt: Date.now(),\n        userId,\n        source: 'github-error',\n      };\n    }\n\n    tdsSetValue(STORAGE_KEY_LICENSE_CACHE, state.license);\n    applyLicenseGate(panel);\n  }\n\n  function renderLicenseStatusInSettings(panel) {\n    const el = panel.querySelector('[data-tabpanel=\"settings\"]');\n    if (!el) return;\n    const idEl = el.querySelector('#tds-license-userid');\n    const statusEl = el.querySelector('#tds-license-status-value');\n    const checkedEl = el.querySelector('#tds-license-checked');\n    const reasonRow = el.querySelector('#tds-license-reason-row');\n    const reasonEl = el.querySelector('#tds-license-reason');\n    if (!idEl || !statusEl || !checkedEl) return;\n\n    const license = state.license;\n    if (!license) {\n      idEl.textContent = '\\u2014';\n      statusEl.textContent = 'Not checked yet';\n      statusEl.className = 'tds-row-value tds-v-dim';\n      checkedEl.textContent = '\\u2014';\n      if (reasonRow) reasonRow.style.display = 'none';\n      return;\n    }\n\n    idEl.textContent = license.userId ?? '\\u2014';\n    const meta = licenseStatusMeta(license.status);\n    statusEl.textContent = meta.label;\n    statusEl.className = `tds-row-value ${meta.cls}`;\n    checkedEl.textContent = license.checkedAt ? formatTimestampRelative(license.checkedAt) : '\\u2014';\n\n    if (license.reason && reasonRow && reasonEl) {\n      reasonRow.style.display = '';\n      reasonEl.textContent = license.reason;\n    } else if (reasonRow) {\n      reasonRow.style.display = 'none';\n    }\n  }\n\n  function applyLicenseGate(panel) {\n    const license = state.license || { status: 'unknown' };\n    const active",
-" = license.status === 'active';\n\n    LICENSE_GATED_TABS.forEach((tab) => {\n      const btn = panel.querySelector(`.tds-tab[data-tab=\"${tab}\"]`);\n      if (!btn) return;\n      btn.classList.toggle('tds-tab-locked', !active);\n      if (!active) btn.title = 'Requires an active license \\u2014 see Settings';\n      else btn.removeAttribute('title');\n    });\n\n    if (!active) {\n      const meta = licenseStatusMeta(license.status);\n      const msg = `\n        <div class=\"tds-box tds-box-warn\">\n          <strong>License required.</strong> Status: <span class=\"${meta.cls}\">${meta.label}</span>${license.reason ? ` \\u2014 ${escapeHtml(license.reason)}` : ''}.\n          Go to Settings for details.\n        </div>`;\n      LICENSE_GATED_TABS.forEach((tab) => {\n        const panelEl = panel.querySelector(`[data-tabpanel=\"${tab}\"]`);\n        if (panelEl) panelEl.innerHTML = msg;\n      });\n\n      const activeTabBtn = panel.querySelector('.tds-tab-active');\n      if (activeTabBtn && LICENSE_GATED_TABS.includes(activeTabBtn.dataset.tab)) {\n        switchTab(panel, 'settings');\n      }\n    }\n\n    renderLicenseStatusInSettings(panel);\n  }\n\n\n  // ---------------------------------------------------------------------\n  // 5b. SHARED HELPERS for Finance / Training / Benchmark tabs\n  // ---------------------------------------------------------------------\n  function findRaw(results, section, selections) {\n    const r = results?.find((x) => x.section === section && x.selections === selections && x.status === 'ok');\n    return r ? r.raw : null;\n  }\n\n  function findBlockedReason(results, section, selections) {\n    const r = results?.find((x) => x.section === section && x.selections === selections);\n    if (!r || r.status !== 'blocked') return null;\n    return `Torn error ${r.code ?? ''}: ${r.reason}`",
-".trim();\n  }\n\n  // Normalizes the employee payload into a consistent [{ id, raw, name, position }]\n  // shape. Torn responses can arrive as an object keyed by employee ID, an\n  // array of [id, employee] pairs, an array of employee objects, or a wrapper\n  // object containing an employees collection. Never stringify the payload\n  // into the UI as the fallback.\n  function extractEmployeesEntries(companyEmployeesRaw) {\n    if (!companyEmployeesRaw) return [];\n\n    let list = companyEmployeesRaw;\n\n    if (!Array.isArray(list) && typeof list === 'object') {\n      const employeesKey = Object.keys(list).find((k) => /employees?/i.test(k));\n      if (employeesKey && list[employeesKey] && typeof list[employeesKey] === 'object') {\n        list = list[employeesKey];\n      }\n    }\n\n    let entries = [];\n\n    if (Array.isArray(list)) {\n      // A single Object.entries-style pair: [\"3951439\", { ...employee... }]\n      if (list.length === 2 && (typeof list[0] === 'string' || typeof list[0] === 'number') &&\n          list[1] && typeof list[1] === 'object' && !Array.isArray(list[1])) {\n        entries = [[list[0], list[1]]];\n      } else {\n        entries = list.map((value, index) => {\n          if (Array.isArray(value) && value.length >= 2 && value[1] && typeof value[1] === 'object') {\n            return [value[0], value[1]];\n          }\n          return [value?.id ?? index, value];\n        });\n      }\n    } else if (typeof list === 'object') {\n      // A single employee object: treat it as one entry only if it looks like\n      // an employee rather than a wrapper/container.\n      const looksLikeEmployee = ['name', 'position', 'days_in_company', 'manual_labor',\n        'intelligence', 'endurance', 'effectiveness', 'last_action', 'status']\n        .some((key) => Object.prototype.hasOwn",
-"Property.call(list, key));\n\n      entries = looksLikeEmployee\n        ? [[list.id ?? 'employee', list]]\n        : Object.entries(list);\n    }\n\n    return entries\n      .filter(([, emp]) => emp && typeof emp === 'object' && !Array.isArray(emp))\n      .map(([id, emp]) => ({\n        id,\n        raw: emp,\n        name: emp.name ?? `#${id}`,\n        position: emp.position ?? ''\n      }));\n  }\n\n  function normalizeFieldName(name) {\n    return String(name || '').toLowerCase().replace(/[^a-z0-9]/g, '');\n  }\n\n  function findValueDeep(obj, preferredNames) {\n    if (!obj || typeof obj !== 'object') return null;\n    const wanted = new Set(preferredNames.map(normalizeFieldName));\n    const seen = new WeakSet();\n    let found = null;\n\n    function walk(value) {\n      if (found !== null || !value || typeof value !== 'object' || seen.has(value)) return;\n      seen.add(value);\n\n      for (const [key, child] of Object.entries(value)) {\n        if (wanted.has(normalizeFieldName(key)) && child !== undefined && child !== null && typeof child !== 'object') {\n          found = child;\n          return;\n        }\n      }\n      for (const child of Object.values(value)) {\n        if (child && typeof child === 'object') walk(child);\n        if (found !== null) return;\n      }\n    }\n\n    walk(obj);\n    return found;\n  }\n\n  function numericValue(value) {\n    if (typeof value === 'number' && Number.isFinite(value)) return value;\n    if (typeof value === 'string' && value.trim() !== '' && Number.isFinite(Number(value))) return Number(value);\n    return null;\n  }\n\n  function displayValue(value) {\n    if (value === undefined || value === null || value === '') return '\u2014';\n    if (typeof value === 'number') return formatNumber(value);\n    return String(value);\n  }\n\n  function companyOverviewRow(label, val",
-"ue, formatter = displayValue) {\n    return `<div class=\"tds-row\"><span class=\"tds-row-label\">${escapeHtml(label)}</span><span class=\"tds-row-value\">${escapeHtml(formatter(value))}</span></div>`;\n  }\n\n  function humanizeFieldName(name) {\n    return String(name || '')\n      .replace(/[_-]+/g, ' ')\n      .replace(/([a-z0-9])([A-Z])/g, '$1 $2')\n      .replace(/\\b\\w/g, (c) => c.toUpperCase());\n  }\n\n  function collectDisplayFields(raw, options = {}) {\n    if (!raw || typeof raw !== 'object') return [];\n    const skip = new Set((options.skipObjectKeys || []).map(normalizeFieldName));\n    const rows = [];\n    const seen = new WeakSet();\n\n    function walk(value, pathParts = [], depth = 0) {\n      if (!value || typeof value !== 'object' || seen.has(value) || depth > 5) return;\n      seen.add(value);\n\n      for (const [key, child] of Object.entries(value)) {\n        const nextPath = [...pathParts, key];\n        const path = nextPath.join('.');\n        if (child && typeof child === 'object' && !Array.isArray(child)) {\n          if (skip.has(normalizeFieldName(key))) continue;\n          walk(child, nextPath, depth + 1);\n          continue;\n        }\n        if (Array.isArray(child)) {\n          if (skip.has(normalizeFieldName(key))) continue;\n          if (child.every((v) => v === null || ['string', 'number', 'boolean'].includes(typeof v))) {\n            rows.push({ key, path, label: humanizeFieldName(key), value: child.join(', ') });\n          }\n          continue;\n        }\n        if (child === undefined || child === null || child === '') continue;\n        rows.push({ key, path, label: humanizeFieldName(key), value: child });\n      }\n    }\n\n    // Common Torn API wrapper objects should not make labels read like\n    // \"Company > Name\"; recurse into them directly when they are th",
-"e only\n    // meaningful container.\n    const keys = Object.keys(raw);\n    const wrapperKey = keys.find((k) => /^(company|profile|detailed|details)$/i.test(k) && raw[k] && typeof raw[k] === 'object' && !Array.isArray(raw[k]));\n    if (wrapperKey && keys.length <= 3) walk(raw[wrapperKey]);\n    else walk(raw);\n    return rows;\n  }\n\n  function formatCompanyValue(value) {\n    if (value === undefined || value === null || value === '') return '\u2014';\n    if (typeof value === 'boolean') return value ? 'Yes' : 'No';\n    if (typeof value === 'number') return formatNumber(value);\n    return String(value);\n  }\n\n  function formatCurrency(value) {\n    const n = numericValue(value);\n    if (n === null) return formatCompanyValue(value);\n    return `$${formatNumber(n)}`;\n  }\n\n  function formatPercent(value) {\n    if (value === undefined || value === null || value === '') return '\u2014';\n    const text = String(value).trim();\n    if (text.endsWith('%')) return text;\n    const n = numericValue(value);\n    return n === null ? formatCompanyValue(value) : `${formatNumber(n)}%`;\n  }\n\n  function formatCompanyAge(value) {\n    const totalDays = numericValue(value);\n    if (totalDays === null) return formatCompanyValue(value);\n\n    const days = Math.max(0, Math.floor(totalDays));\n    if (days < 365) return `${formatNumber(days)} ${days === 1 ? 'day' : 'days'}`;\n\n    // The API exposes company age as a day count, not a foundation date, so\n    // month values here use 30-day company-age months after each 365-day year.\n    const years = Math.floor(days / 365);\n    const afterYears = days % 365;\n    const months = Math.floor(afterYears / 30);\n    const remainingDays = afterYears % 30;\n    const parts = [`${years} ${years === 1 ? 'year' : 'years'}`];\n    if (months) parts.push(`${months} ${months === 1 ? 'm",
-"onth' : 'months'}`);\n    if (remainingDays || !months) parts.push(`${remainingDays} ${remainingDays === 1 ? 'day' : 'days'}`);\n    return parts.join(', ');\n  }\n\n  function formatDirectorName(value, employees, results) {\n    if (value && typeof value === 'object') {\n      const objectName = findValueDeep(value, ['name', 'player_name', 'username']);\n      if (objectName) return String(objectName);\n      const objectId = findValueDeep(value, ['id', 'player_id', 'user_id']);\n      if (objectId !== null) value = objectId;\n    }\n\n    const directorId = String(value ?? '').trim();\n    if (!directorId) return '\u2014';\n\n    const rosterMatch = (employees || []).find((employee) => String(employee.id) === directorId);\n    if (rosterMatch?.name && !String(rosterMatch.name).startsWith('#')) return String(rosterMatch.name);\n\n    const basic = findRaw(results, 'user', 'basic');\n    const basicId = basic && findValueDeep(basic, ['player_id', 'user_id', 'id']);\n    const basicName = basic && findValueDeep(basic, ['name', 'player_name', 'username']);\n    if (basicId !== null && String(basicId) === directorId && basicName) return String(basicName);\n\n    return String(value);\n  }\n\n  function formatCompanyType(value, results) {\n    if (value && typeof value === 'object') {\n      const name = findValueDeep(value, ['name', 'type_name', 'company_type_name']);\n      const id = findValueDeep(value, ['id', 'type', 'type_id', 'company_type']);\n      if (name && id !== null) return `${name} (${id})`;\n      if (name) return String(name);\n      if (id !== null) value = id;\n    }\n\n    const typeId = numericValue(value);\n    if (typeId === null) return formatCompanyValue(value);\n\n    const reference = findRaw(results, 'torn', 'companies');\n    const typeName = resolveCompanyTypeName(reference, typeId);\n   ",
-" return typeName ? `${typeName} (${typeId})` : String(typeId);\n  }\n\n  function resolveCompanyTypeName(raw, typeId) {\n    if (!raw || typeof raw !== 'object') return null;\n    const wanted = String(typeId);\n    const seen = new WeakSet();\n    let found = null;\n\n    function walk(value) {\n      if (found || !value || typeof value !== 'object' || seen.has(value)) return;\n      seen.add(value);\n\n      if (!Array.isArray(value) && Object.prototype.hasOwnProperty.call(value, wanted)) {\n        const candidate = value[wanted];\n        if (candidate && typeof candidate === 'object') {\n          const name = findValueDeep(candidate, ['name', 'company_name', 'type_name']);\n          if (name) {\n            found = String(name);\n            return;\n          }\n        } else if (typeof candidate === 'string') {\n          found = candidate;\n          return;\n        }\n      }\n\n      for (const child of Object.values(value)) {\n        if (!child || typeof child !== 'object') continue;\n        const id = findValueDeep(child, ['id', 'type_id', 'company_type']);\n        if (id !== null && String(id) === wanted) {\n          const name = findValueDeep(child, ['name', 'company_name', 'type_name']);\n          if (name) {\n            found = String(name);\n            return;\n          }\n        }\n      }\n\n      for (const child of Object.values(value)) {\n        if (child && typeof child === 'object') walk(child);\n        if (found) return;\n      }\n    }\n\n    walk(raw);\n    return found;\n  }\n\n  function findNestedObject(obj, keyPattern) {\n    if (!obj || typeof obj !== 'object') return null;\n    if (Object.keys(obj).some((k) => keyPattern.test(k))) return obj;\n    return null;\n  }\n\n  function formatNumber(n) {\n    if (typeof n !== 'number' || Number.isNaN(n)) return '\u2014';\n    return n.toLoca",
-"leString('en-GB');\n  }\n\n  function formatTimestampRelative(ts) {\n    if (!ts) return '\u2014';\n    const seconds = Math.max(0, Math.floor((Date.now() - Number(ts)) / 1000));\n    if (seconds < 60) return `${seconds}s ago`;\n    const minutes = Math.floor(seconds / 60);\n    if (minutes < 60) return `${minutes}m ago`;\n    const hours = Math.floor(minutes / 60);\n    if (hours < 24) return `${hours}h ${minutes % 60}m ago`;\n    const days = Math.floor(hours / 24);\n    return `${days}d ${hours % 24}h ago`;\n  }\n\n  // Looks for a wage/salary-shaped numeric field on an employee object\n  // without assuming its exact name \u2014 flags what it found so the UI can\n  // label it EXACT (real field) rather than a guess.\n  function findWageField(emp) {\n    if (!emp || typeof emp !== 'object') return null;\n    const key = Object.keys(emp).find((k) => /wage|salary/i.test(k) && typeof emp[k] === 'number');\n    return key ? { key, value: emp[key] } : null;\n  }\n\n  function getEmployeeEffectiveness(emp) {\n    if (!emp || typeof emp !== 'object') return null;\n\n    // Current Torn company/employees responses expose effectiveness as an\n    // object. This is the same breakdown Torn shows in the employee table:\n    // working stats + settled in + director education + addiction = total.\n    const raw = emp.effectiveness;\n    if (raw && typeof raw === 'object' && !Array.isArray(raw)) {\n      const total = numericValue(raw.total);\n      return {\n        source: 'effectiveness',\n        workingStats: numericValue(raw.working_stats),\n        settledIn: numericValue(raw.settled_in),\n        directorEducation: numericValue(raw.director_education),\n        addiction: numericValue(raw.addiction),\n        total,\n      };\n    }\n\n    // Backwards compatibility for older/alternate response shapes where EE\n    // may be ",
-"returned as a single numeric field.\n    const key = Object.keys(emp).find((k) => /effectiveness|^ee$/i.test(k) && typeof emp[k] === 'number');\n    if (!key) return null;\n    return {\n      source: key,\n      workingStats: null,\n      settledIn: null,\n      directorEducation: null,\n      addiction: null,\n      total: emp[key],\n    };\n  }\n\n  function findEffectivenessField(emp) {\n    const ee = getEmployeeEffectiveness(emp);\n    return ee && typeof ee.total === 'number' ? { key: ee.source, value: ee.total } : null;\n  }\n\n  function formatMoney(n) {\n    if (typeof n !== 'number' || Number.isNaN(n)) return '\u2014';\n    const sign = n < 0 ? '-' : '';\n    const abs = Math.abs(n);\n    if (abs >= 1e9) return `${sign}$${(abs / 1e9).toFixed(2)}B`;\n    if (abs >= 1e6) return `${sign}$${(abs / 1e6).toFixed(2)}M`;\n    if (abs >= 1e3) return `${sign}$${(abs / 1e3).toFixed(1)}K`;\n    return `${sign}$${abs.toFixed(0)}`;\n  }\n\n  function dayKey(ts) {\n    const d = new Date(ts);\n    return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;\n  }\n\n  async function getSnapshotsSorted() {\n    const all = await LocalDB.getAll('snapshots');\n    return all.sort((a, b) => a.timestamp - b.timestamp);\n  }\n\n  // One entry per distinct local calendar day, keeping the LAST snapshot\n  // taken that day (freshest read for that day). This is purely local,\n  // locally-timestamped data \u2014 never backfilled or invented for days\n  // before you started running the diagnostic.\n  function collapseToDaily(snapshots) {\n    const byDay = new Map();\n    for (const snap of snapshots) byDay.set(dayKey(snap.timestamp), snap); // later overwrites earlier same-day\n    return [...byDay.values()].sort((a, b) => a.timestamp - b.timestamp);\n  }\n\n  // =======================================================================\n  // F",
-"INANCE TAB\n  // =======================================================================\n  async function renderFinanceTab(panel) {\n    const el = panel.querySelector('[data-tabpanel=\"finance\"]');\n    const results = state.lastResults;\n    if (!results) {\n      el.innerHTML = `<div class=\"tds-box tds-box-neutral\">Run the diagnostic first (Overview tab or the \\u27f3 button) \\u2014 Finance reads from that data plus your local snapshot history.</div>`;\n      return;\n    }\n\n    const profile = findRaw(results, 'company', 'profile');\n    const detailed = findRaw(results, 'company', 'detailed');\n    const employeesRaw = findRaw(results, 'company', 'employees');\n    const blockedProfile = findBlockedReason(results, 'company', 'profile');\n    const blockedDetailed = findBlockedReason(results, 'company', 'detailed');\n\n    let html = '';\n\n    if (!profile && !detailed) {\n      html += `<div class=\"tds-box tds-box-danger\"><strong>Company profile unavailable.</strong> ${blockedProfile || 'No data returned.'} Finance needs at least this to show anything.</div>`;\n      el.innerHTML = html;\n      return;\n    }\n\n    // Torn refactored the company API in 2026. The current company/profile\n    // response can contain the former detailed data, and income fields are\n    // normally named daily_income / weekly_income. Search recursively so the\n    // Finance tab works with both legacy and wrapped response shapes.\n    const combined = { ...(profile || {}), ...(detailed || {}) };\n\n    function findNumericFieldDeep(obj, preferredNames, fallbackPattern) {\n      const preferred = new Set(preferredNames.map((name) => name.toLowerCase()));\n      const seen = new WeakSet();\n      let fallback = null;\n      function walk(value, path = '') {\n        if (!value || typeof value !== 'object' || seen.has(v",
-"alue)) return null;\n        seen.add(value);\n        for (const [key, child] of Object.entries(value)) {\n          const currentPath = path ? `${path}.${key}` : key;\n          if (typeof child === 'number' && Number.isFinite(child)) {\n            const lower = key.toLowerCase();\n            if (preferred.has(lower)) return { key, value: child, path: currentPath };\n            if (!fallback && fallbackPattern.test(key)) fallback = { key, value: child, path: currentPath };\n          } else if (child && typeof child === 'object') {\n            const found = walk(child, currentPath);\n            if (found && preferred.has(found.key.toLowerCase())) return found;\n          }\n        }\n        return null;\n      }\n      return walk(obj) || fallback;\n    }\n\n    const dailyField = findNumericFieldDeep(combined, ['daily_income', 'daily_profit'], /daily[_ ]?(income|profit)/i);\n    const weeklyField = findNumericFieldDeep(combined, ['weekly_income', 'weekly_profit'], /weekly[_ ]?(income|profit)/i);\n\n    const employees = extractEmployeesEntries(employeesRaw);\n    const wageFields = employees.map((e) => findWageField(e.raw)).filter(Boolean);\n    let totalSalary = wageFields.length > 0 ? wageFields.reduce((sum, w) => sum + w.value, 0) : null;\n    let salaryFieldName = wageFields[0]?.key;\n    // Fallback: some responses may only expose an aggregate wage/salary\n    // figure at the company level rather than per employee.\n    if (totalSalary === null) {\n      const aggregateWage = Object.entries(combined).find(([k, v]) => typeof v === 'number' && /wage|salar/i.test(k));\n      if (aggregateWage) {\n        totalSalary = aggregateWage[1];\n        salaryFieldName = aggregateWage[0];\n      }\n    }\n\n    const todayGross = dailyField ? dailyField.value : null;\n    const todayNet = todayGross !",
-"== null && totalSalary !== null ? todayGross - totalSalary : null;\n\n    // --- Today snapshot card ---\n    html += '<div class=\"tds-section-label\">Today</div><div class=\"tds-card\">';\n    html += `<div class=\"tds-row\"><span class=\"tds-row-label\">Gross${dailyField ? ` (${dailyField.path})` : ''}</span><span class=\"tds-row-value\">${todayGross !== null ? formatMoney(todayGross) : '<span class=\"tds-v-dim\">unavailable</span>'}</span></div>`;\n    html += `<div class=\"tds-row\"><span class=\"tds-row-label\">Salaries${salaryFieldName ? ` (${salaryFieldName})` : ''}</span><span class=\"tds-row-value tds-v-bad\">${totalSalary !== null ? '-' + formatMoney(totalSalary) : '<span class=\"tds-v-dim\">no wage field in this key\\u2019s response</span>'}</span></div>`;\n    html += `<div class=\"tds-row\"><span class=\"tds-row-label\">Net (DERIVED)</span><span class=\"tds-row-value ${todayNet !== null ? (todayNet >= 0 ? 'tds-v-good' : 'tds-v-bad') : ''}\">${todayNet !== null ? formatMoney(todayNet) : '<span class=\"tds-v-dim\">needs gross + salary above</span>'}</span></div>`;\n    if (weeklyField) {\n      html += `<div class=\"tds-row\"><span class=\"tds-row-label\">Weekly (${weeklyField.path})</span><span class=\"tds-row-value\">${formatMoney(weeklyField.value)}</span></div>`;\n    }\n    html += '</div>';\n    if (todayGross === null) {\n      html += `<div class=\"tds-box tds-box-warn\">No numeric daily_income/daily_profit field was found in the company profile or detailed response. Fields actually present \u2014 profile: ${profile ? Object.keys(profile).join(', ') : (blockedProfile || 'blocked')}; detailed: ${detailed ? Object.keys(detailed).join(', ') : (blockedDetailed || 'blocked')}.</div>`;\n    }\n\n    // --- Company health, if company/detailed is accessible with this key ---\n    if (detailed) {\n      const bankFie",
-"ld = Object.entries(detailed).find(([k, v]) => typeof v === 'number' && /bank/i.test(k));\n      const popField = Object.entries(detailed).find(([k, v]) => typeof v === 'number' && /popular/i.test(k));\n      const effField = Object.entries(detailed).find(([k, v]) => typeof v === 'number' && /efficien/i.test(k));\n      const envField = Object.entries(detailed).find(([k, v]) => typeof v === 'number' && /environ/i.test(k));\n      if (bankField || popField || effField || envField) {\n        html += '<div class=\"tds-section-label\">Company Health</div><div class=\"tds-card\">';\n        if (bankField) html += `<div class=\"tds-row\"><span class=\"tds-row-label\">Company bank</span><span class=\"tds-row-value\">${formatMoney(bankField[1])}</span></div>`;\n        if (popField) html += `<div class=\"tds-row\"><span class=\"tds-row-label\">Popularity</span><span class=\"tds-row-value\">${popField[1]}%</span></div>`;\n        if (effField) html += `<div class=\"tds-row\"><span class=\"tds-row-label\">Efficiency</span><span class=\"tds-row-value\">${effField[1]}%</span></div>`;\n        if (envField) html += `<div class=\"tds-row\"><span class=\"tds-row-label\">Environment</span><span class=\"tds-row-value\">${envField[1]}%</span></div>`;\n        html += '</div>';\n      }\n    }\n\n    // --- Historical comparison from local snapshots ---\n    // Snapshots store profile and detailed under separate keys (matching how\n    // they were fetched), so merge them per-snapshot the same way as above \u2014\n    // otherwise a snapshot taken when only \"detailed\" held the income field\n    // would silently be treated as having no income data at all.\n    function snapshotIncomeFields(snap) {\n      return { ...(snap.company_profile || {}), ...(snap.company_detailed || {}) };\n    }\n    function findDailyIncome(snap) {\n      const merg",
-"ed = snapshotIncomeFields(snap);\n      return Object.entries(merged).find(([k, v]) => typeof v === 'number' && /daily/i.test(k) && /profit|income/i.test(k));\n    }\n\n    const allSnapshots = await getSnapshotsSorted();\n    const withIncomeData = allSnapshots.filter((s) => s.company_profile || s.company_detailed);\n    const daily = collapseToDaily(withIncomeData);\n\n    html += '<div class=\"tds-section-label\">Today vs Yesterday <span class=\"tds-v-dim\" style=\"font-weight:400;\">(HISTORICAL \\u2014 from local snapshots only)</span></div>';\n    if (daily.length < 2) {\n      html += `<div class=\"tds-box tds-box-neutral\">Insufficient data \\u2014 only ${daily.length} day${daily.length === 1 ? '' : 's'} of local snapshots so far. This starts filling in from tomorrow\\u2019s first run onward; nothing here is backfilled or estimated.</div>`;\n    } else {\n      const todaySnap = daily[daily.length - 1];\n      const ySnap = daily[daily.length - 2];\n      const gField = findDailyIncome(todaySnap);\n      const yField = gField ? [gField[0], snapshotIncomeFields(ySnap)[gField[0]]] : null;\n      html += '<div class=\"tds-card\">';\n      if (gField && yField && typeof yField[1] === 'number') {\n        const change = gField[1] - yField[1];\n        const pct = yField[1] !== 0 ? (change / Math.abs(yField[1])) * 100 : null;\n        html += `<div class=\"tds-row\"><span class=\"tds-row-label\">Today</span><span class=\"tds-row-value\">${formatMoney(gField[1])}</span></div>`;\n        html += `<div class=\"tds-row\"><span class=\"tds-row-label\">Yesterday (last snapshot that day)</span><span class=\"tds-row-value\">${formatMoney(yField[1])}</span></div>`;\n        html += `<div class=\"tds-row\"><span class=\"tds-row-label\">Change</span><span class=\"tds-row-value ${change >= 0 ? 'tds-v-good' : 'tds-v-bad'}\">${change ",
-">= 0 ? '+' : ''}${formatMoney(change)}${pct !== null ? ` (${change >= 0 ? '\\u2191' : '\\u2193'} ${Math.abs(pct).toFixed(1)}%)` : ''}</span></div>`;\n      } else {\n        html += `<div class=\"tds-row-label\">Couldn\\u2019t match a comparable income field between the two snapshots.</div>`;\n      }\n      html += '</div>';\n\n      // Sparkline of last up to 7 local daily snapshots\n      const recent = daily.slice(-7);\n      const values = recent.map((s) => {\n        const f = findDailyIncome(s);\n        return f ? f[1] : null;\n      }).filter((v) => v !== null);\n      if (values.length >= 2) {\n        const maxAbs = Math.max(...values.map((v) => Math.abs(v)), 1);\n        html += `<div class=\"tds-section-label\">Last ${values.length} days <span class=\"tds-v-dim\" style=\"font-weight:400;\">(local snapshots)</span></div><div class=\"tds-card\"><div class=\"tds-spark\">`;\n        recent.forEach((s) => {\n          const f = findDailyIncome(s);\n          const v = f ? f[1] : 0;\n          const h = Math.max(2, Math.round((Math.abs(v) / maxAbs) * 40));\n          const cls = v >= 0 ? 'tds-bar-pos' : 'tds-bar-neg';\n          const d = new Date(s.timestamp);\n          html += `<div class=\"tds-spark-col\"><div class=\"tds-spark-bar ${cls}\" style=\"height:${h}px\" title=\"${formatMoney(v)}\"></div><div class=\"tds-spark-label\">${d.getMonth() + 1}/${d.getDate()}</div></div>`;\n        });\n        html += '</div></div>';\n      }\n    }\n\n    html += `<div class=\"tds-box tds-box-neutral\" style=\"margin-top:10px;\">One snapshot is taken per diagnostic run, up to ${MAX_SNAPSHOTS} kept locally (oldest pruned first). Run Diagnostics Again when you want a fresh snapshot.</div>`;\n\n    el.innerHTML = html;\n  }\n\n  // =======================================================================\n  // STOCK MANAGEMENT TAB\n  // ",
-"=======================================================================\n  const STOCK_NEWS_CACHE_MS = 5 * 60 * 1000;\n\n  function deepObjectEntries(raw) {\n    const out = [];\n    const seen = new WeakSet();\n    function walk(value, path = []) {\n      if (!value || typeof value !== 'object' || seen.has(value)) return;\n      seen.add(value);\n      out.push({ value, path });\n      if (Array.isArray(value)) value.forEach((child, i) => walk(child, [...path, String(i)]));\n      else Object.entries(value).forEach(([key, child]) => walk(child, [...path, key]));\n    }\n    walk(raw);\n    return out;\n  }\n\n  function pickNumeric(obj, names) {\n    if (!obj || typeof obj !== 'object') return null;\n    for (const name of names) {\n      const wanted = normalizeFieldName(name);\n      const entry = Object.entries(obj).find(([k, v]) => normalizeFieldName(k) === wanted && numericValue(v) !== null);\n      if (entry) return numericValue(entry[1]);\n    }\n    return null;\n  }\n\n  function pickText(obj, names) {\n    if (!obj || typeof obj !== 'object') return null;\n    for (const name of names) {\n      const wanted = normalizeFieldName(name);\n      const entry = Object.entries(obj).find(([k, v]) => normalizeFieldName(k) === wanted && (typeof v === 'string' || typeof v === 'number'));\n      if (entry && String(entry[1]).trim()) return String(entry[1]).trim();\n    }\n    return null;\n  }\n\n  function extractStockItems(stockRaw) {\n    if (!stockRaw) return [];\n    const candidates = [];\n    const seenKeys = new Set();\n\n    for (const { value, path } of deepObjectEntries(stockRaw)) {\n      if (!value || typeof value !== 'object' || Array.isArray(value)) continue;\n      const name = pickText(value, ['name', 'item_name', 'stock_name', 'product_name']);\n      const id = pickText(value, ['id', 'item_id', '",
-"stock_id', 'product_id']) || (path.length ? path[path.length - 1] : null);\n      const current = pickNumeric(value, ['amount', 'quantity', 'qty', 'stock', 'in_stock', 'instock', 'available', 'inventory']);\n      const setPrice = pickNumeric(value, ['price', 'selling_price', 'sell_price', 'price_each', 'priceeach']);\n      const costEach = pickNumeric(value, ['cost', 'cost_each', 'costeach', 'unit_cost', 'buy_price']);\n      const rrp = pickNumeric(value, ['rrp', 'recommended_retail_price', 'retail_price']);\n      const soldTotal = pickNumeric(value, ['sold_total', 'soldtotal', 'total_sold', 'units_sold_total']);\n      const soldDaily = pickNumeric(value, ['sold_daily', 'solddaily', 'daily_sold', 'sold_day', 'sold_today', 'daily_sales', 'sales_day']);\n      const sold24 = pickNumeric(value, ['sold_24h', 'sold24h', 'sold_day', 'sold_today', 'daily_sold', 'daily_sales', 'sales_day']);\n      const sold7 = pickNumeric(value, ['sold_7d', 'sold7d', 'sold_week', 'weekly_sold', 'weekly_sales', 'sales_week']);\n\n      if (!name || (current === null && sold24 === null && sold7 === null && soldDaily === null && setPrice === null)) continue;\n      const key = `${id || ''}|${name}`.toLowerCase();\n      if (seenKeys.has(key)) continue;\n      seenKeys.add(key);\n      candidates.push({\n        id,\n        name,\n        current,\n        setPrice,\n        costEach,\n        rrp,\n        soldTotal,\n        soldDaily,\n        sold24,\n        sold7,\n        raw: value\n      });\n    }\n\n    return candidates.sort((a, b) => a.name.localeCompare(b.name));\n  }\n\n  function flattenNewsEntries(newsRaw) {\n    if (!newsRaw) return [];\n    const rows = [];\n    const seen = new Set();\n    for (const { value, path } of deepObjectEntries(newsRaw)) {\n      if (!value || typeof value !== 'object' || Array.isA",
-"rray(value)) continue;\n      const timestamp = pickNumeric(value, ['timestamp', 'time', 'created_at', 'date']);\n      const text = pickText(value, ['text', 'news', 'message', 'description', 'event', 'title']);\n      const id = pickText(value, ['id', 'news_id', 'event_id']) || path.join('.');\n      if (!text || !timestamp) continue;\n      const key = `${id}|${timestamp}|${text}`;\n      if (seen.has(key)) continue;\n      seen.add(key);\n      rows.push({ id, timestamp, text, raw: value });\n    }\n    return rows.sort((a, b) => b.timestamp - a.timestamp);\n  }\n\n  function parseSaleFromNews(entry, stockItems) {\n    const raw = entry.raw || {};\n    const text = String(entry.text || '');\n    if (!/(sold|sale|customer|purchased|bought)/i.test(text)) return null;\n\n    let qty = pickNumeric(raw, ['quantity', 'qty', 'amount', 'sold', 'units', 'count']);\n    let itemName = pickText(raw, ['item_name', 'stock_name', 'product_name', 'item', 'product']);\n\n    const patterns = [\n      /(?:sold|sale of)\\s+(\\d[\\d,]*)\\s+(?:x\\s+)?(.+?)(?:\\s+(?:for|at|to|worth)\\b|[.!]|$)/i,\n      /(\\d[\\d,]*)\\s+(?:x\\s+)?(.+?)\\s+(?:were\\s+|was\\s+)?sold\\b/i,\n      /(.+?)\\s*[:\\-]\\s*(\\d[\\d,]*)\\s+(?:sold|sales)\\b/i,\n    ];\n    if (qty === null || !itemName) {\n      for (const re of patterns) {\n        const m = text.match(re);\n        if (!m) continue;\n        if (/^\\D/.test(m[1])) {\n          itemName = itemName || m[1].trim();\n          qty = qty ?? Number(String(m[2]).replace(/,/g, ''));\n        } else {\n          qty = qty ?? Number(String(m[1]).replace(/,/g, ''));\n          itemName = itemName || m[2].trim();\n        }\n        break;\n      }\n    }\n    if (!Number.isFinite(qty) || qty <= 0 || !itemName) return null;\n\n    // Prefer a current stock item name so minor wording differences in news\n    // aggregate in",
-"to the same row.\n    const normalizedNewsName = normalizeFieldName(itemName);\n    const match = stockItems.find((item) => {\n      const n = normalizeFieldName(item.name);\n      return n === normalizedNewsName || n.includes(normalizedNewsName) || normalizedNewsName.includes(n);\n    });\n    let salePrice = pickNumeric(raw, [\n      'price', 'sale_price', 'sold_price', 'price_each', 'unit_price', 'selling_price'\n    ]);\n\n    if (salePrice === null) {\n      const pricePatterns = [\n        /(?:for|at)\\s*\\$\\s*([\\d,]+(?:\\.\\d+)?)(?:\\s+each)?\\b/i,\n        /\\$\\s*([\\d,]+(?:\\.\\d+)?)\\s*(?:each|per\\s+item|per\\s+unit)\\b/i,\n      ];\n      for (const re of pricePatterns) {\n        const m = text.match(re);\n        if (!m) continue;\n        const parsed = Number(String(m[1]).replace(/,/g, ''));\n        if (Number.isFinite(parsed)) {\n          salePrice = parsed;\n          break;\n        }\n      }\n    }\n\n    return {\n      timestamp: entry.timestamp,\n      quantity: qty,\n      name: match?.name || itemName,\n      id: match?.id || null,\n      price: salePrice\n    };\n  }\n\n  function aggregateSales(newsRaw, stockItems) {\n    const nowSec = Math.floor(Date.now() / 1000);\n    const dayAgo = nowSec - 86400;\n    const weekAgo = nowSec - 7 * 86400;\n    const totals = new Map();\n    const entries = flattenNewsEntries(newsRaw);\n    let parsedEvents = 0;\n\n    for (const entry of entries) {\n      const sale = parseSaleFromNews(entry, stockItems);\n      if (!sale) continue;\n      parsedEvents += 1;\n      const key = String(sale.id || normalizeFieldName(sale.name));\n      const row = totals.get(key) || {\n        name: sale.name,\n        sold24: 0,\n        sold7: 0,\n        lastSoldPrice: null,\n        lastSoldAt: null,\n        pricedUnits24: 0,\n        pricedRevenue24: 0\n      };\n\n      if (sale.timesta",
-"mp >= weekAgo) row.sold7 += sale.quantity;\n      if (sale.timestamp >= dayAgo) row.sold24 += sale.quantity;\n\n      if (sale.price !== null && sale.price !== undefined) {\n        if (!row.lastSoldAt || sale.timestamp > row.lastSoldAt) {\n          row.lastSoldAt = sale.timestamp;\n          row.lastSoldPrice = sale.price;\n        }\n        if (sale.timestamp >= dayAgo) {\n          row.pricedUnits24 += sale.quantity;\n          row.pricedRevenue24 += sale.quantity * sale.price;\n        }\n      }\n\n      totals.set(key, row);\n    }\n\n    const oldestTimestamp = entries.length ? Math.min(...entries.map((e) => e.timestamp)) : null;\n    return { totals, parsedEvents, newsEntries: entries.length, oldestTimestamp };\n  }\n\n  async function fetchCompanyNewsForStock() {\n    if (state.stock.newsCache && Date.now() - state.stock.newsCacheAt < STOCK_NEWS_CACHE_MS) return state.stock.newsCache;\n    const now = Math.floor(Date.now() / 1000);\n    const from = now - 7 * 86400;\n    let data;\n    try {\n      data = await ApiClient.call('company', 'news', '', { from, to: now });\n    } catch (err) {\n      // Some API versions ignore/rename the window parameters. Fall back to\n      // the normal news selection before declaring the history unavailable.\n      data = await ApiClient.call('company', 'news');\n    }\n    state.stock.newsCache = data;\n    state.stock.newsCacheAt = Date.now();\n    return data;\n  }\n\n  function stockDaysRemaining(current, dailyRate) {\n    if (current === null || typeof current !== 'number') return null;\n    if (!dailyRate || dailyRate <= 0) return null;\n    return current / dailyRate;\n  }\n\n  function stockGrossMargin(setPrice, costEach) {\n    if (setPrice === null || costEach === null) return null;\n    return setPrice - costEach;\n  }\n\n  function stockMarginPercent(setPrice, c",
-"ostEach) {\n    if (setPrice === null || costEach === null || costEach <= 0) return null;\n    return ((setPrice - costEach) / costEach) * 100;\n  }\n\n  function pricingRecommendation(item, sold24, sold7, lastSoldPrice) {\n    const setPrice = item.setPrice;\n    const rrp = item.rrp;\n    const current = item.current;\n    const day = sold24 !== null ? Math.max(0, Number(sold24) || 0) : null;\n    const week = sold7 !== null ? Math.max(0, Number(sold7) || 0) : null;\n    const weeklyDailyAverage = week !== null ? week / 7 : null;\n    const dailyRate = day !== null ? day : (item.soldDaily !== null ? item.soldDaily : weeklyDailyAverage);\n    const daysLeft = stockDaysRemaining(current, dailyRate);\n\n    if (setPrice === null) {\n      return {\n        action: 'No price data',\n        className: '',\n        suggested: null,\n        reason: 'Torn did not return the currently configured selling price.'\n      };\n    }\n\n    const trend =\n      day !== null && weeklyDailyAverage !== null && weeklyDailyAverage > 0\n        ? ((day - weeklyDailyAverage) / weeklyDailyAverage) * 100\n        : null;\n\n    let score = 0;\n    const reasons = [];\n\n    // Strong recent demand and plenty of cover suggests there is room to test\n    // a small increase. Weak demand with lots of inventory suggests the reverse.\n    if (trend !== null) {\n      if (trend >= 15) {\n        score += 2;\n        reasons.push(`24h sales are ${trend.toFixed(0)}% above the 7-day daily average`);\n      } else if (trend <= -15) {\n        score -= 2;\n        reasons.push(`24h sales are ${Math.abs(trend).toFixed(0)}% below the 7-day daily average`);\n      } else {\n        reasons.push('24h sales are close to the 7-day daily average');\n      }\n    }\n\n    if (daysLeft !== null) {\n      if (daysLeft >= 14) {\n        score += 1;\n        r",
-"easons.push(`${daysLeft.toFixed(1)} days of stock remain`);\n      } else if (daysLeft <= 4) {\n        score -= 1;\n        reasons.push(`only ${daysLeft.toFixed(1)} days of stock remain`);\n      }\n    }\n\n    if (rrp !== null) {\n      if (setPrice < rrp * 0.85) {\n        score += 1;\n        reasons.push(`set price is well below RRP (${formatCurrency(rrp)})`);\n      } else if (setPrice > rrp * 1.20) {\n        score -= 1;\n        reasons.push(`set price is well above RRP (${formatCurrency(rrp)})`);\n      }\n    }\n\n    if (lastSoldPrice !== null) {\n      if (lastSoldPrice >= setPrice) {\n        reasons.push(`latest observed sale cleared at ${formatCurrency(lastSoldPrice)}`);\n      } else {\n        score -= 1;\n        reasons.push(`latest observed sale price (${formatCurrency(lastSoldPrice)}) is below the set price`);\n      }\n    }\n\n    let action = 'Hold';\n    let suggested = setPrice;\n    let className = '';\n\n    if (score >= 2) {\n      action = 'Consider raising';\n      suggested = setPrice + 1;\n      className = 'tds-v-good';\n    } else if (score <= -2) {\n      action = 'Consider lowering';\n      suggested = Math.max(item.costEach !== null ? item.costEach : 0, setPrice - 1);\n      className = 'tds-v-bad';\n    }\n\n    return {\n      action,\n      suggested,\n      className,\n      daysLeft,\n      trend,\n      reason: reasons.length ? reasons.join('; ') : 'Not enough recent sales evidence to justify changing the price.'\n    };\n  }\n\n  function restockRecommendation(current, sold24, sold7) {\n    if (sold24 === null && sold7 === null) return null;\n    const day = Math.max(0, Number(sold24) || 0);\n    const week = Math.max(0, Number(sold7) || 0);\n    if (day === 0 && week === 0) return { target: 0, restock: 0, baseline: 0 };\n\n    // Use the faster of the recent one-day run-rate an",
-"d the observed seven-day\n    // total, then add a 20% safety buffer. This is a recommendation, not a Torn\n    // API field, and is labelled DERIVED in the UI.\n    const baseline = Math.max(week, day * 7);\n    const target = Math.ceil(baseline * 1.20);\n    const restock = current === null ? null : Math.max(0, target - Math.max(0, current));\n    return { target, restock, baseline };\n  }\n\n  async function renderStockTab(panel, { refresh = false } = {}) {\n    const el = panel.querySelector('[data-tabpanel=\"stock\"]');\n    if (!el) return;\n    const results = state.lastResults;\n\n    if (!results) {\n      el.innerHTML = `<div class=\"tds-box tds-box-neutral\">Run Diagnostics once so Stock Management can read your company stock.</div>`;\n      return;\n    }\n\n    const stockRaw = findRaw(results, 'company', 'stock');\n    const blocked = findBlockedReason(results, 'company', 'stock');\n\n    if (!stockRaw) {\n      el.innerHTML = `<div class=\"tds-box tds-box-danger\"><strong>Company stock unavailable.</strong> ${escapeHtml(blocked || 'No company/stock data was returned.')}</div>`;\n      return;\n    }\n\n    const items = extractStockItems(stockRaw);\n\n    if (el.hidden && !refresh) {\n      el.innerHTML = `<div class=\"tds-box tds-box-neutral\">Stock data is ready. Open this tab to load recent sales history, restock targets, margins and read-only pricing recommendations.</div>`;\n      return;\n    }\n\n    if (!items.length) {\n      el.innerHTML = `<div class=\"tds-box tds-box-warn\"><strong>Stock data was returned, but its item structure was not recognised yet.</strong><br>Open Diagnostics and check the fields shown for Company stock. The raw response is deliberately not guessed into fake item rows.</div>`;\n      return;\n    }\n\n    el.innerHTML = `<div class=\"tds-box tds-box-neutral\">Loading rece",
-"nt sales and pricing history\u2026</div>`;\n\n    let sales = { totals: new Map(), parsedEvents: 0, newsEntries: 0, oldestTimestamp: null };\n    let newsError = null;\n\n    try {\n      if (refresh) {\n        state.stock.newsCache = null;\n        state.stock.newsCacheAt = 0;\n      }\n      const diagnosticNews = findRaw(results, 'company', 'news');\n      const newsRaw = diagnosticNews || await fetchCompanyNewsForStock();\n      sales = aggregateSales(newsRaw, items);\n    } catch (err) {\n      newsError = err;\n    }\n\n    let html = `\n      <div class=\"tds-box tds-box-info\">\n        <strong>Read-only pricing assistant:</strong> this tab does <strong>not</strong> submit prices or interact with Torn's Pricing form.\n        It only analyses data Torn returns and suggests <strong>Hold / Consider raising / Consider lowering</strong>.\n        Suggested prices are advisory and deliberately move only <strong>$1 at a time</strong>.\n      </div>\n      <div class=\"tds-box tds-box-info\">\n        <strong>Restock recommendation:</strong> target = 120% of the higher of <em>last 7 days sold</em> or <em>last 24 hours \u00d7 7</em>.\n        This gives roughly one week of fast-moving stock plus a 20% buffer. Targets are <strong>DERIVED</strong>.\n      </div>`;\n\n    if (newsError) {\n      html += `<div class=\"tds-box tds-box-warn\"><strong>Item-level sales history unavailable.</strong> ${escapeHtml(newsError.reason || 'company/news could not be read with this key')}. Current stock/pricing fields returned directly by Torn are still shown.</div>`;\n    } else if (!sales.parsedEvents) {\n      html += `<div class=\"tds-box tds-box-warn\">Company news was accessible (${formatNumber(sales.newsEntries)} entries inspected), but no item-sale events were recognised. Direct <code>company/stock</code> sales fields are stil",
-"l used where available; Last Sold Price stays unavailable rather than being guessed.</div>`;\n    } else {\n      const coverage = sales.oldestTimestamp ? formatTimestampRelative(sales.oldestTimestamp * 1000) : 'unknown';\n      html += `<div class=\"tds-box tds-box-neutral\">Parsed ${formatNumber(sales.parsedEvents)} stock-sale event(s) from company news. Oldest returned news: ${escapeHtml(coverage)}.</div>`;\n    }\n\n    html += `<div style=\"overflow-x:auto;\">\n      <table class=\"tds-table tds-stock-table\">\n        <thead>\n          <tr>\n            <th>Product</th>\n            <th>Cost</th>\n            <th>RRP</th>\n            <th>Set Price</th>\n            <th>Last Sold</th>\n            <th>In Stock</th>\n            <th>Sold Daily</th>\n            <th>Sold 24h</th>\n            <th>Sold 7d</th>\n            <th>Days Left</th>\n            <th>Margin / Unit</th>\n            <th>Est. Daily Gross</th>\n            <th>Target Stock</th>\n            <th>Restock</th>\n            <th>Pricing</th>\n            <th>Suggested</th>\n          </tr>\n        </thead>\n        <tbody>`;\n\n    for (const item of items) {\n      const keyById = String(item.id || '');\n      const keyByName = normalizeFieldName(item.name);\n      const fromNews = sales.totals.get(keyById) || sales.totals.get(keyByName);\n\n      const sold24 = item.sold24 !== null\n        ? item.sold24\n        : (fromNews ? fromNews.sold24 : (item.soldDaily !== null ? item.soldDaily : null));\n\n      const sold7 = item.sold7 !== null\n        ? item.sold7\n        : (fromNews ? fromNews.sold7 : null);\n\n      const soldDaily = item.soldDaily !== null\n        ? item.soldDaily\n        : (sold24 !== null ? sold24 : (sold7 !== null ? sold7 / 7 : null));\n\n      const lastSoldPrice = fromNews?.lastSoldPrice ?? null;\n      const averageSoldPrice2",
-"4 =\n        fromNews && fromNews.pricedUnits24 > 0\n          ? fromNews.pricedRevenue24 / fromNews.pricedUnits24\n          : null;\n\n      const rec = restockRecommendation(item.current, sold24, sold7);\n      const priceRec = pricingRecommendation(item, sold24, sold7, lastSoldPrice);\n\n      const margin = stockGrossMargin(item.setPrice, item.costEach);\n      const marginPct = stockMarginPercent(item.setPrice, item.costEach);\n      const daysLeft = stockDaysRemaining(item.current, soldDaily);\n      const estDailyGross =\n        margin !== null && soldDaily !== null\n          ? margin * soldDaily\n          : null;\n\n      const restockText = rec\n        ? (rec.restock === null ? '\u2014' : formatNumber(rec.restock))\n        : '\u2014';\n\n      const lastPriceHtml = lastSoldPrice !== null\n        ? `${formatCurrency(lastSoldPrice)}${averageSoldPrice24 !== null ? `<div class=\"tds-v-dim\">24h avg ${formatCurrency(averageSoldPrice24)}</div>` : ''}`\n        : '\u2014';\n\n      html += `<tr>\n        <td><strong>${escapeHtml(item.name)}</strong>${item.soldTotal !== null ? `<div class=\"tds-v-dim\">Lifetime sold: ${formatNumber(item.soldTotal)}</div>` : ''}</td>\n        <td>${item.costEach === null ? '\u2014' : formatCurrency(item.costEach)}</td>\n        <td>${item.rrp === null ? '\u2014' : formatCurrency(item.rrp)}</td>\n        <td><strong>${item.setPrice === null ? '\u2014' : formatCurrency(item.setPrice)}</strong></td>\n        <td>${lastPriceHtml}</td>\n        <td>${item.current === null ? '\u2014' : formatNumber(item.current)}</td>\n        <td>${soldDaily === null ? '\u2014' : formatNumber(Math.round(soldDaily))}</td>\n        <td>${sold24 === null ? '\u2014' : formatNumber(Math.round(sold24))}</td>\n        <td>${sold7 === null ? '\u2014' : formatNumber(Math.round(sold7))}</td>\n        <td>${daysLeft === null ? '\u2014' : `${daysLeft.toF",
-"ixed(1)}d`}</td>\n        <td>${margin === null ? '\u2014' : `${formatCurrency(margin)}${marginPct !== null ? `<div class=\"tds-v-dim\">${marginPct.toFixed(0)}%</div>` : ''}`}</td>\n        <td>${estDailyGross === null ? '\u2014' : formatCurrency(estDailyGross)}</td>\n        <td>${rec ? formatNumber(rec.target) : '\u2014'}</td>\n        <td><strong>${restockText}</strong></td>\n        <td class=\"${priceRec.className}\">\n          <strong>${escapeHtml(priceRec.action)}</strong>\n          <div class=\"tds-v-dim\" style=\"max-width:240px;white-space:normal;\">${escapeHtml(priceRec.reason)}</div>\n        </td>\n        <td class=\"${priceRec.className}\"><strong>${priceRec.suggested === null ? '\u2014' : formatCurrency(priceRec.suggested)}</strong></td>\n      </tr>`;\n    }\n\n    html += `</tbody></table></div>\n      <div class=\"tds-box tds-box-neutral\" style=\"margin-top:10px;\">\n        <strong>Pricing recommendation rules:</strong> recent 24h sales are compared with the 7-day daily average, stock cover is considered, RRP is used when Torn supplies it, and an observed Last Sold Price is used when it can be parsed reliably.\n        A recommendation only moves one dollar from the configured price so the tool stays conservative.\n      </div>\n      <div style=\"margin-top:10px;\">\n        <button class=\"tds-btn-ghost\" id=\"tds-stock-refresh\">Refresh sales</button>\n      </div>`;\n\n    el.innerHTML = html;\n    el.querySelector('#tds-stock-refresh')?.addEventListener('click', () =>\n      renderStockTab(panel, { refresh: true })\n    );\n  }\n\n\n  // =======================================================================\n  // OPTIMIZE TAB \u2014 position requirement fit, not a fabricated EE formula\n  // =======================================================================\n  function findCompanyTypeReferenceNode(reference, typ",
-"eId) {\n    if (!reference || typeId === null || typeId === undefined) return null;\n    const wanted = String(typeId);\n    const seen = new WeakSet();\n    let best = null;\n    function walk(value) {\n      if (best || !value || typeof value !== 'object' || seen.has(value)) return;\n      seen.add(value);\n      if (!Array.isArray(value) && Object.prototype.hasOwnProperty.call(value, wanted)) {\n        const candidate = value[wanted];\n        if (candidate && typeof candidate === 'object') { best = candidate; return; }\n      }\n      if (!Array.isArray(value)) {\n        const id = findValueDeep(value, ['id', 'type_id', 'company_type']);\n        if (id !== null && String(id) === wanted) { best = value; return; }\n      }\n      for (const child of Object.values(value)) {\n        if (child && typeof child === 'object') walk(child);\n        if (best) return;\n      }\n    }\n    walk(reference);\n    return best;\n  }\n\n  function extractPositionRequirements(reference, typeId) {\n    const root = findCompanyTypeReferenceNode(reference, typeId) || reference;\n    if (!root) return [];\n    const positions = [];\n    const seen = new Set();\n    for (const { value, path } of deepObjectEntries(root)) {\n      if (!value || typeof value !== 'object' || Array.isArray(value)) continue;\n      const name = pickText(value, ['name', 'position', 'position_name', 'title']) || (path.length ? path[path.length - 1] : null);\n      const manual = pickNumeric(value, ['manual_labor', 'manual', 'man_required', 'manual_required', 'man']);\n      const intelligence = pickNumeric(value, ['intelligence', 'int_required', 'intelligence_required', 'int']);\n      const endurance = pickNumeric(value, ['endurance', 'end_required', 'endurance_required', 'end']);\n      const statCount = [manual, intelligence, endurance].filt",
-"er((v) => v !== null && v > 0).length;\n      if (!name || statCount < 1) continue;\n      const key = normalizeFieldName(name);\n      if (!key || seen.has(key)) continue;\n      seen.add(key);\n      positions.push({ name: String(name), manual, intelligence, endurance });\n    }\n    return positions;\n  }\n\n  function employeePositionFit(emp, position) {\n    const actual = {\n      manual: numericValue(emp.manual_labor) ?? 0,\n      intelligence: numericValue(emp.intelligence) ?? 0,\n      endurance: numericValue(emp.endurance) ?? 0,\n    };\n    const req = { manual: position.manual, intelligence: position.intelligence, endurance: position.endurance };\n    const ratios = [];\n    let shortfall = 0;\n    let requiredCount = 0;\n    for (const key of Object.keys(req)) {\n      if (req[key] === null || req[key] <= 0) continue;\n      requiredCount += 1;\n      const ratio = actual[key] / req[key];\n      ratios.push(Math.min(1, ratio));\n      shortfall += Math.max(0, req[key] - actual[key]) / req[key];\n    }\n    if (!requiredCount) return null;\n    const coverage = Math.round((ratios.reduce((a, b) => a + b, 0) / requiredCount) * 100);\n    return { coverage, shortfall, requiredCount };\n  }\n\n  // Official Torn work-stat efficiency formula, applied once per required\n  // position stat. Company positions normally use a primary + secondary stat.\n  // Exact requirement on both stats therefore gives 90 Working Stats EE.\n  function calculatePositionWorkingStats(emp, position) {\n    const actual = {\n      manual: numericValue(emp.manual_labor) ?? 0,\n      intelligence: numericValue(emp.intelligence) ?? 0,\n      endurance: numericValue(emp.endurance) ?? 0,\n    };\n    const req = {\n      manual: numericValue(position.manual),\n      intelligence: numericValue(position.intelligence),\n      endurance: n",
-"umericValue(position.endurance),\n    };\n\n    let total = 0;\n    let used = 0;\n    for (const key of Object.keys(req)) {\n      const required = req[key];\n      if (required === null || required <= 0) continue;\n\n      const stat = Math.max(0, actual[key] || 0);\n      const ratio = stat / required;\n      const base = Math.min(45, 45 * ratio);\n      const overRequirement = ratio > 0 ? Math.max(0, 5 * Math.log2(ratio)) : 0;\n\n      total += Math.floor(base + overRequirement);\n      used += 1;\n    }\n\n    return used ? total : null;\n  }\n\n  function estimateEffectivenessAtPosition(emp, ee, position) {\n    const workingStats = calculatePositionWorkingStats(emp, position);\n    if (workingStats === null) return null;\n\n    // Everything except Working Stats is retained from Torn's current Total EE.\n    // This automatically preserves Settled In, Director Education, Merits,\n    // Addiction, inactivity adjustments, and any future components Torn may add\n    // without us needing to guess each field individually.\n    const currentWorking = typeof ee?.workingStats === 'number' ? ee.workingStats : null;\n    const currentTotal = typeof ee?.total === 'number' ? ee.total : null;\n    const nonPositionAdjustment =\n      currentWorking !== null && currentTotal !== null\n        ? currentTotal - currentWorking\n        : 0;\n\n    return {\n      workingStats,\n      total: workingStats + nonPositionAdjustment,\n      nonPositionAdjustment,\n    };\n  }\n\n  function renderOptimizeTab(panel) {\n    const el = panel.querySelector('[data-tabpanel=\"optimize\"]');\n    if (!el) return;\n    const results = state.lastResults;\n    if (!results) {\n      el.innerHTML = `<div class=\"tds-box tds-box-neutral\">Run Diagnostics once so Optimize can read your employee working stats and effectiveness.</div>`;\n      return;\n",
-"    }\n\n    const employees = extractEmployeesEntries(findRaw(results, 'company', 'employees'));\n    const profile = findRaw(results, 'company', 'profile');\n    const reference = findRaw(results, 'torn', 'companies');\n    const typeId = numericValue(findValueDeep(profile, ['company_type', 'type_id', 'type']));\n    const positions = extractPositionRequirements(reference, typeId);\n\n    let html = `<div class=\"tds-box tds-box-info\"><strong>How Employee Effectiveness works:</strong> Current EE is Torn's real employee effectiveness. For each available position, Optimize calculates the Working Stats component using Torn's published work-stat efficiency formula, then carries across the employee's current non-position EE adjustment (Total EE minus Working Stats). The resulting <strong>Estimated EE</strong> is a prediction for comparison, not a live Torn value.</div>`;\n\n    if (!employees.length) {\n      el.innerHTML = html + `<div class=\"tds-box tds-box-danger\">No employee data is available.</div>`;\n      return;\n    }\n\n    const rows = employees.map((employee) => {\n      const ee = getEmployeeEffectiveness(employee.raw);\n      let best = null;\n\n      if (positions.length) {\n        const ranked = positions\n          .map((position) => {\n            const fit = employeePositionFit(employee.raw, position);\n            const estimate = estimateEffectivenessAtPosition(employee.raw, ee, position);\n            return { position, fit, estimate };\n          })\n          .filter((row) => row.fit && row.estimate)\n          .sort((a, b) =>\n            b.estimate.total - a.estimate.total ||\n            b.estimate.workingStats - a.estimate.workingStats ||\n            b.fit.coverage - a.fit.coverage ||\n            a.fit.shortfall - b.fit.shortfall\n          );\n        best = ranked[0] || nul",
-"l;\n      }\n\n      return { employee, ee, best };\n    }).sort((a, b) => {\n      const av = typeof a.ee?.total === 'number' ? a.ee.total : Number.POSITIVE_INFINITY;\n      const bv = typeof b.ee?.total === 'number' ? b.ee.total : Number.POSITIVE_INFINITY;\n      return av - bv;\n    });\n\n    html += `<div class=\"tds-section-label\">Employee effectiveness</div>`;\n    html += `<div style=\"overflow-x:auto;\">\n      <table class=\"tds-table tds-optimize-table\">\n        <thead>\n          <tr>\n            <th>Employee</th>\n            <th>Current Position</th>\n            <th>Working Stats</th>\n            <th>Settled In</th>\n            <th>Director Ed.</th>\n            <th>Addiction</th>\n            <th>Total EE</th>\n            ${positions.length ? '<th>Best Position</th><th>New Working Stats</th><th>Est. New EE</th><th>Change</th><th>Fit</th>' : ''}\n          </tr>\n        </thead>\n        <tbody>`;\n\n    for (const row of rows) {\n      const { employee, ee, best } = row;\n      const currentTotal = typeof ee?.total === 'number' ? ee.total : null;\n      const estimatedTotal = best?.estimate && typeof best.estimate.total === 'number' ? best.estimate.total : null;\n      const delta = currentTotal !== null && estimatedTotal !== null ? estimatedTotal - currentTotal : null;\n      const deltaText = delta === null ? '\u2014' : `${delta > 0 ? '+' : ''}${formatNumber(delta)}`;\n\n      html += `<tr>`;\n      html += `<td><strong>${escapeHtml(employee.name)}</strong></td>`;\n      html += `<td>${escapeHtml(employee.position || '\u2014')}</td>`;\n      html += `<td>${typeof ee?.workingStats === 'number' ? formatNumber(ee.workingStats) : '\u2014'}</td>`;\n      html += `<td>${typeof ee?.settledIn === 'number' ? formatNumber(ee.settledIn) : '\u2014'}</td>`;\n      html += `<td>${typeof ee?.directorEducation === 'number' ",
-"? formatNumber(ee.directorEducation) : '\u2014'}</td>`;\n      html += `<td>${typeof ee?.addiction === 'number' ? formatNumber(ee.addiction) : '\u2014'}</td>`;\n      html += `<td><strong>${currentTotal !== null ? formatNumber(currentTotal) : '\u2014'}</strong></td>`;\n\n      if (positions.length) {\n        html += `<td>${best ? escapeHtml(best.position.name) : '\u2014'}</td>`;\n        html += `<td>${best?.estimate ? formatNumber(best.estimate.workingStats) : '\u2014'}</td>`;\n        html += `<td><strong>${estimatedTotal !== null ? formatNumber(estimatedTotal) : '\u2014'}</strong></td>`;\n        html += `<td><strong>${deltaText}</strong></td>`;\n        html += `<td>${best ? `${best.fit.coverage}%` : '\u2014'}</td>`;\n      }\n      html += `</tr>`;\n    }\n\n    html += `</tbody></table></div>`;\n\n    if (!positions.length) {\n      html += `<div class=\"tds-box tds-box-warn\" style=\"margin-top:10px;\">No reliable position requirement data was found for company type ${escapeHtml(String(typeId ?? 'unknown'))}, so Optimize is showing Torn's real current effectiveness values without inventing position recommendations.</div>`;\n    } else {\n      html += `<div class=\"tds-box tds-box-neutral\" style=\"margin-top:10px;\">\n        <strong>Estimated EE:</strong> the target position's calculated Working Stats EE plus the employee's current non-position adjustment.\n        This preserves bonuses/penalties already reflected in Torn's Total EE while changing only the position-dependent Working Stats component.\n        Rows remain sorted by current <strong>Total EE, lowest first</strong>.\n      </div>`;\n    }\n\n    el.innerHTML = html;\n  }\n\n  // -----------------------------------------------------------------------\n  // TRAINING / ROTATIONAL DEBT HELPERS\n  // -----------------------------------------------------------------------\n  f",
-"unction normalizePersonName(value) {\n    return String(value || '')\n      .toLowerCase()\n      .replace(/<[^>]*>/g, '')\n      .replace(/[^a-z0-9]+/g, ' ')\n      .trim()\n      .replace(/\\s+/g, ' ');\n  }\n\n  function parseTrainingEvent(entry, employees) {\n    if (!entry) return null;\n\n    const raw = entry.raw || {};\n    const text = String(entry.text || '');\n    if (!/\\btrain(?:ed|ing|s)?\\b/i.test(text)) return null;\n\n    // Structured recipient fields are preferred. Avoid a plain `user_id`\n    // first because some log shapes use it for the director/trainer.\n    const structuredId = pickNumeric(raw, [\n      'employee_id', 'target_id', 'recipient_id', 'trained_id',\n      'employee', 'target', 'recipient'\n    ]);\n\n    const structuredName = pickText(raw, [\n      'employee_name', 'target_name', 'recipient_name', 'trained_name',\n      'employee', 'target', 'recipient'\n    ]);\n\n    let employee = null;\n\n    if (structuredId !== null) {\n      employee = employees.find((e) => String(e.id) === String(structuredId)) || null;\n    }\n\n    if (!employee && structuredName) {\n      const wanted = normalizePersonName(structuredName);\n      employee = employees.find((e) => normalizePersonName(e.name) === wanted) || null;\n    }\n\n    // Most Torn company-news/log messages include the recipient's visible\n    // name. Match longest names first so one employee's name does not become\n    // a substring match inside another employee's name.\n    if (!employee) {\n      const normalizedText = normalizePersonName(text);\n      const byLength = [...employees].sort((a, b) => String(b.name).length - String(a.name).length);\n      employee = byLength.find((e) => {\n        const n = normalizePersonName(e.name);\n        return n && (` ${normalizedText} `).includes(` ${n} `);\n      }) || null;\n    }\n\n    if",
-" (!employee) return null;\n\n    let quantity = pickNumeric(raw, [\n      'quantity', 'qty', 'count', 'trains', 'train_count', 'amount'\n    ]);\n\n    if (quantity === null) {\n      const patterns = [\n        /(\\d[\\d,]*)\\s+trains?\\b/i,\n        /\\btrains?\\s*[x\u00d7:]?\\s*(\\d[\\d,]*)\\b/i,\n        /\\btrained\\b.*?\\b(\\d[\\d,]*)\\s+times?\\b/i,\n      ];\n      for (const pattern of patterns) {\n        const m = text.match(pattern);\n        if (!m) continue;\n        quantity = Number(String(m[1]).replace(/,/g, ''));\n        break;\n      }\n    }\n\n    // A normal Torn \"trained employee\" event represents one train unless an\n    // explicit quantity is present.\n    if (quantity === null) quantity = 1;\n    if (!Number.isFinite(quantity) || quantity <= 0) return null;\n\n    return {\n      eventId: String(entry.id || ''),\n      timestamp: Number(entry.timestamp),\n      employeeId: String(employee.id),\n      employeeName: employee.name,\n      quantity,\n      text,\n    };\n  }\n\n  function collectTrainingEvents(raw, employees) {\n    const sourceEntries = flattenNewsEntries(raw);\n    const events = [];\n    const seen = new Set();\n\n    for (const entry of sourceEntries) {\n      const parsed = parseTrainingEvent(entry, employees);\n      if (!parsed) continue;\n\n      const key = parsed.eventId\n        ? `id:${parsed.eventId}`\n        : `${parsed.timestamp}|${parsed.employeeId}|${parsed.quantity}`;\n\n      if (seen.has(key)) continue;\n      seen.add(key);\n      events.push(parsed);\n    }\n\n    events.sort((a, b) => b.timestamp - a.timestamp);\n    return { sourceEntries, events };\n  }\n\n  function mergeTrainingEventSources(primary, secondary) {\n    const rows = [...(primary || []), ...(secondary || [])]\n      .sort((a, b) => b.timestamp - a.timestamp);\n\n    const merged = [];\n    for (const event of rows) {\n    ",
-"  // The same train can appear in both company/news and user/log with\n      // different event IDs. Treat matching employee/quantity within a\n      // two-second window as the same action.\n      const duplicate = merged.some((existing) =>\n        existing.employeeId === event.employeeId &&\n        existing.quantity === event.quantity &&\n        Math.abs(existing.timestamp - event.timestamp) <= 2\n      );\n      if (!duplicate) merged.push(event);\n    }\n    return merged;\n  }\n\n  function formatTrainingCoverage(timestamp) {\n    if (!timestamp) return 'Unknown';\n    const ms = Number(timestamp) * 1000;\n    const days = Math.max(0, Math.floor((Date.now() - ms) / 86400000));\n    if (days < 1) return 'Less than 1 day';\n    return `${formatNumber(days)} day${days === 1 ? '' : 's'}`;\n  }\n\n  function calculateRotationalDebt(employees, events, coverageStart) {\n    const now = Math.floor(Date.now() / 1000);\n    const THREE_DAYS = 3 * 86400;\n\n    const actualByEmployee = new Map();\n    const lastTrainByEmployee = new Map();\n    const trains7ByEmployee = new Map();\n    const trains30ByEmployee = new Map();\n    const sevenAgo = now - 7 * 86400;\n    const thirtyAgo = now - 30 * 86400;\n\n    for (const event of events) {\n      const id = String(event.employeeId);\n      actualByEmployee.set(id, (actualByEmployee.get(id) || 0) + event.quantity);\n\n      const prev = lastTrainByEmployee.get(id);\n      if (!prev || event.timestamp > prev) lastTrainByEmployee.set(id, event.timestamp);\n\n      if (event.timestamp >= sevenAgo) {\n        trains7ByEmployee.set(id, (trains7ByEmployee.get(id) || 0) + event.quantity);\n      }\n      if (event.timestamp >= thirtyAgo) {\n        trains30ByEmployee.set(id, (trains30ByEmployee.get(id) || 0) + event.quantity);\n      }\n    }\n\n    const rows = employees.map((e",
-"mployee) => {\n      const days = numericValue(employee.raw?.days_in_company) ?? 0;\n      const joinedAt = now - Math.max(0, days) * 86400;\n      const eligibleAt = joinedAt + THREE_DAYS;\n      const fairStart = Math.max(coverageStart || now, eligibleAt);\n      const eligibleSeconds = Math.max(0, now - fairStart);\n      const eligibleWeight = eligibleSeconds / 86400;\n\n      return {\n        employee,\n        eligibleWeight,\n        actual: actualByEmployee.get(String(employee.id)) || 0,\n        lastTrain: lastTrainByEmployee.get(String(employee.id)) || null,\n        trains7: trains7ByEmployee.get(String(employee.id)) || 0,\n        trains30: trains30ByEmployee.get(String(employee.id)) || 0,\n      };\n    });\n\n    const totalObserved = rows.reduce((sum, row) => sum + row.actual, 0);\n    const totalWeight = rows.reduce((sum, row) => sum + row.eligibleWeight, 0);\n\n    for (const row of rows) {\n      row.expected = totalWeight > 0\n        ? totalObserved * (row.eligibleWeight / totalWeight)\n        : 0;\n      row.debt = row.expected - row.actual;\n    }\n\n    rows.sort((a, b) =>\n      b.debt - a.debt ||\n      (a.lastTrain || 0) - (b.lastTrain || 0) ||\n      String(a.employee.name).localeCompare(String(b.employee.name))\n    );\n\n    return { rows, totalObserved, totalWeight };\n  }\n\n  async function fetchTrainingHistorySources(results) {\n    const diagnosticNews = findRaw(results, 'company', 'news');\n    const diagnosticLog = findRaw(results, 'user', 'log');\n\n    let newsRaw = diagnosticNews;\n    let logRaw = diagnosticLog;\n    let newsError = null;\n    let logError = null;\n\n    if (!newsRaw) {\n      try {\n        // Reuse the already rate-limited/cached company news helper. It asks\n        // Torn for a recent history window and gracefully falls back when\n        // from/to are no",
-"t accepted by a particular API shape.\n        newsRaw = await fetchCompanyNewsForStock();\n      } catch (err) {\n        newsError = err;\n      }\n    }\n\n    // `user/log` remains a fallback/second source because directors' personal\n    // logs can contain the same training actions. Do not make an extra request\n    // here if Diagnostics did not already return it.\n    if (!logRaw) {\n      logError = findBlockedReason(results, 'user', 'log');\n    }\n\n    return { newsRaw, logRaw, newsError, logError };\n  }\n\n  // =======================================================================\n  // TRAINING TAB\n  // =======================================================================\n  async function renderTrainingTab(panel) {\n    const el = panel.querySelector('[data-tabpanel=\"training\"]');\n    const results = state.lastResults;\n    if (!results) {\n      el.innerHTML = `<div class=\"tds-box tds-box-neutral\">Run Diagnostics first \u2014 Training reads the employee roster and training-history sources.</div>`;\n      return;\n    }\n\n    const employeesRaw = findRaw(results, 'company', 'employees');\n    const employees = extractEmployeesEntries(employeesRaw);\n    const profile = findRaw(results, 'company', 'profile');\n    const mode = state.trainingMode || 'priority';\n\n    let html = `\n      <div class=\"tds-segmented\">\n        <div class=\"tds-segment ${mode === 'priority' ? 'tds-segment-active' : ''}\" data-trainmode=\"priority\">PRIORITY</div>\n        <div class=\"tds-segment ${mode === 'rotational' ? 'tds-segment-active' : ''}\" data-trainmode=\"rotational\">ROTATIONAL / DEBT</div>\n      </div>`;\n\n    if (employees.length === 0) {\n      html += `<div class=\"tds-box tds-box-danger\">Employee roster unavailable, so there\u2019s nothing to build a training queue from.</div>`;\n      el.innerHTML = html;\n   ",
-"   return;\n    }\n\n    const ratingValue = numericValue(findValueDeep(profile, ['rating', 'star_rating', 'stars']));\n    html += `<div class=\"tds-box tds-box-neutral\">\n      ${ratingValue !== null ? `Current company rating: <strong>${escapeHtml(String(ratingValue))}\u2605</strong>. ` : ''}\n      Rotational debt below is based on <strong>observed trains actually given</strong>, not an assumed star-rating budget. This keeps the queue fair if ratings, staffing, saved trains or training-role bonuses changed during the period.\n    </div>`;\n\n    if (mode === 'priority') {\n      html += `<div class=\"tds-box tds-box-info\">\n        Sorted by <strong>current effectiveness, lowest first</strong>. This mode answers \u201cwho currently needs EE help most?\u201d; Rotational / Debt answers \u201cwho has received less than their fair share of actual trains?\u201d\n      </div>`;\n\n      const withEE = employees.map((e) => ({ ...e, ee: findEffectivenessField(e.raw) }));\n      withEE.sort((a, b) => (a.ee?.value ?? Infinity) - (b.ee?.value ?? Infinity));\n\n      html += '<div class=\"tds-section-label\">Priority queue</div><div class=\"tds-card\">';\n      withEE.forEach((e, i) => {\n        html += `\n          <div class=\"tds-employee-row\">\n            <div class=\"tds-employee-top\">\n              <div>\n                <div class=\"tds-employee-name\">${i === 0 ? '\u25b6 ' : ''}${escapeHtml(String(e.name))}</div>\n                <div class=\"tds-employee-meta\">${escapeHtml(String(e.position))}</div>\n              </div>\n              <div class=\"tds-row-value\">${e.ee ? e.ee.value : '<span class=\"tds-v-dim\">no EE field</span>'}</div>\n            </div>\n          </div>`;\n      });\n      html += '</div>';\n    } else {\n      html += `<div class=\"tds-box tds-box-neutral\" id=\"tds-training-loading\">\n        Reading Torn training history",
-" and calculating fair-share debt\u2026\n      </div>`;\n      el.innerHTML = html;\n      bindTrainingModeButtons(panel);\n      await renderRotationalDebt(panel, employees, results);\n      return;\n    }\n\n    el.innerHTML = html;\n    bindTrainingModeButtons(panel);\n  }\n\n  function bindTrainingModeButtons(panel) {\n    const el = panel.querySelector('[data-tabpanel=\"training\"]');\n    if (!el) return;\n\n    el.querySelectorAll('[data-trainmode]').forEach((seg) => {\n      seg.addEventListener('click', () => {\n        state.trainingMode = seg.dataset.trainmode;\n        el.querySelectorAll('[data-trainmode]').forEach((button) => {\n          button.classList.toggle('tds-segment-active', button === seg);\n        });\n        renderTrainingTab(panel).catch((err) => {\n          console.error('[TDS] Training tab render failed:', err);\n        });\n      });\n    });\n  }\n\n  async function renderRotationalDebt(panel, employees, results) {\n    const el = panel.querySelector('[data-tabpanel=\"training\"]');\n    if (!el || state.trainingMode !== 'rotational') return;\n\n    let sources;\n    try {\n      sources = await fetchTrainingHistorySources(results);\n    } catch (err) {\n      el.innerHTML += `<div class=\"tds-box tds-box-danger\"><strong>Training history failed:</strong> ${escapeHtml(String(err.reason || err.message || err))}</div>`;\n      return;\n    }\n\n    const newsParsed = collectTrainingEvents(sources.newsRaw, employees);\n    const logParsed = collectTrainingEvents(sources.logRaw, employees);\n\n    // Prefer the union but deduplicate mirrored news/log records.\n    const events = mergeTrainingEventSources(newsParsed.events, logParsed.events);\n\n    const allSourceEntries = [\n      ...newsParsed.sourceEntries,\n      ...logParsed.sourceEntries,\n    ];\n    const coverageStart = allSourceEntries.lengt",
-"h\n      ? Math.min(...allSourceEntries.map((entry) => Number(entry.timestamp)).filter(Number.isFinite))\n      : null;\n\n    const loading = el.querySelector('#tds-training-loading');\n    if (loading) loading.remove();\n\n    if (!events.length) {\n      let detail = '';\n      if (newsParsed.sourceEntries.length || logParsed.sourceEntries.length) {\n        detail = `Torn history was readable (${formatNumber(newsParsed.sourceEntries.length + logParsed.sourceEntries.length)} entries inspected), but no employee-training events were recognised.`;\n      } else {\n        detail = 'No readable company-news or user-log history was returned.';\n      }\n\n      el.insertAdjacentHTML('beforeend', `\n        <div class=\"tds-box tds-box-warn\">\n          <strong>No training events matched yet.</strong> ${escapeHtml(detail)}\n          The parser deliberately refuses to invent train counts. If you have recently trained an employee, send me the Training tab after that action and we can map Torn\u2019s exact live event wording/fields.\n        </div>\n        <div class=\"tds-card\">\n          <div class=\"tds-row\"><span class=\"tds-row-label\">Company-news entries inspected</span><span class=\"tds-row-value\">${formatNumber(newsParsed.sourceEntries.length)}</span></div>\n          <div class=\"tds-row\"><span class=\"tds-row-label\">User-log entries inspected</span><span class=\"tds-row-value\">${formatNumber(logParsed.sourceEntries.length)}</span></div>\n        </div>\n      `);\n      return;\n    }\n\n    const debt = calculateRotationalDebt(employees, events, coverageStart);\n    const next = debt.rows.find((row) => row.eligibleWeight > 0) || null;\n\n    let html = `\n      <div class=\"tds-box tds-box-info\">\n        <strong>Rotational / Debt is live.</strong>\n        It found <strong>${formatNumber(events.reduce((sum, ",
-"event) => sum + event.quantity, 0))}</strong> train(s) across\n        ${formatTrainingCoverage(coverageStart)} of returned history.\n        Fair share is weighted by how long each current employee was eligible during that same history window.\n      </div>`;\n\n    if (next) {\n      html += `\n        <div class=\"tds-box ${next.debt > 0.05 ? 'tds-box-warn' : 'tds-box-info'}\">\n          <strong>Train next:</strong> ${escapeHtml(String(next.employee.name))}\n          ${next.debt > 0.05 ? ` \u2014 approximately <strong>${next.debt.toFixed(2)}</strong> train(s) behind their fair share.` : ' \u2014 the rotation is currently close to balanced.'}\n        </div>`;\n    }\n\n    html += `\n      <div class=\"tds-card\">\n        <div class=\"tds-row\"><span class=\"tds-row-label\">Training events recognised</span><span class=\"tds-row-value\">${formatNumber(events.length)}</span></div>\n        <div class=\"tds-row\"><span class=\"tds-row-label\">Trains represented</span><span class=\"tds-row-value\">${formatNumber(debt.totalObserved)}</span></div>\n        <div class=\"tds-row\"><span class=\"tds-row-label\">History coverage</span><span class=\"tds-row-value\">${escapeHtml(formatTrainingCoverage(coverageStart))}</span></div>\n        <div class=\"tds-row\"><span class=\"tds-row-label\">Company-news entries inspected</span><span class=\"tds-row-value\">${formatNumber(newsParsed.sourceEntries.length)}</span></div>\n        <div class=\"tds-row\"><span class=\"tds-row-label\">User-log entries inspected</span><span class=\"tds-row-value\">${formatNumber(logParsed.sourceEntries.length)}</span></div>\n      </div>\n\n      <div class=\"tds-section-label\">Rotational queue</div>\n      <div style=\"overflow-x:auto;\">\n        <table class=\"tds-table tds-training-debt-table\">\n          <thead>\n            <tr>\n              <th>#</th>\n            ",
-"  <th>Employee</th>\n              <th>Position</th>\n              <th>Eligible Days*</th>\n              <th>Received</th>\n              <th>Fair Share</th>\n              <th>Debt</th>\n              <th>Last 7d</th>\n              <th>Last 30d</th>\n              <th>Last Train</th>\n            </tr>\n          </thead>\n          <tbody>`;\n\n    debt.rows.forEach((row, index) => {\n      const debtClass = row.debt > 0.05\n        ? 'tds-v-bad'\n        : row.debt < -0.05\n          ? 'tds-v-good'\n          : '';\n\n      const debtText = `${row.debt > 0 ? '+' : ''}${row.debt.toFixed(2)}`;\n      const lastTrain = row.lastTrain ? formatTimestampRelative(row.lastTrain) : 'None in history';\n\n      html += `\n        <tr>\n          <td>${index + 1}</td>\n          <td><strong>${index === 0 ? '\u25b6 ' : ''}${escapeHtml(String(row.employee.name))}</strong></td>\n          <td>${escapeHtml(String(row.employee.position || '\u2014'))}</td>\n          <td>${row.eligibleWeight.toFixed(1)}</td>\n          <td>${formatNumber(row.actual)}</td>\n          <td>${row.expected.toFixed(2)}</td>\n          <td class=\"${debtClass}\"><strong>${debtText}</strong></td>\n          <td>${formatNumber(row.trains7)}</td>\n          <td>${formatNumber(row.trains30)}</td>\n          <td>${escapeHtml(lastTrain)}</td>\n        </tr>`;\n    });\n\n    html += `\n          </tbody>\n        </table>\n      </div>\n\n      <div class=\"tds-box tds-box-neutral\" style=\"margin-top:10px;\">\n        <strong>How debt is calculated:</strong> actual trains observed in Torn history are distributed as a fair-share target across current employees, weighted by eligible time in the same returned history window. Employees are treated as training-eligible after their first 3 days. <strong>Debt = Fair Share \u2212 Received.</strong>\n        Positive/red means owed tr",
-"ains; negative/green means ahead of the rotation.\n        <br><br>\n        *Eligible Days is limited to the history Torn actually returned \u2014 this is not presented as an all-time figure unless the returned history genuinely covers the employee\u2019s full tenure.\n      </div>`;\n\n    el.insertAdjacentHTML('beforeend', html);\n  }\n\n\n  // =======================================================================\n  // COMPARE TAB\n  // =======================================================================\n  const BENCHMARK_CACHE_TTL_MS = 4 * 60 * 60 * 1000;\n\n  function getOwnCompanyCompareInfo(profile, results) {\n    if (!profile || typeof profile !== 'object') {\n      return { id: null, name: null, typeId: null, typeName: null, rating: null };\n    }\n\n    const candidates = [profile];\n    for (const key of ['company', 'profile', 'data']) {\n      if (profile[key] && typeof profile[key] === 'object' && !Array.isArray(profile[key])) {\n        candidates.push(profile[key]);\n      }\n    }\n\n    let id = null;\n    let name = null;\n    let typeId = null;\n    let typeName = null;\n    let rating = null;\n\n    for (const obj of candidates) {\n      if (id === null) {\n        id = numericValue(obj.id ?? obj.company_id ?? obj.companyId);\n      }\n\n      if (!name) {\n        const nameValue = obj.name ?? obj.company_name ?? obj.companyName;\n        if (nameValue !== null && nameValue !== undefined && String(nameValue).trim()) {\n          name = String(nameValue).trim();\n        }\n      }\n\n      if (rating === null) {\n        rating = numericValue(obj.rating ?? obj.star_rating ?? obj.stars);\n      }\n\n      const typeValue = obj.company_type ?? obj.type_id ?? obj.companyType ?? obj.type;\n      if (typeValue && typeof typeValue === 'object') {\n        if (typeId === null) typeId = numericValue(typeValue",
-".id ?? typeValue.type_id ?? typeValue.type);\n        if (!typeName) typeName = typeValue.name ?? typeValue.type_name ?? null;\n      } else if (typeId === null) {\n        typeId = numericValue(typeValue);\n      }\n    }\n\n    if (typeId === null) {\n      typeId = numericValue(findValueDeep(profile, ['company_type', 'type_id', 'companyType']));\n    }\n    if (rating === null) {\n      rating = numericValue(findValueDeep(profile, ['rating', 'star_rating', 'stars']));\n    }\n\n    if (typeId !== null && !typeName) {\n      typeName = resolveCompanyTypeName(findRaw(results, 'torn', 'companies'), typeId);\n    }\n\n    if (!name) {\n      const deepName = findValueDeep(profile, ['name', 'company_name', 'companyName']);\n      if (deepName !== null && deepName !== undefined && String(deepName).trim()) {\n        name = String(deepName).trim();\n      }\n    }\n\n    return { id, name, typeId, typeName, rating };\n  }\n\n  function buildCompareFilters(typeId, tier, ownRating) {\n    const filters = [`type:Equal:${typeId}`];\n\n    if (tier === 'same' && ownRating !== null) {\n      filters.push(`rating:=:${ownRating}`);\n    } else if (tier === 'mid') {\n      filters.push('rating:>=:3', 'rating:<=:5');\n    } else if (tier === 'top') {\n      filters.push('rating:>=:8', 'rating:<=:10');\n    }\n\n    return filters.join(',');\n  }\n\n  async function fetchBenchmarkCompanies(typeId, tier, ownRating, offset = 0) {\n    // company/search is the correct v2 endpoint for Compare because Torn\n    // explicitly exposes filtering by company type, rating, daily/weekly\n    // income and daily/weekly customers here.\n    const filters = buildCompareFilters(typeId, tier, ownRating);\n    return ApiClient.callV2('company/search', {\n      filters,\n      limit: 100,\n      offset,\n      striptags: 'true',\n    });\n  }\n\n  function ",
-"extractCompareCompanies(data) {\n    if (!data || typeof data !== 'object') return [];\n\n    for (const key of ['companies', 'company_search', 'results', 'data']) {\n      const value = data[key];\n      if (Array.isArray(value)) return value;\n      if (value && typeof value === 'object' && !Array.isArray(value)) {\n        const values = Object.values(value).filter((x) => x && typeof x === 'object');\n        if (values.length) return values;\n      }\n    }\n\n    const seen = new WeakSet();\n    let found = null;\n\n    function walk(value) {\n      if (found || !value || typeof value !== 'object' || seen.has(value)) return;\n      seen.add(value);\n\n      if (Array.isArray(value) && value.length && value.every((x) => x && typeof x === 'object')) {\n        const keys = new Set(value.flatMap((x) => Object.keys(x)));\n        if ([...keys].some((k) => /company|name|daily.*income|weekly.*income|rating/i.test(k))) {\n          found = value;\n          return;\n        }\n      }\n\n      for (const child of Object.values(value)) {\n        if (child && typeof child === 'object') walk(child);\n        if (found) return;\n      }\n    }\n\n    walk(data);\n    return found || [];\n  }\n\n  function compareField(row, names, pattern = null) {\n    if (!row || typeof row !== 'object') return null;\n\n    for (const name of names) {\n      if (Object.prototype.hasOwnProperty.call(row, name) &&\n          row[name] !== null &&\n          row[name] !== undefined) {\n        return row[name];\n      }\n    }\n\n    if (pattern) {\n      const entry = Object.entries(row).find(([k, v]) =>\n        pattern.test(k) && v !== null && v !== undefined\n      );\n      if (entry) return entry[1];\n    }\n\n    return null;\n  }\n\n  function normalizeCompareCompany(row) {\n    return {\n      raw: row,\n      id: numericValue(compareField(\n   ",
-"     row,\n        ['id', 'company_id', 'companyId'],\n        /^id$|company.*id/i\n      )),\n      name: compareField(\n        row,\n        ['name', 'company_name', 'companyName'],\n        /^name$|company.*name/i\n      ),\n      rating: numericValue(compareField(\n        row,\n        ['rating', 'stars', 'star_rating', 'starRating'],\n        /^rating$|^stars$|star.*rating/i\n      )),\n      dailyIncome: numericValue(compareField(\n        row,\n        ['daily_income', 'dailyIncome'],\n        /daily.*income/i\n      )),\n      weeklyIncome: numericValue(compareField(\n        row,\n        ['weekly_income', 'weeklyIncome'],\n        /weekly.*income/i\n      )),\n      dailyCustomers: numericValue(compareField(\n        row,\n        ['daily_customers', 'dailyCustomers'],\n        /daily.*customer/i\n      )),\n      weeklyCustomers: numericValue(compareField(\n        row,\n        ['weekly_customers', 'weeklyCustomers'],\n        /weekly.*customer/i\n      )),\n      employees: numericValue(compareField(\n        row,\n        ['employees', 'employees_current', 'employeesCurrent'],\n        /^employees$|employees.*current/i\n      )),\n    };\n  }\n\n  function compareTierLabel(tier, ownRating) {\n    if (tier === 'same') return ownRating !== null ? `Same Rating (${ownRating}\u2605)` : 'Same Rating';\n    if (tier === 'mid') return '3\u20135\u2605';\n    if (tier === 'top') return '8\u201310\u2605';\n    return 'All Ratings';\n  }\n\n\n  function parseCsvLine(line) {\n    const out = [];\n    let value = '';\n    let quoted = false;\n\n    for (let i = 0; i < line.length; i += 1) {\n      const ch = line[i];\n      if (ch === '\"') {\n        if (quoted && line[i + 1] === '\"') {\n          value += '\"';\n          i += 1;\n        } else {\n          quoted = !quoted;\n        }\n      } else if (ch === ',' && !quoted) {\n        out.push(value);\n ",
-"       value = '';\n      } else {\n        value += ch;\n      }\n    }\n    out.push(value);\n    return out;\n  }\n\n  function normalizeCsvHeader(value) {\n    return String(value || '')\n      .trim()\n      .toLowerCase()\n      .replace(/^\\uFEFF/, '')\n      .replace(/[\\s-]+/g, '_');\n  }\n\n  function parseCompanySnapshotCsv(csvText) {\n    const lines = String(csvText || '')\n      .split(/\\r?\\n/)\n      .filter((line) => line.trim().length > 0);\n\n    if (lines.length < 2) return [];\n\n    const headers = parseCsvLine(lines[0]).map(normalizeCsvHeader);\n    const rows = [];\n\n    for (let i = 1; i < lines.length; i += 1) {\n      const values = parseCsvLine(lines[i]);\n      const row = {};\n      headers.forEach((header, index) => {\n        row[header] = values[index] ?? '';\n      });\n      rows.push(row);\n    }\n\n    return rows;\n  }\n\n  function snapshotNumber(row, names) {\n    for (const name of names) {\n      if (!Object.prototype.hasOwnProperty.call(row, name)) continue;\n      const raw = row[name];\n      if (raw === '' || raw === null || raw === undefined) continue;\n      const cleaned = String(raw).replace(/[$,\\s]/g, '');\n      const n = Number(cleaned);\n      if (Number.isFinite(n)) return n;\n    }\n    return null;\n  }\n\n  function snapshotCompanyId(row) {\n    return snapshotNumber(row, ['id', 'company_id', 'companyid']);\n  }\n\n  async function getCompanySnapshotMap({ force = false } = {}) {\n    const cached = state.benchmark.snapshot;\n    // Snapshot changes only daily; 30 minutes is conservative and avoids\n    // repeatedly downloading the all-company CSV while switching filters.\n    const ttl = 30 * 60 * 1000;\n    if (!force && cached && Date.now() - cached.timestamp < ttl) {\n      return cached.map;\n    }\n\n    const csv = await ApiClient.callV2Text('company/snapshot');\n    cons",
-"t rows = parseCompanySnapshotCsv(csv);\n    const map = new Map();\n\n    for (const row of rows) {\n      const id = snapshotCompanyId(row);\n      if (id === null) continue;\n      map.set(String(id), {\n        dailyIncome: snapshotNumber(row, ['daily_income', 'dailyincome']),\n        weeklyIncome: snapshotNumber(row, ['weekly_income', 'weeklyincome']),\n        dailyCustomers: snapshotNumber(row, ['daily_customers', 'dailycustomers']),\n        weeklyCustomers: snapshotNumber(row, ['weekly_customers', 'weeklycustomers']),\n      });\n    }\n\n    state.benchmark.snapshot = {\n      timestamp: Date.now(),\n      map,\n    };\n    return map;\n  }\n\n  function mergeCompareFinancials(rows, snapshotMap) {\n    if (!snapshotMap || !snapshotMap.size) return rows;\n\n    return rows.map((row) => {\n      if (row.id === null) return row;\n      const snap = snapshotMap.get(String(row.id));\n      if (!snap) return row;\n\n      return {\n        ...row,\n        dailyIncome: row.dailyIncome ?? snap.dailyIncome,\n        weeklyIncome: row.weeklyIncome ?? snap.weeklyIncome,\n        dailyCustomers: row.dailyCustomers ?? snap.dailyCustomers,\n        weeklyCustomers: row.weeklyCustomers ?? snap.weeklyCustomers,\n      };\n    });\n  }\n\n  function renderBenchmarkTab(panel) {\n    const el = panel.querySelector('[data-tabpanel=\"benchmark\"]');\n    const results = state.lastResults;\n    const profile = results ? findRaw(results, 'company', 'profile') : null;\n    const own = getOwnCompanyCompareInfo(profile, results);\n\n    const typeLabel = own.typeName\n      ? `${escapeHtml(String(own.typeName))} (${escapeHtml(String(own.typeId))})`\n      : own.typeId !== null\n        ? `Company type ${escapeHtml(String(own.typeId))}`\n        : 'Not detected';\n\n    let html = `\n      <div class=\"tds-box tds-box-neutral\">\n        Com",
-"pare uses Torn API v2's <code>/company/search</code> endpoint so company type,\n        star rating and financial/customer comparison fields come from the same search response.\n        This comparison does not require director access.\n      </div>\n\n      <div class=\"tds-card\">\n        <div class=\"tds-row\">\n          <span class=\"tds-row-label\">Detected company type</span>\n          <span class=\"tds-row-value\">${typeLabel}</span>\n        </div>\n        ${own.rating !== null\n          ? `<div class=\"tds-row\"><span class=\"tds-row-label\">Your rating</span><span class=\"tds-row-value\">${escapeHtml(String(own.rating))}\u2605</span></div>`\n          : ''}\n      </div>\n\n      <div class=\"tds-segmented\">\n        <div class=\"tds-segment ${state.benchmark.tier === 'same' ? 'tds-segment-active' : ''}\" data-tier=\"same\">SAME RATING${own.rating !== null ? ` (${own.rating}\u2605)` : ''}</div>\n        <div class=\"tds-segment ${state.benchmark.tier === 'mid' ? 'tds-segment-active' : ''}\" data-tier=\"mid\">3\u20135\u2605</div>\n        <div class=\"tds-segment ${state.benchmark.tier === 'top' ? 'tds-segment-active' : ''}\" data-tier=\"top\">8\u201310\u2605 TOP</div>\n        <div class=\"tds-segment ${state.benchmark.tier === 'all' ? 'tds-segment-active' : ''}\" data-tier=\"all\">ALL RATINGS</div>\n      </div>\n\n      <button class=\"tds-btn\" id=\"tds-bench-reload\">\u21bb Refresh Compare</button>\n      <div id=\"tds-bench-results\" style=\"margin-top:10px;\"></div>\n    `;\n\n    el.innerHTML = html;\n\n    el.querySelectorAll('[data-tier]').forEach((seg) => {\n      seg.addEventListener('click', () => {\n        state.benchmark.tier = seg.dataset.tier;\n\n        el.querySelectorAll('[data-tier]').forEach((button) => {\n          button.classList.toggle('tds-segment-active', button === seg);\n        });\n\n        runBenchmark(panel);\n      });\n    });\n\n",
-"    el.querySelector('#tds-bench-reload').addEventListener('click', () =>\n      runBenchmark(panel, { force: true })\n    );\n\n    if (own.typeId === null) {\n      el.querySelector('#tds-bench-results').innerHTML =\n        `<div class=\"tds-box tds-box-warn\">I couldn't detect your company type ID from company/profile, so Compare cannot build the Torn search filter.</div>`;\n      return;\n    }\n\n    if (state.benchmark.tier === 'same' && own.rating === null) {\n      state.benchmark.tier = 'all';\n      el.querySelectorAll('[data-tier]').forEach((button) => {\n        button.classList.toggle('tds-segment-active', button.dataset.tier === 'all');\n      });\n    }\n\n    setTimeout(() => runBenchmark(panel), 0);\n  }\n\n  async function runBenchmark(panel, { force = false } = {}) {\n    const el = panel.querySelector('[data-tabpanel=\"benchmark\"]');\n    if (!el) return;\n\n    const results = state.lastResults;\n    const profile = results ? findRaw(results, 'company', 'profile') : null;\n    const own = getOwnCompanyCompareInfo(profile, results);\n    const resultsEl = el.querySelector('#tds-bench-results');\n\n    if (own.typeId === null) {\n      if (resultsEl) {\n        resultsEl.innerHTML =\n          `<div class=\"tds-box tds-box-warn\">Company type could not be detected.</div>`;\n      }\n      return;\n    }\n\n    const tier = state.benchmark.tier || 'same';\n    const cacheKey = `${own.typeId}:${tier}:${tier === 'same' ? own.rating ?? 'unknown' : ''}`;\n    const cached = state.benchmark.cache[cacheKey];\n\n    if (!force &&\n        cached &&\n        Date.now() - cached.timestamp < BENCHMARK_CACHE_TTL_MS) {\n      renderBenchmarkResults(panel, cached.data, own, tier);\n      return;\n    }\n\n    if (resultsEl) {\n      resultsEl.innerHTML =\n        `<div class=\"tds-box tds-box-neutral\">Fetching ${escape",
-"Html(String(own.typeName || `company type ${own.typeId}`))} \u2014 ${escapeHtml(compareTierLabel(tier, own.rating))}\u2026</div>`;\n    }\n\n    try {\n      const data = await fetchBenchmarkCompanies(own.typeId, tier, own.rating, 0);\n      state.benchmark.cache[cacheKey] = {\n        timestamp: Date.now(),\n        data,\n      };\n      renderBenchmarkResults(panel, data, own, tier);\n    } catch (err) {\n      if (!resultsEl) return;\n\n      const permissionHint = err.code === 16\n        ? `<br><br><strong>Custom-key note:</strong> your current key may not include Company \u2192 Search. Generate the updated Custom API Key from Settings once.`\n        : '';\n\n      resultsEl.innerHTML =\n        `<div class=\"tds-box tds-box-danger\"><strong>Compare fetch failed:</strong> Torn error ${err.code ?? ''}: ${escapeHtml(String(err.reason || 'unknown'))}.${permissionHint}</div>`;\n    }\n  }\n\n\n  function averageNumeric(values) {\n    const nums = values.filter((v) => typeof v === 'number' && Number.isFinite(v));\n    if (!nums.length) return null;\n    return nums.reduce((sum, value) => sum + value, 0) / nums.length;\n  }\n\n  function medianNumeric(values) {\n    const nums = values\n      .filter((v) => typeof v === 'number' && Number.isFinite(v))\n      .sort((a, b) => a - b);\n    if (!nums.length) return null;\n    const mid = Math.floor(nums.length / 2);\n    return nums.length % 2\n      ? nums[mid]\n      : (nums[mid - 1] + nums[mid]) / 2;\n  }\n\n  function percentageDifference(value, baseline) {\n    if (typeof value !== 'number' || typeof baseline !== 'number' || baseline === 0) return null;\n    return ((value - baseline) / baseline) * 100;\n  }\n\n  function formatSignedPercent(value, digits = 1) {\n    if (typeof value !== 'number' || !Number.isFinite(value)) return '\u2014';\n    return `${value > 0 ? '+' : ''}${value.t",
-"oFixed(digits)}%`;\n  }\n\n  function formatPercentile(rank, total) {\n    if (!rank || !total || total < 1) return '\u2014';\n    if (total === 1) return '100th';\n    const percentile = Math.round(((total - rank) / (total - 1)) * 100);\n    return `${percentile}th percentile`;\n  }\n\n  function revenuePerCustomer(income, customers) {\n    if (typeof income !== 'number' || typeof customers !== 'number' || customers <= 0) return null;\n    return income / customers;\n  }\n\n  function compareValueClass(value, baseline) {\n    if (typeof value !== 'number' || typeof baseline !== 'number') return '';\n    return value >= baseline ? 'tds-v-good' : 'tds-v-bad';\n  }\n\n  function normalizeCompanyNameForMatch(value) {\n    return String(value || '')\n      .trim()\n      .toLowerCase()\n      .replace(/\\s+/g, ' ');\n  }\n\n  function isOwnCompareCompany(row, own) {\n    if (!row || !own) return false;\n\n    if (own.id !== null && row.id !== null &&\n        String(row.id) === String(own.id)) {\n      return true;\n    }\n\n    const ownName = normalizeCompanyNameForMatch(own.name);\n    const rowName = normalizeCompanyNameForMatch(row.name);\n    return Boolean(ownName && rowName && ownName === rowName);\n  }\n\n  async function renderBenchmarkResults(panel, data, own, tier) {\n    const el = panel.querySelector('[data-tabpanel=\"benchmark\"] #tds-bench-results');\n    if (!el) return;\n\n    const rawRows = extractCompareCompanies(data);\n    let rows = rawRows.map(normalizeCompareCompany);\n\n    if (!rows.length) {\n      el.innerHTML = `\n        <div class=\"tds-card\">\n          <div class=\"tds-row\"><span class=\"tds-row-label\">Company type</span><span class=\"tds-row-value\">${escapeHtml(String(own.typeName || own.typeId))}</span></div>\n          <div class=\"tds-row\"><span class=\"tds-row-label\">Selected rating</span><span cla",
-"ss=\"tds-row-value\">${escapeHtml(compareTierLabel(tier, own.rating))}</span></div>\n          <div class=\"tds-row\"><span class=\"tds-row-label\">Companies returned</span><span class=\"tds-row-value\">0</span></div>\n        </div>\n        <div class=\"tds-box tds-box-neutral\">Torn returned no companies matching this search filter.</div>`;\n      return;\n    }\n\n    // company/search is ideal for locating/filtering companies, but Torn may\n    // omit financial fields from its returned row shape. In that case enrich\n    // the same company IDs from the daily company/snapshot CSV.\n    const needsSnapshot = rows.some((row) =>\n      row.dailyIncome === null ||\n      row.weeklyIncome === null ||\n      row.dailyCustomers === null ||\n      row.weeklyCustomers === null\n    );\n\n    let snapshotUsed = false;\n    let snapshotError = null;\n    if (needsSnapshot) {\n      try {\n        const snapshotMap = await getCompanySnapshotMap();\n        rows = mergeCompareFinancials(rows, snapshotMap);\n        snapshotUsed = true;\n      } catch (err) {\n        snapshotError = err;\n        console.warn('[TDS] Compare snapshot financial enrichment failed:', err);\n      }\n    }\n\n    // The search endpoint is already filtered server-side. This secondary\n    // check protects the UI if Torn ever returns an out-of-band row.\n    const filtered = rows.filter((row) => {\n      if (tier === 'all') return true;\n      if (row.rating === null) return true;\n      if (tier === 'same') {\n        return own.rating === null || row.rating === own.rating;\n      }\n      if (tier === 'mid') return row.rating >= 3 && row.rating <= 5;\n      if (tier === 'top') return row.rating >= 8 && row.rating <= 10;\n      return true;\n    });\n\n    const usableRows = filtered.length ? filtered : rows;\n\n    const hasDailyIncome = usableRows.so",
-"me((r) => r.dailyIncome !== null);\n    const hasWeeklyIncome = usableRows.some((r) => r.weeklyIncome !== null);\n    const hasDailyCustomers = usableRows.some((r) => r.dailyCustomers !== null);\n    const hasWeeklyCustomers = usableRows.some((r) => r.weeklyCustomers !== null);\n\n    const metric = hasWeeklyIncome\n      ? 'weeklyIncome'\n      : hasDailyIncome\n        ? 'dailyIncome'\n        : null;\n\n    const metricLabel = metric === 'weeklyIncome'\n      ? 'Weekly Income'\n      : metric === 'dailyIncome'\n        ? 'Daily Income'\n        : 'Company';\n\n    const sorted = [...usableRows].sort((a, b) => {\n      if (!metric) return String(a.name || '').localeCompare(String(b.name || ''));\n      return (b[metric] ?? -1) - (a[metric] ?? -1);\n    });\n\n    const ownIndex = sorted.findIndex((row) => isOwnCompareCompany(row, own));\n    let ownRow = ownIndex >= 0 ? sorted[ownIndex] : null;\n\n    // If company/search does not include our own row, still build \"Your Company\"\n    // from the already-loaded company profile/detailed response. This makes the\n    // summary visible even when Torn's search result set omits the current company.\n    if (!ownRow) {\n      const currentResults = state.lastResults;\n      const ownProfile = currentResults ? findRaw(currentResults, 'company', 'profile') : null;\n      const ownDetailed = currentResults ? findRaw(currentResults, 'company', 'detailed') : null;\n      const ownCombined = { ...(ownProfile || {}), ...(ownDetailed || {}) };\n\n      ownRow = {\n        id: own.id,\n        name: own.name,\n        rating: own.rating,\n        dailyIncome: numericValue(findValueDeep(ownCombined, ['daily_income', 'dailyIncome'])),\n        weeklyIncome: numericValue(findValueDeep(ownCombined, ['weekly_income', 'weeklyIncome'])),\n        dailyCustomers: numericValue(find",
-"ValueDeep(ownCombined, ['daily_customers', 'dailyCustomers'])),\n        weeklyCustomers: numericValue(findValueDeep(ownCombined, ['weekly_customers', 'weeklyCustomers'])),\n        employees: null,\n        raw: ownCombined,\n      };\n\n      const hasAnyOwnValue =\n        ownRow.dailyIncome !== null ||\n        ownRow.weeklyIncome !== null ||\n        ownRow.dailyCustomers !== null ||\n        ownRow.weeklyCustomers !== null;\n\n      if (!hasAnyOwnValue) ownRow = null;\n    }\n\n    const weeklyIncomeValues = usableRows.map((r) => r.weeklyIncome);\n    const dailyIncomeValues = usableRows.map((r) => r.dailyIncome);\n    const weeklyCustomerValues = usableRows.map((r) => r.weeklyCustomers);\n    const dailyCustomerValues = usableRows.map((r) => r.dailyCustomers);\n\n    const avgWeeklyIncome = averageNumeric(weeklyIncomeValues);\n    const medianWeeklyIncome = medianNumeric(weeklyIncomeValues);\n    const avgDailyIncome = averageNumeric(dailyIncomeValues);\n    const medianDailyIncome = medianNumeric(dailyIncomeValues);\n    const avgWeeklyCustomers = averageNumeric(weeklyCustomerValues);\n    const medianWeeklyCustomers = medianNumeric(weeklyCustomerValues);\n    const avgDailyCustomers = averageNumeric(dailyCustomerValues);\n    const medianDailyCustomers = medianNumeric(dailyCustomerValues);\n\n    const totalWeeklyIncome = weeklyIncomeValues\n      .filter((v) => typeof v === 'number' && Number.isFinite(v))\n      .reduce((sum, v) => sum + v, 0);\n\n    const ownWeeklyIncome = ownRow?.weeklyIncome ?? null;\n    const ownDailyIncome = ownRow?.dailyIncome ?? null;\n    const ownWeeklyCustomers = ownRow?.weeklyCustomers ?? null;\n    const ownDailyCustomers = ownRow?.dailyCustomers ?? null;\n\n    const incomeAbove = ownIndex > 0 ? sorted[ownIndex - 1]?.[metric] ?? null : null;\n    const incomeLeader =",
-" sorted.length ? sorted[0]?.[metric] ?? null : null;\n    const ownMetricValue = ownRow && metric ? ownRow[metric] : null;\n\n    const gapToAbove =\n      typeof incomeAbove === 'number' && typeof ownMetricValue === 'number'\n        ? Math.max(0, incomeAbove - ownMetricValue)\n        : null;\n    const gapToLeader =\n      typeof incomeLeader === 'number' && typeof ownMetricValue === 'number'\n        ? Math.max(0, incomeLeader - ownMetricValue)\n        : null;\n\n    const ownWeeklyRpc = revenuePerCustomer(ownWeeklyIncome, ownWeeklyCustomers);\n    const ownDailyRpc = revenuePerCustomer(ownDailyIncome, ownDailyCustomers);\n\n    const weeklyRpcRows = usableRows\n      .map((r) => ({\n        row: r,\n        value: revenuePerCustomer(r.weeklyIncome, r.weeklyCustomers),\n      }))\n      .filter((x) => typeof x.value === 'number')\n      .sort((a, b) => b.value - a.value);\n\n    const dailyRpcRows = usableRows\n      .map((r) => ({\n        row: r,\n        value: revenuePerCustomer(r.dailyIncome, r.dailyCustomers),\n      }))\n      .filter((x) => typeof x.value === 'number')\n      .sort((a, b) => b.value - a.value);\n\n    const avgWeeklyRpc = averageNumeric(weeklyRpcRows.map((x) => x.value));\n    const medianWeeklyRpc = medianNumeric(weeklyRpcRows.map((x) => x.value));\n    const avgDailyRpc = averageNumeric(dailyRpcRows.map((x) => x.value));\n\n    const ownWeeklyRpcIndex = weeklyRpcRows.findIndex((x) =>\n      isOwnCompareCompany(x.row, own)\n    );\n\n    const weeklyCustomerRankRows = usableRows\n      .filter((r) => typeof r.weeklyCustomers === 'number')\n      .sort((a, b) => b.weeklyCustomers - a.weeklyCustomers);\n    const ownWeeklyCustomerIndex = weeklyCustomerRankRows.findIndex((r) =>\n      isOwnCompareCompany(r, own)\n    );\n\n    let html = `<div class=\"tds-card\">`;\n    html += `<div class=",
-"\"tds-row\"><span class=\"tds-row-label\">Company type</span><span class=\"tds-row-value\">${escapeHtml(String(own.typeName || own.typeId))}${own.typeName ? ` (${escapeHtml(String(own.typeId))})` : ''}</span></div>`;\n    html += `<div class=\"tds-row\"><span class=\"tds-row-label\">Selected rating</span><span class=\"tds-row-value\">${escapeHtml(compareTierLabel(tier, own.rating))}</span></div>`;\n    html += `<div class=\"tds-row\"><span class=\"tds-row-label\">Companies returned</span><span class=\"tds-row-value\">${formatNumber(sorted.length)}</span></div>`;\n\n    if (ownIndex >= 0 && metric) {\n      html += `<div class=\"tds-row\"><span class=\"tds-row-label\">Your rank by ${metricLabel}</span><span class=\"tds-row-value\">#${ownIndex + 1} / ${sorted.length} \u00b7 ${formatPercentile(ownIndex + 1, sorted.length)}</span></div>`;\n    }\n\n    html += `</div>`;\n\n    if (ownRow) {\n      html += `<div class=\"tds-section-label\">Your company</div><div class=\"tds-card\">`;\n      html += `<div class=\"tds-row\"><span class=\"tds-row-label\">Company</span><span class=\"tds-row-value\">${escapeHtml(String(own.name || ownRow.name || 'Your company'))}</span></div>`;\n\n      if (ownWeeklyIncome !== null) {\n        html += `<div class=\"tds-row\"><span class=\"tds-row-label\">Weekly income</span><span class=\"tds-row-value ${compareValueClass(ownWeeklyIncome, avgWeeklyIncome)}\">${formatMoney(ownWeeklyIncome)}</span></div>`;\n        html += `<div class=\"tds-row\"><span class=\"tds-row-label\">vs weekly average</span><span class=\"tds-row-value ${compareValueClass(ownWeeklyIncome, avgWeeklyIncome)}\">${formatSignedPercent(percentageDifference(ownWeeklyIncome, avgWeeklyIncome))}</span></div>`;\n        html += `<div class=\"tds-row\"><span class=\"tds-row-label\">vs weekly median</span><span class=\"tds-row-value ${compareValueClass(ownWee",
-"klyIncome, medianWeeklyIncome)}\">${formatSignedPercent(percentageDifference(ownWeeklyIncome, medianWeeklyIncome))}</span></div>`;\n      }\n\n      if (ownDailyIncome !== null) {\n        html += `<div class=\"tds-row\"><span class=\"tds-row-label\">Daily income</span><span class=\"tds-row-value ${compareValueClass(ownDailyIncome, avgDailyIncome)}\">${formatMoney(ownDailyIncome)}</span></div>`;\n        html += `<div class=\"tds-row\"><span class=\"tds-row-label\">vs daily average</span><span class=\"tds-row-value ${compareValueClass(ownDailyIncome, avgDailyIncome)}\">${formatSignedPercent(percentageDifference(ownDailyIncome, avgDailyIncome))}</span></div>`;\n      }\n\n      if (ownWeeklyCustomers !== null) {\n        html += `<div class=\"tds-row\"><span class=\"tds-row-label\">Weekly customers</span><span class=\"tds-row-value ${compareValueClass(ownWeeklyCustomers, avgWeeklyCustomers)}\">${formatNumber(ownWeeklyCustomers)}</span></div>`;\n        html += `<div class=\"tds-row\"><span class=\"tds-row-label\">vs weekly-customer average</span><span class=\"tds-row-value ${compareValueClass(ownWeeklyCustomers, avgWeeklyCustomers)}\">${formatSignedPercent(percentageDifference(ownWeeklyCustomers, avgWeeklyCustomers))}</span></div>`;\n      }\n\n      if (ownDailyCustomers !== null) {\n        html += `<div class=\"tds-row\"><span class=\"tds-row-label\">Daily customers</span><span class=\"tds-row-value ${compareValueClass(ownDailyCustomers, avgDailyCustomers)}\">${formatNumber(ownDailyCustomers)}</span></div>`;\n      }\n\n      if (ownWeeklyRpc !== null) {\n        html += `<div class=\"tds-row\"><span class=\"tds-row-label\">Weekly revenue / customer</span><span class=\"tds-row-value ${compareValueClass(ownWeeklyRpc, avgWeeklyRpc)}\">${formatMoney(ownWeeklyRpc)}</span></div>`;\n        html += `<div class=\"tds-row\"><span cl",
-"ass=\"tds-row-label\">vs efficiency average</span><span class=\"tds-row-value ${compareValueClass(ownWeeklyRpc, avgWeeklyRpc)}\">${formatSignedPercent(percentageDifference(ownWeeklyRpc, avgWeeklyRpc))}</span></div>`;\n      }\n\n      if (ownIndex >= 0 && metric) {\n        html += `<div class=\"tds-row\"><span class=\"tds-row-label\">${metricLabel} rank</span><span class=\"tds-row-value\">#${ownIndex + 1} / ${sorted.length}</span></div>`;\n        html += `<div class=\"tds-row\"><span class=\"tds-row-label\">Percentile</span><span class=\"tds-row-value\">${formatPercentile(ownIndex + 1, sorted.length)}</span></div>`;\n      }\n\n      if (ownWeeklyCustomerIndex >= 0) {\n        html += `<div class=\"tds-row\"><span class=\"tds-row-label\">Weekly customer rank</span><span class=\"tds-row-value\">#${ownWeeklyCustomerIndex + 1} / ${weeklyCustomerRankRows.length}</span></div>`;\n      }\n\n      if (ownWeeklyRpcIndex >= 0) {\n        html += `<div class=\"tds-row\"><span class=\"tds-row-label\">Revenue / customer rank</span><span class=\"tds-row-value\">#${ownWeeklyRpcIndex + 1} / ${weeklyRpcRows.length}</span></div>`;\n      }\n\n      html += `</div>`;\n    }\n\n    if (ownRow && metric && typeof ownMetricValue === 'number') {\n      // If Torn omitted our company from the search list, determine the rank\n      // position from our own metric value so Targets can still be calculated.\n      const effectiveOwnIndex = ownIndex >= 0\n        ? ownIndex\n        : sorted.findIndex((row) => typeof row[metric] === 'number' && row[metric] <= ownMetricValue);\n\n      const resolvedOwnIndex = effectiveOwnIndex >= 0 ? effectiveOwnIndex : sorted.length;\n\n      const targetRows = [\n        { label: 'Next position', index: resolvedOwnIndex > 0 ? resolvedOwnIndex - 1 : null },\n        { label: 'Top 10', index: sorted.length >= 10 ? 9 : ",
-"null },\n        { label: 'Top 5', index: sorted.length >= 5 ? 4 : null },\n        { label: '#1', index: sorted.length >= 1 ? 0 : null },\n      ];\n\n      html += `<div class=\"tds-section-label\">Targets</div><div class=\"tds-card\">`;\n\n      for (const target of targetRows) {\n        if (target.index === null || target.index < 0 || target.index >= sorted.length) {\n          continue;\n        }\n\n        // If we're already above a target rank, report it as achieved.\n        if (resolvedOwnIndex <= target.index) {\n          html += `<div class=\"tds-row\"><span class=\"tds-row-label\">${target.label}</span><span class=\"tds-row-value tds-v-good\">Achieved</span></div>`;\n          continue;\n        }\n\n        const targetValue = sorted[target.index]?.[metric];\n        if (typeof targetValue !== 'number') continue;\n\n        // +1 avoids showing a zero gap when tied on the displayed metric.\n        const needed = Math.max(0, targetValue - ownMetricValue + 1);\n        const pctNeeded = ownMetricValue > 0 ? (needed / ownMetricValue) * 100 : null;\n\n        html += `<div class=\"tds-row\"><span class=\"tds-row-label\">${target.label}</span><span class=\"tds-row-value\">${formatMoney(needed)}${pctNeeded !== null ? ` (${pctNeeded.toFixed(1)}%)` : ''}</span></div>`;\n      }\n\n      html += `<div class=\"tds-row\"><span class=\"tds-row-label\">Target metric</span><span class=\"tds-row-value\">${escapeHtml(metricLabel)}</span></div>`;\n      html += `</div>`;\n    }\n\n    if (hasWeeklyIncome || hasDailyIncome) {\n      html += `<div class=\"tds-section-label\">Income performance</div><div class=\"tds-card\">`;\n\n      if (hasWeeklyIncome) {\n        html += `<div class=\"tds-row\"><span class=\"tds-row-label\">Average weekly income</span><span class=\"tds-row-value\">${avgWeeklyIncome !== null ? formatMoney(avgWeeklyIncom",
-"e) : '\u2014'}</span></div>`;\n        html += `<div class=\"tds-row\"><span class=\"tds-row-label\">Median weekly income</span><span class=\"tds-row-value\">${medianWeeklyIncome !== null ? formatMoney(medianWeeklyIncome) : '\u2014'}</span></div>`;\n        if (ownWeeklyIncome !== null) {\n          html += `<div class=\"tds-row\"><span class=\"tds-row-label\">Your weekly income vs average</span><span class=\"tds-row-value ${compareValueClass(ownWeeklyIncome, avgWeeklyIncome)}\">${formatSignedPercent(percentageDifference(ownWeeklyIncome, avgWeeklyIncome))}</span></div>`;\n          html += `<div class=\"tds-row\"><span class=\"tds-row-label\">Your weekly income vs median</span><span class=\"tds-row-value ${compareValueClass(ownWeeklyIncome, medianWeeklyIncome)}\">${formatSignedPercent(percentageDifference(ownWeeklyIncome, medianWeeklyIncome))}</span></div>`;\n          if (totalWeeklyIncome > 0) {\n            html += `<div class=\"tds-row\"><span class=\"tds-row-label\">Share of returned weekly income</span><span class=\"tds-row-value\">${((ownWeeklyIncome / totalWeeklyIncome) * 100).toFixed(2)}%</span></div>`;\n          }\n        }\n      }\n\n      if (hasDailyIncome) {\n        html += `<div class=\"tds-row\"><span class=\"tds-row-label\">Average daily income</span><span class=\"tds-row-value\">${avgDailyIncome !== null ? formatMoney(avgDailyIncome) : '\u2014'}</span></div>`;\n        html += `<div class=\"tds-row\"><span class=\"tds-row-label\">Median daily income</span><span class=\"tds-row-value\">${medianDailyIncome !== null ? formatMoney(medianDailyIncome) : '\u2014'}</span></div>`;\n      }\n\n      if (ownIndex >= 0 && metric) {\n        html += `<div class=\"tds-row\"><span class=\"tds-row-label\">Gap to company above you</span><span class=\"tds-row-value\">${gapToAbove !== null ? (gapToAbove === 0 ? 'You are #1' : formatMoney(gapToA",
-"bove)) : '\u2014'}</span></div>`;\n        html += `<div class=\"tds-row\"><span class=\"tds-row-label\">Gap to #1</span><span class=\"tds-row-value\">${gapToLeader !== null ? (gapToLeader === 0 ? 'You are #1' : formatMoney(gapToLeader)) : '\u2014'}</span></div>`;\n      }\n\n      html += `</div>`;\n    }\n\n    if (hasWeeklyCustomers || hasDailyCustomers) {\n      html += `<div class=\"tds-section-label\">Customer performance</div><div class=\"tds-card\">`;\n\n      if (hasWeeklyCustomers) {\n        html += `<div class=\"tds-row\"><span class=\"tds-row-label\">Average weekly customers</span><span class=\"tds-row-value\">${avgWeeklyCustomers !== null ? formatNumber(Math.round(avgWeeklyCustomers)) : '\u2014'}</span></div>`;\n        html += `<div class=\"tds-row\"><span class=\"tds-row-label\">Median weekly customers</span><span class=\"tds-row-value\">${medianWeeklyCustomers !== null ? formatNumber(Math.round(medianWeeklyCustomers)) : '\u2014'}</span></div>`;\n        if (ownWeeklyCustomerIndex >= 0) {\n          html += `<div class=\"tds-row\"><span class=\"tds-row-label\">Your weekly-customer rank</span><span class=\"tds-row-value\">#${ownWeeklyCustomerIndex + 1} / ${weeklyCustomerRankRows.length}</span></div>`;\n        }\n      }\n\n      if (hasDailyCustomers) {\n        html += `<div class=\"tds-row\"><span class=\"tds-row-label\">Average daily customers</span><span class=\"tds-row-value\">${avgDailyCustomers !== null ? formatNumber(Math.round(avgDailyCustomers)) : '\u2014'}</span></div>`;\n        html += `<div class=\"tds-row\"><span class=\"tds-row-label\">Median daily customers</span><span class=\"tds-row-value\">${medianDailyCustomers !== null ? formatNumber(Math.round(medianDailyCustomers)) : '\u2014'}</span></div>`;\n      }\n\n      html += `</div>`;\n    }\n\n    if ((hasWeeklyIncome && hasWeeklyCustomers) || (hasDailyIncome && hasDailyCustomers))",
-" {\n      html += `<div class=\"tds-section-label\">Revenue efficiency</div><div class=\"tds-card\">`;\n\n      if (hasWeeklyIncome && hasWeeklyCustomers) {\n        html += `<div class=\"tds-row\"><span class=\"tds-row-label\">Average weekly revenue / customer</span><span class=\"tds-row-value\">${avgWeeklyRpc !== null ? formatMoney(avgWeeklyRpc) : '\u2014'}</span></div>`;\n        html += `<div class=\"tds-row\"><span class=\"tds-row-label\">Median weekly revenue / customer</span><span class=\"tds-row-value\">${medianWeeklyRpc !== null ? formatMoney(medianWeeklyRpc) : '\u2014'}</span></div>`;\n        if (ownWeeklyRpc !== null) {\n          html += `<div class=\"tds-row\"><span class=\"tds-row-label\">Your weekly revenue / customer</span><span class=\"tds-row-value\">${formatMoney(ownWeeklyRpc)}</span></div>`;\n          html += `<div class=\"tds-row\"><span class=\"tds-row-label\">Your efficiency vs average</span><span class=\"tds-row-value ${compareValueClass(ownWeeklyRpc, avgWeeklyRpc)}\">${formatSignedPercent(percentageDifference(ownWeeklyRpc, avgWeeklyRpc))}</span></div>`;\n        }\n        if (ownWeeklyRpcIndex >= 0) {\n          html += `<div class=\"tds-row\"><span class=\"tds-row-label\">Revenue / customer rank</span><span class=\"tds-row-value\">#${ownWeeklyRpcIndex + 1} / ${weeklyRpcRows.length}</span></div>`;\n        }\n      }\n\n      if (hasDailyIncome && hasDailyCustomers && ownDailyRpc !== null) {\n        html += `<div class=\"tds-row\"><span class=\"tds-row-label\">Your daily revenue / customer</span><span class=\"tds-row-value\">${formatMoney(ownDailyRpc)}</span></div>`;\n        if (avgDailyRpc !== null) {\n          html += `<div class=\"tds-row\"><span class=\"tds-row-label\">Daily efficiency vs average</span><span class=\"tds-row-value ${compareValueClass(ownDailyRpc, avgDailyRpc)}\">${formatSignedPercent(percenta",
-"geDifference(ownDailyRpc, avgDailyRpc))}</span></div>`;\n        }\n      }\n\n      html += `</div>`;\n    }\n\n    const availableFinancialFields = [\n      hasDailyIncome ? 'Daily income' : null,\n      hasWeeklyIncome ? 'Weekly income' : null,\n      hasDailyCustomers ? 'Daily customers' : null,\n      hasWeeklyCustomers ? 'Weekly customers' : null,\n    ].filter(Boolean);\n\n    if (!availableFinancialFields.length) {\n      html += `<div class=\"tds-box tds-box-warn\">\n        Torn returned the companies, but no financial/customer figures could be matched for these rows.\n        ${snapshotError\n          ? `The Company Snapshot fallback also failed: ${escapeHtml(String(snapshotError.reason || 'unknown error'))}.`\n          : 'Compare will not invent financial values.'}\n      </div>`;\n    } else {\n      html += `<div class=\"tds-box tds-box-info\">\n        Financial fields available: <strong>${escapeHtml(availableFinancialFields.join(', '))}</strong>.\n        ${snapshotUsed ? 'Missing search values were filled from Torn\u2019s daily Company Snapshot.' : 'These values were supplied directly by Torn\u2019s company search response.'}\n      </div>`;\n    }\n\n    if (sorted.length > 25 || rows.length >= 100) {\n      html += `<div class=\"tds-box tds-box-warn\">\n        Showing <strong>${Math.min(25, sorted.length)} companies</strong> in this table. Summary statistics above use all <strong>${formatNumber(sorted.length)}</strong> companies returned by Torn.\n      </div>`;\n    }\n\n    if (ownIndex >= 25 && ownRow) {\n      html += `<div class=\"tds-box tds-box-info\">\n        Your company ranks <strong>#${ownIndex + 1}</strong>, so it falls outside the Top 25 table below.\n        Your figures are still included in all summary statistics.\n      </div>`;\n    }\n\n    html += `<div class=\"tds-section-label\">Top ${",
-"Math.min(25, sorted.length)}${metric ? ` \u2014 ${metricLabel}` : ''}</div>`;\n    html += `<div style=\"overflow-x:auto;\"><table class=\"tds-table tds-compare-table\"><thead><tr>\n      <th>#</th>\n      <th>Company</th>\n      <th>\u2605</th>\n      ${hasDailyIncome ? '<th>Daily Income</th>' : ''}\n      ${hasWeeklyIncome ? '<th>Weekly Income</th>' : ''}\n      ${hasDailyCustomers ? '<th>Daily Customers</th>' : ''}\n      ${hasWeeklyCustomers ? '<th>Weekly Customers</th>' : ''}\n    </tr></thead><tbody>`;\n\n    sorted.slice(0, 25).forEach((row, i) => {\n      const isYou =\n        own.id !== null &&\n        row.id !== null &&\n        String(row.id) === String(own.id);\n\n      html += `<tr style=\"${isYou ? 'color:var(--tds-accent,#3ddc84);font-weight:700;' : ''}\">\n        <td>${i + 1}</td>\n        <td>${escapeHtml(String(row.name ?? `#${row.id ?? '?'}`))}${isYou ? ' (you)' : ''}</td>\n        <td>${row.rating !== null ? `${escapeHtml(String(row.rating))}\u2605` : '\u2014'}</td>\n        ${hasDailyIncome ? `<td class=\"tds-num\">${row.dailyIncome !== null ? formatMoney(row.dailyIncome) : '\u2014'}</td>` : ''}\n        ${hasWeeklyIncome ? `<td class=\"tds-num\">${row.weeklyIncome !== null ? formatMoney(row.weeklyIncome) : '\u2014'}</td>` : ''}\n        ${hasDailyCustomers ? `<td class=\"tds-num\">${row.dailyCustomers !== null ? formatNumber(row.dailyCustomers) : '\u2014'}</td>` : ''}\n        ${hasWeeklyCustomers ? `<td class=\"tds-num\">${row.weeklyCustomers !== null ? formatNumber(row.weeklyCustomers) : '\u2014'}</td>` : ''}\n      </tr>`;\n    });\n\n    html += `</tbody></table></div>`;\n    el.innerHTML = html;\n  }\n\n\n  let footerTicker = null;\n\n  function formatElapsed(seconds) {\n    const total = Math.max(0, Math.floor(Number(seconds) || 0));\n    if (total < 60) return `${total}s`;\n    const minutes = Math.floor(total / 60);\n    const s",
-"ecs = total % 60;\n    if (minutes < 60) return `${minutes}:${String(secs).padStart(2, '0')}`;\n    const hours = Math.floor(minutes / 60);\n    const mins = minutes % 60;\n    return `${hours}:${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;\n  }\n\n  function updateFooter(panel) {\n    const status = panel.querySelector('#tds-footer-status');\n    if (!status) return;\n\n    if (!state.lastRunAt) {\n      status.textContent = 'Last run: Never';\n      return;\n    }\n\n    const secs = Math.floor((Date.now() - state.lastRunAt) / 1000);\n    status.textContent = `Last run: ${formatElapsed(secs)}`;\n  }\n\n  function startFooterTicker(panel) {\n    if (footerTicker) clearInterval(footerTicker);\n    updateFooter(panel);\n    footerTicker = setInterval(() => updateFooter(panel), 1000);\n  }\n\n  async function loadPersistedDiagnostic(panel) {\n    try {\n      const latest = await LocalDB.getLatest('diagnostics');\n      if (!latest?.results?.length) return false;\n\n      const results = latest.results;\n      const verdict = classifyAccess(results);\n      state.lastResults = results;\n      state.lastVerdict = verdict;\n      state.lastRunAt = Number(latest.timestamp) || Number(tdsGetValue(STORAGE_KEY_LAST_RUN_AT, 0)) || null;\n\n      if (state.lastRunAt) tdsSetValue(STORAGE_KEY_LAST_RUN_AT, state.lastRunAt);\n\n      renderOverviewTab(panel, results, verdict);\n      renderDiagnosticsTab(panel, results);\n      await renderFinanceTab(panel);\n      await renderStockTab(panel);\n      renderTrainingTab(panel).catch((err) => console.error('[TDS] Training render failed:', err));\n      renderBenchmarkTab(panel);\n      renderOptimizeTab(panel);\n      startFooterTicker(panel);\n      await checkLicense(panel);\n      return true;\n    } catch (err) {\n      console.warn('[TDS] Could not load persist",
-"ed diagnostics:', err);\n      return false;\n    }\n  }\n\n  async function runFullDiagnostic(panel, { force = false } = {}) {\n    if (state.diagnosticRunning) return;\n\n    if (force) {\n      tdsDeleteValue(STORAGE_KEY_LAST_RUN_AT);\n      try {\n        // Remove only the diagnostic capability records. Historical snapshots\n        // remain intact so the Finance trend is not destroyed by a rerun.\n        await LocalDB.clear('diagnostics');\n      } catch (err) {\n        console.warn('[TDS] Could not clear previous diagnostic state:', err);\n      }\n    }\n\n    const apiKey = tdsGetValue(STORAGE_KEY_APIKEY, '');\n    if (!apiKey) {\n      panel.querySelector('#tds-footer-status').textContent = 'Last run: Never';\n      switchTab(panel, 'settings');\n      return;\n    }\n\n    state.diagnosticRunning = true;\n    panel.querySelector('#tds-footer-status').textContent = 'Running diagnostic\\u2026';\n\n    try {\n      const results = await runDiagnostic();\n      const verdict = classifyAccess(results);\n      await takeSnapshotFromDiagnostic(results);\n\n      state.lastResults = results;\n      state.lastVerdict = verdict;\n      state.lastRunAt = Date.now();\n\n      tdsSetValue(STORAGE_KEY_LAST_RUN_AT, state.lastRunAt);\n\n      renderOverviewTab(panel, results, verdict);\n      renderDiagnosticsTab(panel, results);\n      await renderFinanceTab(panel);\n      await renderStockTab(panel);\n      renderTrainingTab(panel).catch((err) => console.error('[TDS] Training render failed:', err));\n      renderBenchmarkTab(panel);\n      renderOptimizeTab(panel);\n      startFooterTicker(panel);\n      await checkLicense(panel, { force });\n    } finally {\n      state.diagnosticRunning = false;\n    }\n  }\n\n  // ---------------------------------------------------------------------\n  // 6. BOOT \\u2014 the Management Sui",
-"te lives only inside Torn's Jobs page.\n  // Torn uses joblist.php with hash routes for the company/employment views.\n  // We therefore watch route/DOM changes so the suite survives Torn's SPA-style\n  // navigation without creating duplicate panels.\n  //\n  // Startup no longer relies on a separate \"diagnostics completed\" flag \\u2014\n  // whether a diagnostic has run is read directly from the persisted\n  // IndexedDB record (the actual source of truth), which is simpler and\n  // can't drift out of sync with what's really stored.\n  // ---------------------------------------------------------------------\n  let jobsBootTimer = null;\n  let jobsObserver = null;\n  let jobsBootPoll = null;\n\n  async function bootJobsPage() {\n    console.debug('[TDS] boot check', window.location.href, 'companyPage=', isJobsPage());\n    if (!isJobsPage()) {\n      removePanel();\n      return;\n    }\n\n    if (document.getElementById('tds-panel')) return;\n\n    const mount = findJobsMount();\n    if (!mount) return;\n\n    detectTornColours();\n\n    let panel;\n    try {\n      panel = buildPanel(mount);\n    } catch (err) {\n      console.error('[TDS] Panel build failed:', err);\n\n      // PDA-visible fallback so a future compatibility error does not look\n      // like \"the script did nothing\".\n      if (!document.getElementById('tds-boot-error')) {\n        const errorBox = document.createElement('div');\n        errorBox.id = 'tds-boot-error';\n        errorBox.style.cssText =\n          'margin:10px;padding:10px;border:1px solid #d66;border-radius:6px;' +\n          'background:#3a2222;color:#ffd0d0;font:12px sans-serif;position:relative;z-index:9999;';\n        errorBox.textContent =\n          'Torn Company Management Suite v' + TDS_VERSION +\n          ' loaded, but the dashboard could not be built. Check the Tor",
-"nPDA script console for [TDS] Panel build failed.';\n        try {\n          (mount || document.body || document.documentElement).prepend(errorBox);\n        } catch (_) {}\n      }\n      return;\n    }\n\n    // Hydrate the UI from the last persisted diagnostic first. This means a\n    // Torn navigation/refresh does not trigger another API diagnostic.\n    const hydrated = await loadPersistedDiagnostic(panel);\n    if (hydrated) return;\n\n    if (tdsGetValue(STORAGE_KEY_APIKEY, '')) {\n      try {\n        await runFullDiagnostic(panel);\n      } catch (err) {\n        const status = panel.querySelector('#tds-footer-status');\n        if (status) status.textContent = 'Last run: Never';\n        console.error('[TDS] Automatic startup run failed:', err);\n      }\n    } else {\n      updateFooter(panel);\n      switchTab(panel, 'settings');\n    }\n  }\n\n  function scheduleJobsBoot() {\n    clearTimeout(jobsBootTimer);\n    jobsBootTimer = setTimeout(() => {\n      bootJobsPage().catch((err) => console.error('[TDS] Jobs page boot failed:', err));\n    }, 80);\n  }\n\n  function startJobsNavigationWatcher() {\n    const routeEvents = ['hashchange', 'popstate', 'pageshow'];\n    routeEvents.forEach((eventName) =>\n      window.addEventListener(eventName, scheduleJobsBoot, { passive: true })\n    );\n\n    if (!jobsObserver && document.documentElement) {\n      jobsObserver = new MutationObserver(() => {\n        if (isJobsPage() && !document.getElementById('tds-panel')) scheduleJobsBoot();\n        if (!isJobsPage() && document.getElementById('tds-panel')) removePanel();\n      });\n\n      // Observe documentElement rather than body because TornPDA/WebView can\n      // replace major page containers during navigation.\n      jobsObserver.observe(document.documentElement, { childList: true, subtree: true });\n    }\n",
-"\n    // PDA-safe fallback: retry briefly while Torn's mobile company DOM is\n    // being assembled. Stop once the panel exists or after ~30 seconds.\n    if (!jobsBootPoll) {\n      let attempts = 0;\n      jobsBootPoll = setInterval(() => {\n        attempts += 1;\n\n        if (isJobsPage()) {\n          if (!document.getElementById('tds-panel')) scheduleJobsBoot();\n          else {\n            clearInterval(jobsBootPoll);\n            jobsBootPoll = null;\n          }\n        }\n\n        if (attempts >= 60 && jobsBootPoll) {\n          clearInterval(jobsBootPoll);\n          jobsBootPoll = null;\n        }\n      }, 500);\n    }\n\n    scheduleJobsBoot();\n  }\n\n  function initialiseTds() {\n    if (!document.getElementById('tds-styles')) injectStyles();\n    startJobsNavigationWatcher();\n  }\n\n  // Works whether TornPDA injects the script at Start, End, or after the page\n  // has already completed loading.\n  if (document.readyState === 'loading') {\n    document.addEventListener('DOMContentLoaded', initialiseTds, { once: true });\n    window.addEventListener('load', initialiseTds, { once: true });\n  } else {\n    initialiseTds();\n  }\n})();"
-  ];
+  var TDS_TRACE_PREFIX = '[TDS TRACE]';
 
-  function addBox(title, text, good) {
-    var box = document.createElement('div');
-    box.style.cssText =
-      'margin:10px;padding:12px;border:2px solid ' + (good ? '#3a6' : '#c55') + ';' +
-      'border-radius:6px;background:#2b2b2b;color:#eee;' +
-      'font:12px/1.5 monospace;white-space:pre-wrap;word-break:break-word;' +
-      'position:relative;z-index:999999;';
-    var strong = document.createElement('div');
-    strong.style.cssText = 'font-weight:bold;margin-bottom:8px;color:' + (good ? '#6e9' : '#f99');
-    strong.textContent = title;
-    box.appendChild(strong);
-    box.appendChild(document.createTextNode(text));
-    (document.body || document.documentElement).insertBefore(
-      box,
-      (document.body || document.documentElement).firstChild
-    );
+  function tdsTrace(stage, extra) {
+    try {
+      if (extra === undefined) console.log(TDS_TRACE_PREFIX, stage);
+      else console.log(TDS_TRACE_PREFIX, stage, extra);
+    } catch (_) {}
   }
 
-  function run() {
-    console.log('[TDS] v1.3.12 parser diagnostic started');
-
-    var source = SOURCE_PARTS.join('');
+  window.addEventListener('error', function (event) {
     try {
-      /* Compile only. The returned function is deliberately NOT executed. */
-      new Function(source);
-      addBox(
-        'TDS PDA PARSER: COMPILE PASSED',
-        'TornPDA successfully parsed the entire full-suite source.\n' +
-        'If the normal build still fails, the problem is runtime rather than syntax.',
-        true
+      console.error(
+        '[TDS GLOBAL ERROR]',
+        'message=', event && event.message,
+        'file=', event && event.filename,
+        'line=', event && event.lineno,
+        'column=', event && event.colno,
+        'error=', event && event.error
       );
-      console.log('[TDS] full source compile PASSED');
-    } catch (err) {
-      var details =
-        'Name: ' + String(err && err.name) + '\n' +
-        'Message: ' + String(err && err.message) + '\n' +
-        'Line: ' + String(err && (err.lineNumber || err.line || 'not supplied')) + '\n' +
-        'Column: ' + String(err && (err.columnNumber || err.column || 'not supplied')) + '\n\n' +
-        'Stack:\n' + String(err && err.stack ? err.stack : 'No stack supplied');
+    } catch (_) {}
+  }, true);
 
-      addBox('TDS PDA PARSER: COMPILE FAILED', details, false);
-      console.error('[TDS] full source compile FAILED', err);
+  window.addEventListener('unhandledrejection', function (event) {
+    try {
+      console.error('[TDS UNHANDLED REJECTION]', event && event.reason);
+    } catch (_) {}
+  });
+
+  tdsTrace('01 script body entered');
+
+  // ---------------------------------------------------------------------
+  // 0. CONSTANTS
+  // ---------------------------------------------------------------------
+  const API_BASE = 'https://api.torn.com';
+  // Read the UI version from userscript metadata when available. TornPDA may
+  // not expose that metadata API, so a release fallback is provided below.
+  // TornPDA does not always expose the legacy GM_info object that desktop
+  // userscript managers provide. Try both common metadata APIs, then use the
+  // release version as a PDA-safe fallback so the UI never shows vunknown.
+  const TDS_VERSION_FALLBACK = '1.3.13';
+// Update distribution uses the same GitHub-hosted .user.js for both version
+// checks and downloads. Release process: bump @version + this fallback, then
+// replace torn-company-manager.user.js on the main branch.
+
+  const TDS_VERSION =
+    (typeof GM_info !== 'undefined' && GM_info?.script?.version) ||
+    (typeof GM !== 'undefined' && GM?.info?.script?.version) ||
+    TDS_VERSION_FALLBACK;
+  const STORAGE_KEY_APIKEY = 'tds_api_key';
+  const STORAGE_KEY_LAST_RUN_AT = 'tds_last_run_at';
+  const STORAGE_KEY_THEME = 'tds_theme';
+  const STORAGE_KEY_LICENSE_CACHE = 'tds_license_cache';
+
+  // TornPDA normally supplies the underscore-style GM storage functions, but
+  // keep a localStorage fallback so a missing/changed PDA GM shim cannot stop
+  // the entire dashboard from mounting. Desktop Tampermonkey/Violentmonkey
+  // continues to use the normal GM functions.
+  function tdsGetValue(key, fallback = null) {
+    try {
+      if (typeof GM_getValue === 'function') return GM_getValue(key, fallback);
+    } catch (err) {
+      console.warn('[TDS] GM_getValue failed; using localStorage fallback:', err);
+    }
+    try {
+      const raw = localStorage.getItem(`tds_fallback_${key}`);
+      return raw === null ? fallback : JSON.parse(raw);
+    } catch (_) {
+      return fallback;
     }
   }
 
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', run);
-  } else {
-    run();
+  function tdsSetValue(key, value) {
+    try {
+      if (typeof GM_setValue === 'function') {
+        GM_setValue(key, value);
+        return;
+      }
+    } catch (err) {
+      console.warn('[TDS] GM_setValue failed; using localStorage fallback:', err);
+    }
+    try {
+      localStorage.setItem(`tds_fallback_${key}`, JSON.stringify(value));
+    } catch (_) {}
   }
-}());
+
+  function tdsDeleteValue(key) {
+    try {
+      if (typeof GM_deleteValue === 'function') {
+        GM_deleteValue(key);
+        return;
+      }
+    } catch (err) {
+      console.warn('[TDS] GM_deleteValue failed; using localStorage fallback:', err);
+    }
+    try {
+      localStorage.removeItem(`tds_fallback_${key}`);
+    } catch (_) {}
+  }
+
+  const MIN_CALL_INTERVAL_MS = 800; // ~75 req/min ceiling, well under Torn's 100/min cap
+  const DB_NAME = 'torn_director_system';
+  const DB_VERSION = 1;
+
+  // Public list of licensed Torn User IDs. Only the numeric User ID (read
+  // from user/basic, EXACT) is compared against this -- no API key or
+  // company data is ever sent here. Expected shape (propose this to whoever
+  // maintains the file if it isn't already in this form):
+  //   [ { "userId": 4237873, "status": "active" }, { "userId": 1234567, "status": "expired" } ]
+  // A "status" of anything other than "active"/"expired" (or a User ID not
+  // present in the list at all) is treated as not licensed -- this never
+  // guesses a license into existence.
+  const LICENSE_JSON_URL = 'https://raw.githubusercontent.com/DooBiiE/Torn-Company-Manager/refs/heads/main/licensed-users.json';
+  const LICENSE_CACHE_TTL_MS = 60 * 60 * 1000; // 1h -- avoids hitting GitHub raw on every page load/navigation
+
+  // CUSTOM API KEY
+  // Torn supports an official custom-key creation URL. The fragment below
+  // pre-selects exactly the permissions this suite uses, then Torn handles
+  // the actual key creation on its own Settings page.
+  //
+  // Required selections for this suite:
+  //   company: profile, employees, detailed, stock, news, applications, companies
+  //   user:    basic, workstats, log
+  //   torn:    companies
+  //
+  // IMPORTANT: this does not create or expose the secret key itself. It only
+  // opens Torn's own key-generation flow with the required selections and
+  // application name pre-filled. The user remains on Torn's site throughout
+  // key creation and must then paste the generated key into this script.
+  const CUSTOM_KEY_TITLE = 'Torn Company Management Suite';
+  const CUSTOM_KEY_SELECTIONS = {
+    company: ['profile', 'employees', 'detailed', 'stock', 'news', 'applications', 'companies', 'search', 'snapshot'],
+    user: ['basic', 'workstats', 'log'],
+    torn: ['companies'],
+  };
+
+  function buildCustomKeyUrl() {
+    const parts = [
+      'https://www.torn.com/preferences.php#tab=api?step=addNewKey',
+      `company=${CUSTOM_KEY_SELECTIONS.company.join(',')}`,
+      `user=${CUSTOM_KEY_SELECTIONS.user.join(',')}`,
+      `torn=${CUSTOM_KEY_SELECTIONS.torn.join(',')}`,
+      `title=${encodeURIComponent(CUSTOM_KEY_TITLE)}`,
+    ];
+    return parts.join('&');
+  }
+
+  const PROBE_PLAN = [
+    { section: 'company', selections: 'profile', label: 'Company profile' },
+    { section: 'company', selections: 'employees', label: 'Employee roster' },
+    { section: 'company', selections: 'detailed', label: 'Company financials' },
+    { section: 'company', selections: 'stock', label: 'Company stock' },
+    { section: 'company', selections: 'news', label: 'Company news / sales history' },
+    { section: 'company', selections: 'applications', label: 'Pending applications' },
+    { section: 'user', selections: 'basic', label: 'Your own basic profile' },
+    { section: 'user', selections: 'workstats', label: 'Your own working stats' },
+    { section: 'user', selections: 'log', label: 'Your own personal event log' },
+    { section: 'torn', selections: 'companies', label: 'Reference: company types & positions' },
+  ];
+
+  // Theme presets — ONLY the accent (brand/interactive) color changes here.
+  // Semantic colors (green=good, red=bad, amber=warning) stay fixed on
+  // purpose so the UI doesn't lose its meaning when you switch themes.
+  const THEME_PRESETS = {
+    green:  { accent: '#3ddc84', accentDim: 'rgba(61, 220, 132, 0.14)' },
+    blue:   { accent: '#4da3ff', accentDim: 'rgba(77, 163, 255, 0.14)' },
+    purple: { accent: '#b18cff', accentDim: 'rgba(177, 140, 255, 0.14)' },
+    amber:  { accent: '#f5a623', accentDim: 'rgba(245, 166, 35, 0.14)' },
+    cyan:   { accent: '#39d0d8', accentDim: 'rgba(57, 208, 216, 0.14)' },
+    pink:   { accent: '#ff6bb5', accentDim: 'rgba(255, 107, 181, 0.14)' },
+  };
+
+  // ---------------------------------------------------------------------
+  // 1. API CLIENT — queued, rate-limited, validated, never fabricates
+  // ---------------------------------------------------------------------
+  const ApiClient = (() => {
+    let queue = Promise.resolve();
+    let lastCallAt = 0;
+
+    function rawCall(section, selections, id = '', extraParams = {}) {
+      const key = tdsGetValue(STORAGE_KEY_APIKEY, '');
+      if (!key) return Promise.reject({ blocked: true, reason: 'No API key configured yet.' });
+
+      const path = id ? `${section}/${id}` : section;
+      const params = new URLSearchParams({ selections, key, ...extraParams });
+      const url = `${API_BASE}/${path}?${params.toString()}`;
+
+      return new Promise((resolve, reject) => {
+        GM_xmlhttpRequest({
+          method: 'GET',
+          url,
+          timeout: 15000,
+          onload: (res) => {
+            let json;
+            try {
+              json = JSON.parse(res.responseText);
+            } catch (e) {
+              reject({ blocked: true, reason: 'Response was not valid JSON — Torn API may be down.' });
+              return;
+            }
+            if (json.error) {
+              reject({ blocked: true, code: json.error.code, reason: json.error.error });
+              return;
+            }
+            resolve(json);
+          },
+          onerror: () => reject({ blocked: true, reason: 'Network error contacting api.torn.com' }),
+          ontimeout: () => reject({ blocked: true, reason: 'Request to api.torn.com timed out' }),
+        });
+      });
+    }
+
+    function call(section, selections, id = '', extraParams = {}) {
+      const run = () => {
+        const wait = Math.max(0, MIN_CALL_INTERVAL_MS - (Date.now() - lastCallAt));
+        return new Promise((resolve) => setTimeout(resolve, wait)).then(() => {
+          lastCallAt = Date.now();
+          return rawCall(section, selections, id, extraParams);
+        });
+      };
+      const result = queue.then(run, run);
+      queue = result.then(() => {}, () => {});
+      return result;
+    }
+
+    function rawCallV2(path, extraParams = {}) {
+      const key = tdsGetValue(STORAGE_KEY_APIKEY, '');
+      if (!key) return Promise.reject({ blocked: true, reason: 'No API key configured yet.' });
+
+      // Torn API v2 / Swagger uses header authentication. Do NOT append the
+      // secret API key to the query string here; doing so can return error 2
+      // ("Incorrect key") even though the same key works with our v1 calls.
+      const params = new URLSearchParams({ ...extraParams });
+      const cleanPath = String(path || '').replace(/^\/+/, '');
+      const query = params.toString();
+      const url = `${API_BASE}/v2/${cleanPath}${query ? `?${query}` : ''}`;
+
+      return new Promise((resolve, reject) => {
+        GM_xmlhttpRequest({
+          method: 'GET',
+          url,
+          headers: {
+            Authorization: `ApiKey ${key}`,
+          },
+          timeout: 15000,
+          onload: (res) => {
+            let json;
+            try {
+              json = JSON.parse(res.responseText);
+            } catch (e) {
+              reject({ blocked: true, reason: 'Response was not valid JSON — Torn API may be down.' });
+              return;
+            }
+            if (json.error) {
+              reject({ blocked: true, code: json.error.code, reason: json.error.error || json.error.message });
+              return;
+            }
+            resolve(json);
+          },
+          onerror: () => reject({ blocked: true, reason: 'Network error contacting api.torn.com' }),
+          ontimeout: () => reject({ blocked: true, reason: 'Request to api.torn.com timed out' }),
+        });
+      });
+    }
+
+    function callV2(path, extraParams = {}) {
+      const run = () => {
+        const wait = Math.max(0, MIN_CALL_INTERVAL_MS - (Date.now() - lastCallAt));
+        return new Promise((resolve) => setTimeout(resolve, wait)).then(() => {
+          lastCallAt = Date.now();
+          return rawCallV2(path, extraParams);
+        });
+      };
+      const result = queue.then(run, run);
+      queue = result.then(() => {}, () => {});
+      return result;
+    }
+
+    function rawCallV2Text(path, extraParams = {}) {
+      const key = tdsGetValue(STORAGE_KEY_APIKEY, '');
+      if (!key) return Promise.reject({ blocked: true, reason: 'No API key configured yet.' });
+
+      const params = new URLSearchParams({ ...extraParams });
+      const cleanPath = String(path || '').replace(/^\/+/, '');
+      const query = params.toString();
+      const url = `${API_BASE}/v2/${cleanPath}${query ? `?${query}` : ''}`;
+
+      return new Promise((resolve, reject) => {
+        GM_xmlhttpRequest({
+          method: 'GET',
+          url,
+          headers: {
+            Authorization: `ApiKey ${key}`,
+            Accept: 'text/csv, text/plain, */*',
+          },
+          timeout: 20000,
+          onload: (res) => {
+            const body = String(res.responseText || '');
+            // Snapshot errors may still arrive as JSON even though success is CSV.
+            const trimmed = body.trim();
+            if (trimmed.startsWith('{')) {
+              try {
+                const json = JSON.parse(trimmed);
+                if (json.error) {
+                  reject({
+                    blocked: true,
+                    code: json.error.code,
+                    reason: json.error.error || json.error.message || 'Torn API error',
+                  });
+                  return;
+                }
+              } catch (_) {}
+            }
+            resolve(body);
+          },
+          onerror: () => reject({ blocked: true, reason: 'Network error contacting api.torn.com' }),
+          ontimeout: () => reject({ blocked: true, reason: 'Request to api.torn.com timed out' }),
+        });
+      });
+    }
+
+    function callV2Text(path, extraParams = {}) {
+      const run = () => {
+        const wait = Math.max(0, MIN_CALL_INTERVAL_MS - (Date.now() - lastCallAt));
+        return new Promise((resolve) => setTimeout(resolve, wait)).then(() => {
+          lastCallAt = Date.now();
+          return rawCallV2Text(path, extraParams);
+        });
+      };
+      const result = queue.then(run, run);
+      queue = result.then(() => {}, () => {});
+      return result;
+    }
+
+    return { call, callV2, callV2Text };
+  })();
+
+  // ---------------------------------------------------------------------
+  // 2. LOCAL STORAGE (IndexedDB) — snapshots only, nothing leaves the browser
+  // ---------------------------------------------------------------------
+  const LocalDB = (() => {
+    let dbPromise = null;
+
+    function open() {
+      if (dbPromise) return dbPromise;
+      dbPromise = new Promise((resolve, reject) => {
+        const req = indexedDB.open(DB_NAME, DB_VERSION);
+        req.onupgradeneeded = () => {
+          const db = req.result;
+          if (!db.objectStoreNames.contains('snapshots')) {
+            const store = db.createObjectStore('snapshots', { keyPath: 'id', autoIncrement: true });
+            store.createIndex('timestamp', 'timestamp');
+          }
+          if (!db.objectStoreNames.contains('diagnostics')) {
+            db.createObjectStore('diagnostics', { keyPath: 'timestamp' });
+          }
+        };
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => reject(req.error);
+      });
+      return dbPromise;
+    }
+
+    async function put(storeName, value) {
+      const db = await open();
+      return new Promise((resolve, reject) => {
+        const tx = db.transaction(storeName, 'readwrite');
+        tx.objectStore(storeName).put(value);
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+      });
+    }
+
+    async function getAll(storeName) {
+      const db = await open();
+      return new Promise((resolve, reject) => {
+        const tx = db.transaction(storeName, 'readonly');
+        const req = tx.objectStore(storeName).getAll();
+        req.onsuccess = () => resolve(req.result || []);
+        req.onerror = () => reject(req.error);
+      });
+    }
+
+    async function deleteKey(storeName, key) {
+      const db = await open();
+      return new Promise((resolve, reject) => {
+        const tx = db.transaction(storeName, 'readwrite');
+        tx.objectStore(storeName).delete(key);
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+      });
+    }
+
+    async function getLatest(storeName, sortField = 'timestamp') {
+      const all = await getAll(storeName);
+      if (!all.length) return null;
+      return all.reduce((latest, row) =>
+        !latest || (Number(row?.[sortField]) || 0) > (Number(latest?.[sortField]) || 0)
+          ? row
+          : latest, null);
+    }
+
+    async function clear(storeName) {
+      const db = await open();
+      return new Promise((resolve, reject) => {
+        const tx = db.transaction(storeName, 'readwrite');
+        tx.objectStore(storeName).clear();
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+      });
+    }
+
+    return { put, getAll, deleteKey, getLatest, clear };
+  })();
+
+  const MAX_SNAPSHOTS = 120; // matches the "120 max stored locally" retention policy
+
+  async function pruneSnapshots() {
+    const all = await LocalDB.getAll('snapshots');
+    if (all.length <= MAX_SNAPSHOTS) return;
+    all.sort((a, b) => a.timestamp - b.timestamp);
+    const toRemove = all.slice(0, all.length - MAX_SNAPSHOTS);
+    for (const row of toRemove) await LocalDB.deleteKey('snapshots', row.id);
+  }
+
+  // ---------------------------------------------------------------------
+  // 3. DIAGNOSTIC RUNNER
+  // ---------------------------------------------------------------------
+  async function runDiagnostic(onEach) {
+    const results = [];
+    for (const probe of PROBE_PLAN) {
+      try {
+        const data = await ApiClient.call(probe.section, probe.selections);
+        const r = { ...probe, status: 'ok', sampleKeys: extractTopLevelKeys(data), raw: data };
+        results.push(r);
+        onEach?.(r);
+      } catch (err) {
+        const r = { ...probe, status: 'blocked', code: err.code, reason: err.reason || 'Unknown error' };
+        results.push(r);
+        onEach?.(r);
+      }
+    }
+    await LocalDB.put('diagnostics', { timestamp: Date.now(), results });
+    return results;
+  }
+
+  function extractTopLevelKeys(obj) {
+    if (!obj || typeof obj !== 'object') return [];
+    return Object.keys(obj);
+  }
+
+  async function takeSnapshotFromDiagnostic(results) {
+    const snapshot = { timestamp: Date.now(), source: 'api' };
+    for (const r of results) {
+      if (r.status === 'ok') snapshot[`${r.section}_${r.selections}`] = r.raw;
+    }
+    if (Object.keys(snapshot).length > 2) {
+      await LocalDB.put('snapshots', snapshot);
+      await pruneSnapshots();
+    }
+    return snapshot;
+  }
+
+  // ---------------------------------------------------------------------
+  // 3b. ACCESS VERDICT — DERIVED purely from the real statuses above
+  // ---------------------------------------------------------------------
+  function classifyAccess(results) {
+    const byKey = (section, selections) =>
+      results.find((r) => r.section === section && r.selections === selections);
+
+    const financials = byKey('company', 'detailed');
+    const stock = byKey('company', 'stock');
+    const applications = byKey('company', 'applications');
+    const roster = byKey('company', 'employees');
+
+    const directorSignals = [financials, stock, applications].filter(Boolean);
+    const directorOkCount = directorSignals.filter((r) => r.status === 'ok').length;
+    const directorBlockedCount = directorSignals.filter((r) => r.status === 'blocked').length;
+
+    if (directorOkCount === directorSignals.length && directorSignals.length > 0) {
+      return {
+        level: 'director',
+        headline: 'Director-level access confirmed',
+        detail: 'company/detailed, company/stock, and company/applications all returned real data. This key can drive the full system.',
+      };
+    }
+    if (roster?.status === 'ok' && directorOkCount === 0 && directorBlockedCount > 0) {
+      return {
+        level: 'employee',
+        headline: 'Employee-level access only',
+        detail: 'Roster is visible, but financials/stock/applications are blocked (' +
+          directorSignals.map((r) => `${r.selections}: ${r.reason || 'blocked'}`).join('; ') +
+          '). This is a role check (are you the director of this company), not a key-tier limit — ' +
+          'a higher-access key on the same non-director account will not unlock these.',
+      };
+    }
+    if (directorOkCount > 0 && directorOkCount < directorSignals.length) {
+      return {
+        level: 'partial',
+        headline: 'Partial / custom access',
+        detail: 'Some director-level selections succeeded, others didn\u2019t \u2014 looks like a Custom key missing a selection, not a role limit.',
+      };
+    }
+    return {
+      level: 'unknown',
+      headline: 'Access level unclear',
+      detail: 'Not enough successful probes to classify yet. Check the Diagnostics tab.',
+    };
+  }
+
+  // ---------------------------------------------------------------------
+  // 4. STYLES — matches the reference "Company Manager" design language
+  // ---------------------------------------------------------------------
+  function injectStyles() {
+    tdsTrace('02 injectStyles entered');
+    const css = `
+      /* Embedded Management Suite -- lives inside Torn's own Jobs page, not
+         an overlay. Structural colours (background/border/text) below are
+         CSS variables with these dark-theme values as fallbacks; detectTornColours()
+         overwrites them at runtime by sampling Torn's own page chrome, so the
+         panel matches whichever skin (light or dark) the player is using.
+         --tds-accent / --tds-accent-dim are the user-selectable theme colour
+         (Settings tab) and are never touched by colour detection. Semantic
+         colours (green/red/amber meaning good/bad/warning) are fixed on
+         purpose and are not part of either system. */
+      #tds-panel {
+        width: 100%; box-sizing: border-box; margin: 14px 0 18px;
+        background: var(--tds-bg, #2b2b2b); color: var(--tds-fg, #d8d8d8);
+        border: 1px solid var(--tds-border, #1a1a1a);
+        border-radius: 10px; overflow: hidden; font: 13px/1.45 -apple-system, 'Segoe UI', sans-serif;
+        box-shadow: 0 4px 18px rgba(0,0,0,.22);
+        position: relative; z-index: 20;
+      }
+      #tds-header {
+        display: flex; align-items: center; justify-content: space-between; gap: 12px;
+        padding: 12px 14px; background: var(--tds-bg-alt, #383838); border-bottom: 1px solid var(--tds-border, #1a1a1a);
+      }
+      #tds-header .tds-brand { display: flex; align-items: baseline; gap: 7px; min-width: 0; flex-wrap: wrap; }
+      #tds-header .tds-brand-dot { color: var(--tds-accent, #3ddc84); font-size: 13px; }
+      #tds-header .tds-brand-name {
+        color: var(--tds-accent, #3ddc84); font-weight: 800; font-size: 13px; letter-spacing: .04em;
+      }
+      #tds-header .tds-brand-version { color: var(--tds-text-faintest, #888888); font-size: 10.5px; }
+      #tds-header .tds-brand-subtitle { color: var(--tds-text-subtle, #969696); font-size: 10.5px; margin-left: 4px; }
+      #tds-header-icons { display: flex; gap: 6px; flex-shrink: 0; }
+      #tds-header-icons button {
+        min-width: 30px; height: 28px; display: flex; align-items: center; justify-content: center;
+        background: transparent; color: var(--tds-text-icon, #aaaaaa); border: 1px solid var(--tds-border-strong, #4a4a4a); border-radius: 6px;
+        cursor: pointer; font-size: 12px; padding: 0 8px;
+      }
+      #tds-header-icons button:hover { background: var(--tds-bg-hover, #404040); color: var(--tds-fg, #d8d8d8); }
+
+      #tds-tabs {
+        display: flex; flex-wrap: wrap; gap: 2px; padding: 9px 12px 0;
+        border-bottom: 1px solid var(--tds-border, #1a1a1a); background: var(--tds-bg, #2b2b2b);
+      }
+      .tds-tab {
+        background: transparent; border: none; color: var(--tds-text-dim, #999999); font: 700 10.5px/1 -apple-system, sans-serif;
+        letter-spacing: .05em; padding: 0 5px 10px; margin-right: 12px; cursor: pointer;
+        border-bottom: 2px solid transparent;
+      }
+      .tds-tab:hover { color: var(--tds-text-mid, #b5b5b5); }
+      .tds-tab.tds-tab-active { color: var(--tds-accent, #3ddc84); border-bottom-color: var(--tds-accent, #3ddc84); }
+      .tds-tab.tds-tab-locked { color: var(--tds-text-disabled, #666666); cursor: default; }
+      .tds-tab.tds-tab-locked:hover { color: var(--tds-text-disabled, #666666); }
+
+      #tds-body { padding: 14px; box-sizing: border-box; }
+      .tds-tabpanel[hidden] { display: none; }
+      .tds-section-label {
+        font: 700 10.5px/1 -apple-system, sans-serif; letter-spacing: .08em; color: var(--tds-text-faint, #9a9a9a);
+        text-transform: uppercase; margin: 16px 0 8px;
+      }
+      .tds-section-label:first-child { margin-top: 0; }
+      .tds-employee-subheading { font-weight: 800 !important; text-decoration: underline; text-underline-offset: 2px; }
+      .tds-card { background: var(--tds-bg-card, #323232); border: 1px solid var(--tds-border, #1a1a1a); border-radius: 8px; padding: 12px 14px; margin-bottom: 10px; }
+      .tds-card-title { color: var(--tds-text-icon, #aaaaaa); font-size: 11.5px; margin-bottom: 6px; }
+      .tds-row { display: flex; justify-content: space-between; align-items: center; padding: 3px 0; gap: 10px; }
+      .tds-row-label { color: var(--tds-text-mid, #b5b5b5); }
+      .tds-row-value { font-weight: 700; color: var(--tds-text-strong, #f0f0f0); }
+      .tds-v-good { color: #3ddc84 !important; }
+      .tds-v-bad { color: #ff5c5c !important; }
+      .tds-v-warn { color: #f5a623 !important; }
+      .tds-v-dim { color: var(--tds-text-dim, #999999) !important; font-weight: 400 !important; }
+      .tds-box { border-radius: 7px; padding: 10px 12px; margin-bottom: 10px; font-size: 12px; line-height: 1.5; }
+      .tds-box-info { background: rgba(61,220,132,.07); border: 1px solid rgba(61,220,132,.28); color: #a9e8c1; }
+      .tds-box-warn { background: rgba(245,166,35,.09); border: 1px solid rgba(245,166,35,.3); color: #f0c584; }
+      .tds-box-danger { background: rgba(255,92,92,.08); border: 1px solid rgba(255,92,92,.3); color: #ffb3b3; }
+      .tds-box-neutral { background: var(--tds-bg-card, #323232); border: 1px solid var(--tds-border, #1a1a1a); color: var(--tds-text-mid, #b5b5b5); }
+      .tds-box strong { color: inherit; }
+      .tds-badge { display: inline-flex; align-items: center; font: 700 10px/1 -apple-system, sans-serif; padding: 3px 7px; border-radius: 5px; white-space: nowrap; letter-spacing: .02em; }
+      .tds-badge-ok { background: rgba(61,220,132,.14); color: #3ddc84; border: 1px solid rgba(61,220,132,.3); }
+      .tds-badge-blocked { background: rgba(255,92,92,.12); color: #ff8b8b; border: 1px solid rgba(255,92,92,.28); }
+      .tds-badge-neutral { background: var(--tds-bg-hover, #404040); color: var(--tds-text-icon, #aaaaaa); border: 1px solid var(--tds-border-strong, #4a4a4a); }
+      .tds-employee-row { padding: 9px 0; border-bottom: 1px solid var(--tds-border-soft, #242424); }
+      .tds-employee-row:last-child { border-bottom: none; }
+      .tds-employee-row > summary { cursor: pointer; list-style: none; }
+      .tds-employee-row > summary::-webkit-details-marker { display: none; }
+      .tds-employee-row > summary::marker { content: ''; }
+      .tds-employee-chevron {
+        display: inline-block; font-size: 10px; color: var(--tds-text-dim, #999999);
+        transition: transform .15s ease; transform: rotate(0deg);
+      }
+      .tds-employee-row[open] .tds-employee-chevron { transform: rotate(90deg); }
+      .tds-employee-row[open] > summary { margin-bottom: 2px; }
+      .tds-employee-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; }
+      .tds-employee-name { font-weight: 700; color: var(--tds-text-strong, #f0f0f0); font-size: 13px; }
+      .tds-employee-meta { color: var(--tds-text-dim, #999999); font-size: 11px; margin-top: 1px; }
+      .tds-diag-row { display: flex; justify-content: space-between; align-items: flex-start; padding: 8px 0; border-bottom: 1px solid var(--tds-border-soft, #242424); gap: 10px; }
+      .tds-diag-row:last-child { border-bottom: none; }
+      .tds-diag-label { color: var(--tds-text-mid2, #cfcfcf); font-size: 12px; }
+      .tds-diag-reason { color: var(--tds-text-dim, #999999); font-size: 11px; margin-top: 2px; }
+      .tds-btn { background: var(--tds-accent, #3ddc84); color: #06110a; border: none; border-radius: 6px; padding: 8px 12px; font: 700 12px/1 -apple-system, sans-serif; cursor: pointer; letter-spacing: .02em; }
+      .tds-btn:hover { filter: brightness(1.08); }
+      .tds-btn-ghost { background: transparent; color: var(--tds-text-mid, #b5b5b5); border: 1px solid var(--tds-border-strong, #4a4a4a); border-radius: 6px; padding: 8px 12px; font: 600 12px/1 -apple-system, sans-serif; cursor: pointer; }
+      .tds-btn-ghost:hover { background: var(--tds-bg-hover, #404040); color: var(--tds-fg, #d8d8d8); }
+      .tds-input { width: 100%; background: var(--tds-bg, #2b2b2b); color: var(--tds-text-strong, #f0f0f0); border: 1px solid var(--tds-border-strong, #4a4a4a); border-radius: 6px; padding: 8px 9px; box-sizing: border-box; font: 12.5px monospace; }
+      .tds-input:focus { outline: none; border-color: var(--tds-accent, #3ddc84); }
+      .tds-swatches { display: flex; gap: 8px; margin-top: 8px; }
+      .tds-swatch { width: 26px; height: 26px; border-radius: 50%; cursor: pointer; border: 2px solid transparent; }
+      .tds-swatch.tds-swatch-active { border-color: var(--tds-fg, #fff); }
+      .tds-segmented { display: flex; gap: 4px; margin-bottom: 10px; flex-wrap: wrap; }
+      .tds-segment { flex: 1; min-width: 90px; text-align: center; background: var(--tds-bg-card, #323232); color: var(--tds-text-icon, #aaaaaa); border: 1px solid var(--tds-border-strong, #4a4a4a); border-radius: 6px; padding: 8px 6px; font: 700 10.5px/1 -apple-system, sans-serif; letter-spacing: .03em; cursor: pointer; }
+      .tds-segment:hover { background: var(--tds-bg-hover, #404040); }
+      .tds-segment.tds-segment-active { background: var(--tds-accent-dim, rgba(61,220,132,.14)); color: var(--tds-accent, #3ddc84); border-color: var(--tds-accent, #3ddc84); }
+      .tds-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+      .tds-table th { text-align: left; color: var(--tds-text-faint, #9a9a9a); font-size: 10px; letter-spacing: .05em; text-transform: uppercase; padding: 4px 6px; border-bottom: 1px solid var(--tds-border, #1a1a1a); }
+      .tds-table td { padding: 5px 6px; border-bottom: 1px solid var(--tds-border-soft, #242424); color: var(--tds-fg, #d8d8d8); }
+      .tds-table tr:last-child td { border-bottom: none; }
+      .tds-table td.tds-num { text-align: right; font-variant-numeric: tabular-nums; }
+      .tds-optimize-table th,
+      .tds-optimize-table td { text-align: center !important; vertical-align: middle; }
+      .tds-optimize-table td.tds-num { text-align: center !important; }
+      .tds-optimize-table tbody tr td {
+        border-bottom: 1px solid var(--tds-border-strong, #4a4a4a);
+        padding-top: 8px;
+        padding-bottom: 8px;
+      }
+      .tds-optimize-table tbody tr:last-child td { border-bottom: none; }
+      .tds-compare-table th,
+      .tds-compare-table td {
+        text-align: center !important;
+        vertical-align: middle;
+      }
+      .tds-compare-table td.tds-num { text-align: center !important; }
+      .tds-training-debt-table th,
+      .tds-training-debt-table td {
+        text-align: center !important;
+        vertical-align: middle;
+      }
+      .tds-training-debt-table tbody tr td {
+        border-bottom: 1px solid var(--tds-border-strong, #4a4a4a);
+        padding-top: 8px;
+        padding-bottom: 8px;
+      }
+      .tds-training-debt-table tbody tr:last-child td { border-bottom: none; }
+      .tds-stock-table th,
+      .tds-stock-table td {
+        text-align: center !important;
+        vertical-align: middle;
+      }
+      .tds-stock-table tbody tr td {
+        border-bottom: 1px solid var(--tds-border-strong, #4a4a4a);
+        padding-top: 8px;
+        padding-bottom: 8px;
+      }
+      .tds-stock-table tbody tr:last-child td { border-bottom: none; }
+      .tds-spark { display: flex; align-items: flex-end; gap: 4px; height: 46px; margin: 6px 0; }
+      .tds-spark-col { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 3px; }
+      .tds-spark-bar { width: 100%; border-radius: 2px 2px 0 0; min-height: 2px; }
+      .tds-spark-bar.tds-bar-pos { background: var(--tds-accent, #3ddc84); }
+      .tds-spark-bar.tds-bar-neg { background: #ff5c5c; }
+      .tds-spark-label { font-size: 9px; color: var(--tds-text-faintest, #888888); }
+      #tds-footer { display: flex; justify-content: space-between; align-items: center; padding: 8px 12px; border-top: 1px solid var(--tds-border, #1a1a1a); background: var(--tds-bg-alt, #383838); font-size: 10.5px; color: var(--tds-text-faintest, #888888); }
+      #tds-footer .tds-footer-status { color: var(--tds-accent, #3ddc84); }
+      #tds-mount-error { margin: 14px 0; }
+
+      @media (max-width: 700px) {
+        #tds-header { align-items: flex-start; }
+        #tds-header .tds-brand { flex-wrap: wrap; }
+        #tds-header .tds-brand-subtitle { display: none; }
+        #tds-tabs { overflow-x: auto; flex-wrap: nowrap; scrollbar-width: thin; }
+        .tds-tab { flex: 0 0 auto; }
+        #tds-body { padding: 10px; }
+        .tds-row { align-items: flex-start; }
+      }
+    `;
+    const style = document.createElement('style');
+    style.id = 'tds-styles';
+    style.textContent = css;
+    document.head.appendChild(style);
+    tdsTrace('03 injectStyles complete');
+  }
+
+
+  // ---------------------------------------------------------------------
+  // 4b. TORN COLOUR DETECTION -- match the page's own skin, don't guess it
+  // ---------------------------------------------------------------------
+  // Torn ships more than one skin (at least a light default and a dark
+  // theme) and I don't have a verified, current list of their exact hex
+  // values -- guessing would risk a wrong-looking panel on whichever skin
+  // I guessed wrong for. Instead this samples REAL computed colours from
+  // Torn's own page chrome at runtime and derives a matching palette
+  // algorithmically. If detection fails for any reason it silently falls
+  // back to the dark palette hardcoded as the var() defaults in the CSS
+  // above -- so a failure here never breaks the panel, only its skin-match.
+  function parseRgbColor(str) {
+    const m = /rgba?\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)\s*(?:,\s*([\d.]+))?\)/.exec(str || '');
+    if (!m) return null;
+    return { r: +m[1], g: +m[2], b: +m[3], a: m[4] !== undefined ? +m[4] : 1 };
+  }
+
+  function shadeColor(c, amt) {
+    const clamp = (v) => Math.max(0, Math.min(255, v));
+    return { r: clamp(c.r + amt), g: clamp(c.g + amt), b: clamp(c.b + amt) };
+  }
+
+  function rgbToCss(c) {
+    return `rgb(${Math.round(c.r)}, ${Math.round(c.g)}, ${Math.round(c.b)})`;
+  }
+
+  function detectTornColours() {
+    try {
+      const candidates = ['#skin-container', '.content-wrapper', '#mainContainer', '#top-page-links-wrap', 'body'];
+      let probe = null;
+      for (const sel of candidates) {
+        const el = document.querySelector(sel);
+        if (!el) continue;
+        const bg = parseRgbColor(getComputedStyle(el).backgroundColor);
+        if (bg && bg.a > 0 && !(bg.r === 0 && bg.g === 0 && bg.b === 0 && bg.a < 1)) { probe = el; break; }
+      }
+      if (!probe) return;
+
+      const cs = getComputedStyle(probe);
+      const bg = parseRgbColor(cs.backgroundColor);
+      if (!bg) return;
+
+      const luminance = (0.299 * bg.r + 0.587 * bg.g + 0.114 * bg.b) / 255;
+      const dark = luminance < 0.5;
+      const root = document.documentElement;
+
+      if (dark) {
+        // Keep the built-in dark palette (it already reads well on dark
+        // skins) but nudge every shade slightly toward Torn's actual
+        // background tone instead of leaving it a fixed, possibly
+        // mismatched dark navy.
+        const nudge = (fallback) => rgbToCss({
+          r: fallback.r * 0.6 + bg.r * 0.4,
+          g: fallback.g * 0.6 + bg.g * 0.4,
+          b: fallback.b * 0.6 + bg.b * 0.4,
+        });
+        root.style.setProperty('--tds-bg', nudge({ r: 43, g: 43, b: 43 }));
+        root.style.setProperty('--tds-bg-alt', nudge({ r: 56, g: 56, b: 56 }));
+        root.style.setProperty('--tds-bg-card', nudge({ r: 50, g: 50, b: 50 }));
+        root.style.setProperty('--tds-bg-hover', nudge({ r: 64, g: 64, b: 64 }));
+      } else {
+        // Light Torn skin: derive a full light palette FROM the sampled
+        // background rather than forcing the dark defaults onto a light
+        // page, where they'd look like a jarring floating dark box.
+        root.style.setProperty('--tds-bg', rgbToCss(bg));
+        root.style.setProperty('--tds-bg-alt', rgbToCss(shadeColor(bg, -10)));
+        root.style.setProperty('--tds-bg-card', rgbToCss(shadeColor(bg, -5)));
+        root.style.setProperty('--tds-bg-hover', rgbToCss(shadeColor(bg, -14)));
+        root.style.setProperty('--tds-border', rgbToCss(shadeColor(bg, -28)));
+        root.style.setProperty('--tds-border-soft', rgbToCss(shadeColor(bg, -16)));
+        root.style.setProperty('--tds-border-strong', rgbToCss(shadeColor(bg, -38)));
+        root.style.setProperty('--tds-fg', rgbToCss(shadeColor(bg, -110)));
+        root.style.setProperty('--tds-text-strong', rgbToCss(shadeColor(bg, -120)));
+        root.style.setProperty('--tds-text-mid', rgbToCss(shadeColor(bg, -75)));
+        root.style.setProperty('--tds-text-mid2', rgbToCss(shadeColor(bg, -80)));
+        root.style.setProperty('--tds-text-dim', rgbToCss(shadeColor(bg, -55)));
+        root.style.setProperty('--tds-text-faint', rgbToCss(shadeColor(bg, -60)));
+        root.style.setProperty('--tds-text-faintest', rgbToCss(shadeColor(bg, -45)));
+        root.style.setProperty('--tds-text-icon', rgbToCss(shadeColor(bg, -65)));
+        root.style.setProperty('--tds-text-subtle', rgbToCss(shadeColor(bg, -50)));
+        root.style.setProperty('--tds-text-disabled', rgbToCss(shadeColor(bg, -30)));
+      }
+    } catch (err) {
+      console.warn('[TDS] Torn colour detection skipped:', err);
+    }
+  }
+
+  function applyTheme(panelRoot, name) {
+    const theme = THEME_PRESETS[name] || THEME_PRESETS.green;
+    panelRoot.style.setProperty('--tds-accent', theme.accent);
+    panelRoot.style.setProperty('--tds-accent-dim', theme.accentDim);
+  }
+
+  // ---------------------------------------------------------------------
+  // 5. UI STATE
+  // ---------------------------------------------------------------------
+  const state = {
+    lastResults: null,
+    lastVerdict: null,
+    lastRunAt: null,
+    diagnosticRunning: false,
+    panel: null,
+    benchmark: { tier: 'same', cache: {}, snapshot: null }, // cache keyed by categoryId -> { timestamp, data }
+    stock: { loading: false, newsCache: null, newsCacheAt: 0 },
+  };
+
+  function isJobsPage() {
+    // Desktop and TornPDA can expose slightly different URL shapes during
+    // WebView/SPA navigation. Match the real companies.php path even when
+    // there is a trailing slash, query string or hash route.
+    const path = String(window.location.pathname || '').replace(/\/+$/, '');
+    if (/(?:^|\/)companies\.php$/i.test(path)) return true;
+    return /\/companies\.php(?:[?#]|$)/i.test(String(window.location.href || ''));
+  }
+
+  function findJobsMount() {
+    const anchors = [
+      '.companies-wrap',
+      '#companies-page',
+      '[class*="companies"][class*="wrap"]',
+      '.content-wrapper',
+      '#main-container',
+      '#mainContainer',
+      '.cont-gray',
+      'main',
+      '[role="main"]',
+    ];
+
+    for (const selector of anchors) {
+      const el = document.querySelector(selector);
+      if (el && !el.closest('#tds-panel')) return el;
+    }
+
+    // TornPDA's mobile DOM can omit desktop wrapper classes. On the confirmed
+    // companies page, body is a safe last-resort mount rather than making the
+    // whole suite disappear.
+    return isJobsPage() ? document.body : null;
+  }
+
+  function removePanel() {
+    const panel = document.getElementById('tds-panel');
+    if (panel) panel.remove();
+    state.panel = null;
+  }
+
+  function buildPanel(mount) {
+    tdsTrace('10 buildPanel entered');
+    const panel = document.createElement('section');
+    panel.id = 'tds-panel';
+    panel.setAttribute('aria-label', 'Torn Company Management Suite');
+    tdsTrace('11 before panel.innerHTML');
+    panel.innerHTML = `
+      <div id="tds-header">
+        <div class="tds-brand">
+          <span class="tds-brand-dot">\u25cb</span>
+          <span class="tds-brand-name">TORN COMPANY MANAGEMENT SUITE</span>
+          <span class="tds-brand-version">v${TDS_VERSION}</span>
+          <span class="tds-brand-subtitle">Company Director Dashboard</span>
+        </div>
+        <div id="tds-header-icons">
+          <button data-action="refresh" title="Run Diagnostics Again">\u27f3</button>
+          <button data-action="tab-settings" title="Settings">\u2699</button>
+        </div>
+      </div>
+      <div id="tds-tabs">
+        <button class="tds-tab tds-tab-active" data-tab="overview">OVERVIEW</button>
+        <button class="tds-tab" data-tab="finance">COMPANY FINANCIALS</button>
+        <button class="tds-tab" data-tab="stock">STOCK</button>
+        <button class="tds-tab" data-tab="training">TRAINING</button>
+        <button class="tds-tab" data-tab="benchmark">COMPARE</button>
+        <button class="tds-tab" data-tab="optimize">EMPLOYEE EFFECTIVENESS</button>
+        <button class="tds-tab" data-tab="settings">SETTINGS</button>
+        <button class="tds-tab" data-tab="diagnostics">DIAGNOSTICS</button>
+      </div>
+      <div id="tds-body">
+        <div class="tds-tabpanel" data-tabpanel="overview"></div>
+        <div class="tds-tabpanel" data-tabpanel="finance" hidden></div>
+        <div class="tds-tabpanel" data-tabpanel="stock" hidden></div>
+        <div class="tds-tabpanel" data-tabpanel="training" hidden></div>
+        <div class="tds-tabpanel" data-tabpanel="benchmark" hidden></div>
+        <div class="tds-tabpanel" data-tabpanel="optimize" hidden></div>
+        <div class="tds-tabpanel" data-tabpanel="settings" hidden></div>
+        <div class="tds-tabpanel" data-tabpanel="diagnostics" hidden></div>
+      </div>
+      <div id="tds-footer">
+        <span>Torn Company Management Suite v${TDS_VERSION}</span>
+        <span class="tds-footer-status" id="tds-footer-status">Last run: Never</span>
+      </div>
+    `;
+
+    // Put the suite into Torn's Jobs content rather than attaching an overlay to body.
+    tdsTrace('12 panel.innerHTML parsed');
+    mount.prepend(panel);
+    tdsTrace('13 panel mounted');
+    state.panel = panel;
+
+    applyTheme(panel, tdsGetValue(STORAGE_KEY_THEME, 'green'));
+
+    panel.querySelector('[data-action="tab-settings"]').addEventListener('click', () => switchTab(panel, 'settings'));
+    panel.querySelector('[data-action="refresh"]').addEventListener('click', () => runFullDiagnostic(panel, { force: true }));
+    panel.querySelectorAll('.tds-tab').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        if (btn.classList.contains('tds-tab-locked')) return;
+        switchTab(panel, btn.dataset.tab);
+      });
+    });
+
+    tdsTrace('14 render Settings');
+    renderSettingsTab(panel);
+    tdsTrace('15 render Diagnostics');
+    renderDiagnosticsTab(panel, null);
+    tdsTrace('16 render Overview');
+    renderOverviewTab(panel, null, null);
+    tdsTrace('17 render Financials');
+    renderFinanceTab(panel);
+    tdsTrace('20 render Stock');
+    renderStockTab(panel);
+    tdsTrace('18 render Training');
+    renderTrainingTab(panel).catch((err) => console.error('[TDS] Training render failed:', err));
+    tdsTrace('19 render Compare');
+    renderBenchmarkTab(panel);
+    tdsTrace('21 render Effectiveness');
+    renderOptimizeTab(panel);
+    tdsTrace('22 before initial switchTab');
+    switchTab(panel, 'overview');
+    tdsTrace('23 buildPanel complete');
+
+    return panel;
+  }
+
+  function switchTab(panel, tabName) {
+    panel.querySelectorAll('.tds-tab').forEach((b) => b.classList.toggle('tds-tab-active', b.dataset.tab === tabName));
+    panel.querySelectorAll('.tds-tabpanel').forEach((p) => {
+      p.hidden = p.dataset.tabpanel !== tabName;
+    });
+    // Sales history can require an extra company/news API request. Load it only
+    // when the Stock tab is actually opened, not on every Torn page refresh.
+    if (tabName === 'stock') renderStockTab(panel).catch((err) => console.error('[TDS] Stock tab failed:', err));
+  }
+
+  function renderSettingsTab(panel) {
+    const el = panel.querySelector('[data-tabpanel="settings"]');
+    const currentTheme = tdsGetValue(STORAGE_KEY_THEME, 'green');
+
+    el.innerHTML = `
+      <div class="tds-section-label">API Key</div>
+      <div class="tds-box tds-box-neutral">Stored only in this browser (Tampermonkey local storage). Never sent anywhere except api.torn.com.</div>
+      <div class="tds-box tds-box-warn">
+        <strong>What actually gates each selection</strong> (confirmed by testing a real key at both Limited
+        and Full Access, not assumed):
+        <ul style="margin:6px 0 0 18px; padding:0;">
+          <li><code>company: detailed, stock, applications</code> \u2014 gated by <strong>being the company
+            director</strong>, not by key tier. These returned BLOCKED (Torn error 7, "Incorrect ID-entity
+            relation") even with a Full Access key belonging to a non-director. No key upgrade fixes this;
+            only the director's own key gets real data here.</li>
+          <li><code>user: log</code> (training history) \u2014 <strong>is</strong> tier-gated: BLOCKED at Limited
+            (error 16, "access level not high enough"), ACCESSIBLE at Full.</li>
+          <li><code>company: profile, employees</code> and <code>user: basic, workstats</code> \u2014 worked at
+            Limited already.</li>
+        </ul>
+      </div>
+      <div class="tds-box tds-box-neutral">
+        Company financials/stock/applications only return real data if you're the company's director.
+      </div>
+      <div class="tds-box tds-box-neutral">
+        <strong>Create the API key for this program.</strong><br>
+        This opens Torn's official custom-key generator with the permissions used by
+        <strong>Torn Company Management Suite</strong> already selected:
+        <strong>Company: Profile, Employees, Detailed, Stock, News, Applications, Companies, Search, Snapshot</strong>;
+        <strong>User: Basic, Workstats, Log</strong>;
+        <strong>Torn: Companies</strong>.<br><br>
+        Torn will handle the actual key creation. Review the selections on Torn's page,
+        generate the key, then paste the new key into the box below. Custom keys should be
+        treated as sensitive credentials.
+      </div>
+      <button class="tds-btn" id="tds-create-api-key">Create Custom API Key ↗</button>
+      <div style="position:relative; margin-top:8px;">
+        <input class="tds-input" id="tds-keyinput" type="password" autocomplete="off" spellcheck="false" placeholder="Paste API key here" style="padding-right:76px; width:100%; box-sizing:border-box;" />
+        <button type="button" class="tds-btn-ghost" id="tds-togglekey" style="position:absolute; right:6px; top:50%; transform:translateY(-50%); padding:4px 8px; font-size:11px;">Show</button>
+      </div>
+      <div style="margin-top:8px; display:flex; gap:8px;">
+        <button class="tds-btn" id="tds-savekey">Save key</button>
+      </div>
+      <div class="tds-box tds-box-neutral" style="margin-top:10px;">
+        Once an API key is saved, the system can run automatically on startup. No UI action is required.
+      </div>
+
+      <div class="tds-section-label">Diagnostics</div>
+      <div class="tds-box tds-box-neutral">
+        Diagnostics are automatically run once and remembered across Torn page changes and browser refreshes.
+        Run them again manually whenever you want to refresh the capability check. The Diagnostics tab itself
+        is always available \u2014 nothing about it is gated.
+      </div>
+      <button class="tds-btn-ghost" id="tds-rerun-diagnostics">Run Diagnostics Again</button>
+
+      <div class="tds-section-label">License</div>
+      <div class="tds-card">
+        <div class="tds-row"><span class="tds-row-label">Torn User ID</span><span class="tds-row-value" id="tds-license-userid">\u2014</span></div>
+        <div class="tds-row"><span class="tds-row-label">Status</span><span class="tds-row-value" id="tds-license-status-value">\u2014</span></div>
+        <div class="tds-row"><span class="tds-row-label">Last checked</span><span class="tds-row-value" id="tds-license-checked">\u2014</span></div>
+        <div class="tds-row" id="tds-license-reason-row" style="display:none;"><span class="tds-row-label">Detail</span><span class="tds-row-value tds-v-dim" id="tds-license-reason" style="font-weight:400;"></span></div>
+        <div style="margin-top:8px;">
+          <button class="tds-btn-ghost" id="tds-recheck-license">Recheck license</button>
+        </div>
+      </div>
+      <div class="tds-box tds-box-neutral">
+        Checked against a public list keyed by your Torn User ID, refreshed at most every
+        ${LICENSE_CACHE_TTL_MS / 3600000}h (cached locally in between). Only your numeric User ID is sent for
+        this check \u2014 no API key, no company data, nothing else about you.
+      </div>
+
+      <div class="tds-section-label">Color Theme</div>
+      <div class="tds-card">
+        <div class="tds-card-title">Accent color (affects highlights, tabs, buttons \u2014 not the red/green/amber meaning colors)</div>
+        <div class="tds-swatches" id="tds-swatches"></div>
+      </div>
+    `;
+
+    const keyInput = el.querySelector('#tds-keyinput');
+    const toggleKey = el.querySelector('#tds-togglekey');
+    keyInput.value = tdsGetValue(STORAGE_KEY_APIKEY, '');
+
+    // Keep the API key masked by default. It can be temporarily revealed
+    // with the Show button when the user needs to verify or edit it.
+    toggleKey.addEventListener('click', () => {
+      const visible = keyInput.type === 'text';
+      keyInput.type = visible ? 'password' : 'text';
+      toggleKey.textContent = visible ? 'Show' : 'Hide';
+    });
+
+    // Open Torn's official custom-key creation flow with this suite's
+    // required selections and title pre-filled. Torn performs the actual
+    // key generation; this script never sees the generated key until the
+    // user deliberately pastes it into the input below.
+    el.querySelector('#tds-create-api-key').addEventListener('click', () => {
+      const url = buildCustomKeyUrl();
+      window.open(url, '_blank', 'noopener');
+    });
+
+    el.querySelector('#tds-savekey').addEventListener('click', async () => {
+      const key = keyInput.value.trim();
+      tdsSetValue(STORAGE_KEY_APIKEY, key);
+      keyInput.style.borderColor = 'var(--tds-accent)';
+      setTimeout(() => (keyInput.style.borderColor = ''), 600);
+      if (key && !state.diagnosticRunning) {
+        try {
+          await runFullDiagnostic(panel, { force: true });
+        } catch (err) {
+          console.error('[TDS] Run after API key save failed:', err);
+        }
+      }
+    });
+
+    const rerunButton = el.querySelector('#tds-rerun-diagnostics');
+    rerunButton.addEventListener('click', async () => {
+      if (state.diagnosticRunning) return;
+      try {
+        await runFullDiagnostic(panel, { force: true });
+      } catch (err) {
+        console.error('[TDS] Manual diagnostic run failed:', err);
+      }
+    });
+
+    el.querySelector('#tds-recheck-license').addEventListener('click', () => {
+      checkLicense(panel, { force: true }).catch((err) => console.error('[TDS] License recheck failed:', err));
+    });
+    renderLicenseStatusInSettings(panel);
+
+    const swatchWrap = el.querySelector('#tds-swatches');
+    Object.entries(THEME_PRESETS).forEach(([name, theme]) => {
+      const sw = document.createElement('div');
+      sw.className = 'tds-swatch' + (name === currentTheme ? ' tds-swatch-active' : '');
+      sw.style.background = theme.accent;
+      sw.title = name;
+      sw.addEventListener('click', () => {
+        tdsSetValue(STORAGE_KEY_THEME, name);
+        applyTheme(panel, name);
+        swatchWrap.querySelectorAll('.tds-swatch').forEach((s) => s.classList.remove('tds-swatch-active'));
+        sw.classList.add('tds-swatch-active');
+      });
+      swatchWrap.appendChild(sw);
+    });
+  }
+
+  function renderDiagnosticsTab(panel, results) {
+    const el = panel.querySelector('[data-tabpanel="diagnostics"]');
+    if (!results) {
+      el.innerHTML = `<div class="tds-box tds-box-neutral">Diagnostics run automatically on first use and can be rerun from Settings or the refresh button in the header. This shows exactly what your current key can access \u2014 every row reflects a real response from api.torn.com.</div>`;
+      return;
+    }
+    let html = '<div class="tds-section-label">Capability check</div>';
+    for (const r of results) {
+      if (r.status === 'ok') {
+        html += `
+          <div class="tds-diag-row">
+            <div>
+              <div class="tds-diag-label">${r.label}</div>
+              <div class="tds-diag-reason">Fields: ${r.sampleKeys.join(', ')}</div>
+            </div>
+            <span class="tds-badge tds-badge-ok">ACCESSIBLE</span>
+          </div>`;
+      } else {
+        html += `
+          <div class="tds-diag-row">
+            <div>
+              <div class="tds-diag-label">${r.label}</div>
+              <div class="tds-diag-reason">Torn error ${r.code ?? ''}: ${r.reason}</div>
+            </div>
+            <span class="tds-badge tds-badge-blocked">BLOCKED</span>
+          </div>`;
+      }
+    }
+    el.innerHTML = html;
+  }
+
+  function renderOverviewTab(panel, results, verdict) {
+    const el = panel.querySelector('[data-tabpanel="overview"]');
+    if (!results || !verdict) {
+      el.innerHTML = `<div class="tds-box tds-box-neutral">No data yet. Add your API key in Settings, then run Diagnostics.</div>`;
+      return;
+    }
+
+    let html = '';
+    const boxClass = verdict.level === 'director' ? 'tds-box-info' : verdict.level === 'unknown' ? 'tds-box-danger' : 'tds-box-warn';
+    html += `<div class="tds-box ${boxClass}"><strong>${escapeHtml(verdict.headline)}</strong><br>${escapeHtml(verdict.detail)}</div>`;
+
+    const profile = findRaw(results, 'company', 'profile');
+    const detailed = findRaw(results, 'company', 'detailed');
+    const employeesRaw = findRaw(results, 'company', 'employees');
+    const employees = extractEmployeesEntries(employeesRaw);
+
+    // Show every usable scalar value returned by company/profile, rather than
+    // maintaining a small hard-coded list. This means new fields Torn adds to
+    // the profile automatically appear here too. Employee objects/collections
+    // are excluded because the Employees section below renders them properly.
+    if (profile) {
+      const profileRows = collectDisplayFields(profile, {
+        skipObjectKeys: ['employees', 'employee', 'positions']
+      });
+
+      const capacity = numericValue(findValueDeep(profile, [
+        'employees_capacity', 'employee_capacity', 'max_employees',
+        'maximum_employees', 'capacity'
+      ]));
+      const employeeCount = employees.length || numericValue(findValueDeep(profile, [
+        'employees_hired', 'employee_count', 'employees_count', 'num_employees'
+      ]));
+
+      html += '<div class="tds-section-label">Company</div><div class="tds-card">';
+
+      // Put the most useful/common company fields first, then append every
+      // other scalar field returned by Torn that has not already been shown.
+      const preferred = [
+        ['name', 'Name'], ['company_name', 'Name'], ['type', 'Type'], ['company_type', 'Type'],
+        ['director', 'Director'], ['days_old', 'Company Age'], ['age', 'Company Age'],
+        ['popularity', 'Popularity'], ['efficiency', 'Efficiency'], ['environment', 'Environment'],
+        ['rating', 'Rating'], ['trains_available', 'Trains Available'], ['trains', 'Trains'],
+        ['daily_income', 'Daily Income'], ['daily_customers', 'Daily Customers'],
+        ['weekly_income', 'Weekly Income'], ['weekly_customers', 'Weekly Customers'],
+        ['company_bank', 'Company Bank']
+      ];
+      const shown = new Set();
+      const shownFieldNames = new Set();
+
+      // Torn can expose these three health values at different nesting levels
+      // depending on the API response shape. Pull them explicitly from the
+      // full profile (and detailed data when available) rather than relying on
+      // them being top-level scalar fields.
+      const healthMetrics = {
+        Popularity: findValueDeep(profile, ['popularity', 'company_popularity']) ?? findValueDeep(detailed, ['popularity', 'company_popularity']),
+        Efficiency: findValueDeep(profile, ['efficiency', 'company_efficiency']) ?? findValueDeep(detailed, ['efficiency', 'company_efficiency']),
+        Environment: findValueDeep(profile, ['environment', 'company_environment']) ?? findValueDeep(detailed, ['environment', 'company_environment'])
+      };
+
+      for (const [key, label] of preferred) {
+        const row = profileRows.find((r) => normalizeFieldName(r.key) === normalizeFieldName(key));
+        const explicitHealthValue = Object.prototype.hasOwnProperty.call(healthMetrics, label)
+          ? healthMetrics[label]
+          : null;
+        if ((!row && explicitHealthValue === null) || (row && shown.has(row.path))) continue;
+
+        let formatter = formatCompanyValue;
+        let value = row ? row.value : explicitHealthValue;
+        if (label === 'Director') {
+          formatter = (value) => formatDirectorName(value, employees, results);
+        } else if (label === 'Type') {
+          formatter = (value) => formatCompanyType(value, results);
+        } else if (label === 'Company Age') {
+          formatter = formatCompanyAge;
+        } else if (label === 'Daily Income' || label === 'Weekly Income') {
+          formatter = formatCurrency;
+        } else if (label === 'Popularity' || label === 'Efficiency' || label === 'Environment') {
+          formatter = formatPercent;
+        }
+
+        html += companyOverviewRow(label, value, formatter);
+        if (row) shown.add(row.path);
+        shownFieldNames.add(normalizeFieldName(key));
+      }
+
+      // Always show roster size in the familiar current / capacity form when
+      // either side is known, even if Torn exposes those values under different
+      // field names.
+      if (employeeCount !== null || capacity !== null) {
+        html += companyOverviewRow('Employees', employeeCount, () => {
+          if (employeeCount !== null && capacity !== null) return `${formatNumber(employeeCount)} / ${formatNumber(capacity)}`;
+          if (employeeCount !== null) return formatNumber(employeeCount);
+          return `— / ${formatNumber(capacity)}`;
+        });
+      }
+
+      for (const row of profileRows) {
+        if (shown.has(row.path)) continue;
+        const nk = normalizeFieldName(row.key);
+        if (shownFieldNames.has(nk)) continue;
+        // These are already represented by the combined Employees row.
+        if (/^(employeeshired|employeecount|employeescount|numemployees|employeescapacity|employeecapacity|maxemployees|maximumemployees|capacity)$/.test(nk)) continue;
+
+        let formatter = formatCompanyValue;
+        if (/^(dailyincome|weeklyincome)$/.test(nk)) formatter = formatCurrency;
+        if (/^(daysold|age)$/.test(nk)) formatter = formatCompanyAge;
+        html += companyOverviewRow(row.label, row.value, formatter);
+        shown.add(row.path);
+      }
+      html += '</div>';
+    }
+
+    // company/detailed is director-only. If the key can access it, include all
+    // scalar fields here as part of Overview as requested. If Torn blocks it,
+    // the existing access notice at the top already explains why.
+    if (detailed) {
+      const detailedRows = collectDisplayFields(detailed, {
+        skipObjectKeys: ['employees', 'employee', 'positions']
+      });
+      if (detailedRows.length) {
+        html += '<div class="tds-section-label">Company Details</div><div class="tds-card">';
+        for (const row of detailedRows) {
+          const nk = normalizeFieldName(row.key);
+          const formatter = /^(dailyincome|weeklyincome)$/.test(nk) ? formatCurrency : formatCompanyValue;
+          html += companyOverviewRow(row.label, row.value, formatter);
+        }
+        html += '</div>';
+      }
+    }
+
+    html += '<div class="tds-section-label">Employees</div>';
+    if (employees.length > 0) {
+      html += '<div class="tds-card">';
+
+      employees.slice(0, 15).forEach((employee) => {
+        const emp = employee.raw;
+        const effectiveness = emp.effectiveness && typeof emp.effectiveness === 'object'
+          ? emp.effectiveness
+          : null;
+        const lastAction = emp.last_action && typeof emp.last_action === 'object'
+          ? emp.last_action
+          : null;
+        const status = emp.status && typeof emp.status === 'object'
+          ? emp.status
+          : null;
+
+        // Torn exposes two different concepts here:
+        //   last_action.status -> Online / Idle / Offline presence
+        //   status.state       -> player state such as Okay / Hospital / Traveling
+        //   status.description -> human-readable detail for that state
+        const onlineStatus = lastAction?.status || '—';
+        const playerState = status?.state || '—';
+        const stateDetail = status?.description || '—';
+
+        html += `
+          <details class="tds-employee-row">
+            <summary class="tds-employee-summary">
+              <div class="tds-employee-top">
+                <div>
+                  <div class="tds-employee-name">${escapeHtml(String(employee.name))}</div>
+                  <div class="tds-employee-meta">${escapeHtml(String(employee.position || 'Employee'))}</div>
+                </div>
+                <div style="display:flex; align-items:center; gap:8px;">
+                  <span class="tds-badge tds-badge-neutral">${escapeHtml(String(onlineStatus))}</span>
+                  <span class="tds-employee-chevron">\u25b8</span>
+                </div>
+              </div>
+            </summary>
+
+            <div class="tds-card" style="margin:8px 0 0;">
+              <div class="tds-row"><span class="tds-row-label">Days employed</span><span class="tds-row-value">${formatNumber(emp.days_in_company)}</span></div>
+              <div class="tds-section-label tds-employee-subheading" style="margin-top:10px;">Working Stats</div>
+              <div class="tds-row"><span class="tds-row-label">Manual Labor</span><span class="tds-row-value">${formatNumber(emp.manual_labor)}</span></div>
+              <div class="tds-row"><span class="tds-row-label">Intelligence</span><span class="tds-row-value">${formatNumber(emp.intelligence)}</span></div>
+              <div class="tds-row"><span class="tds-row-label">Endurance</span><span class="tds-row-value">${formatNumber(emp.endurance)}</span></div>
+
+              ${effectiveness ? `
+                <div class="tds-section-label tds-employee-subheading" style="margin-top:10px;">Effectiveness</div>
+                <div class="tds-row"><span class="tds-row-label">Working Stats</span><span class="tds-row-value">${formatNumber(effectiveness.working_stats)}</span></div>
+                <div class="tds-row"><span class="tds-row-label">Settled In</span><span class="tds-row-value">${formatNumber(effectiveness.settled_in)}</span></div>
+                <div class="tds-row"><span class="tds-row-label">Director Education</span><span class="tds-row-value">${formatNumber(effectiveness.director_education)}</span></div>
+                <div class="tds-row"><span class="tds-row-label">Addiction</span><span class="tds-row-value">${formatNumber(effectiveness.addiction)}</span></div>
+                <div class="tds-row"><span class="tds-row-label">Total</span><span class="tds-row-value">${formatNumber(effectiveness.total)}</span></div>
+              ` : ''}
+
+              ${status || lastAction ? `
+                <div class="tds-section-label tds-employee-subheading" style="margin-top:10px;">Status</div>
+                <div class="tds-row"><span class="tds-row-label">Online Status</span><span class="tds-row-value">${escapeHtml(String(onlineStatus))}</span></div>
+                <div class="tds-row"><span class="tds-row-label">State</span><span class="tds-row-value">${escapeHtml(String(playerState))}</span></div>
+                <div class="tds-row"><span class="tds-row-label">Detail</span><span class="tds-row-value">${escapeHtml(String(stateDetail))}</span></div>
+                <div class="tds-row"><span class="tds-row-label">Last action</span><span class="tds-row-value">${escapeHtml(String(lastAction?.relative || formatTimestampRelative(lastAction?.timestamp)))}</span></div>
+              ` : ''}
+            </div>
+          </details>`;
+      });
+
+      if (employees.length > 15) {
+        html += `<div class="tds-box tds-box-neutral" style="margin-top:10px;">Showing the first 15 employees of ${employees.length} returned by the API.</div>`;
+      }
+      html += '</div>';
+    } else {
+      html += `<div class="tds-box tds-box-neutral">No employee records could be mapped from the company/employees response. Diagnostics shows the actual response fields so the parser can be extended without displaying raw JSON.</div>`;
+    }
+
+    el.innerHTML = html;
+  }
+
+  function escapeHtml(str) {
+    return str.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  }
+
+  // ---------------------------------------------------------------------
+  // 5c. LICENSE CHECK -- Torn User ID against a public GitHub-hosted list.
+  //     Fully separate from the Torn API: uses raw.githubusercontent.com,
+  //     sends only the numeric User ID (already public within Torn itself),
+  //     and never touches the API key or any company data.
+  // ---------------------------------------------------------------------
+  const LICENSE_GATED_TABS = ['overview', 'finance', 'stock', 'training', 'benchmark', 'optimize'];
+
+  function findOwnUserId(results) {
+    const basic = findRaw(results, 'user', 'basic');
+    if (!basic) return null;
+    const key = Object.keys(basic).find((k) =>
+      /^(player_id|user_id|id)$/i.test(k) && (typeof basic[k] === 'number' || typeof basic[k] === 'string'));
+    if (!key) return null;
+    const n = Number(basic[key]);
+    return Number.isFinite(n) ? n : null;
+  }
+
+  function fetchLicenseList() {
+    return new Promise((resolve, reject) => {
+      GM_xmlhttpRequest({
+        method: 'GET',
+        url: LICENSE_JSON_URL,
+        timeout: 15000,
+        onload: (res) => {
+          let parsed;
+          try {
+            parsed = JSON.parse(res.responseText);
+          } catch (e) {
+            reject({
+              reason: `licensed-users.json is not valid JSON yet. Expected an array like `
+                + `[{"userId":4237873,"status":"active"}]. Current content starts with: `
+                + `"${String(res.responseText).slice(0, 80)}"`,
+            });
+            return;
+          }
+          const list = Array.isArray(parsed) ? parsed : (Array.isArray(parsed?.users) ? parsed.users : null);
+          if (!list) {
+            reject({ reason: 'licensed-users.json parsed as JSON but isn\u2019t an array of {userId, status} entries yet.' });
+            return;
+          }
+          resolve(list);
+        },
+        onerror: () => reject({ reason: 'Network error contacting raw.githubusercontent.com' }),
+        ontimeout: () => reject({ reason: 'Timed out contacting raw.githubusercontent.com' }),
+      });
+    });
+  }
+
+  function licenseStatusMeta(status) {
+    switch (status) {
+      case 'active': return { label: 'ACTIVE', cls: 'tds-v-good' };
+      case 'expired': return { label: 'EXPIRED', cls: 'tds-v-bad' };
+      case 'unlicensed': return { label: 'NOT LICENSED', cls: 'tds-v-bad' };
+      default: return { label: 'UNKNOWN', cls: 'tds-v-warn' };
+    }
+  }
+
+  async function checkLicense(panel, { force = false } = {}) {
+    const results = state.lastResults;
+    const userId = results ? findOwnUserId(results) : null;
+
+    if (!userId) {
+      state.license = {
+        status: 'unknown',
+        reason: 'Torn User ID not available yet \u2014 run Diagnostics with an API key first (needs user/basic).',
+        checkedAt: Date.now(),
+        userId: null,
+      };
+      applyLicenseGate(panel);
+      return;
+    }
+
+    const cached = tdsGetValue(STORAGE_KEY_LICENSE_CACHE, null);
+    if (!force && cached && cached.userId === userId && (Date.now() - cached.checkedAt) < LICENSE_CACHE_TTL_MS) {
+      state.license = cached;
+      applyLicenseGate(panel);
+      return;
+    }
+
+    try {
+      const list = await fetchLicenseList();
+      const entry = list.find((row) => Number(row.userId ?? row.user_id ?? row.id) === userId);
+      const rawStatus = String(entry?.status ?? entry?.flag ?? entry?.state ?? '').toLowerCase();
+      const status = !entry ? 'unlicensed'
+        : rawStatus === 'active' ? 'active'
+        : rawStatus === 'expired' ? 'expired'
+        : 'unknown';
+      state.license = { status, checkedAt: Date.now(), userId, source: 'github' };
+      if (status === 'unknown' && entry) {
+        state.license.reason = `Entry found but status field ("${entry.status ?? entry.flag ?? entry.state}") wasn\u2019t "active" or "expired".`;
+      }
+    } catch (err) {
+      state.license = {
+        status: 'unknown',
+        reason: err.reason || 'License check failed.',
+        checkedAt: Date.now(),
+        userId,
+        source: 'github-error',
+      };
+    }
+
+    tdsSetValue(STORAGE_KEY_LICENSE_CACHE, state.license);
+    applyLicenseGate(panel);
+  }
+
+  function renderLicenseStatusInSettings(panel) {
+    const el = panel.querySelector('[data-tabpanel="settings"]');
+    if (!el) return;
+    const idEl = el.querySelector('#tds-license-userid');
+    const statusEl = el.querySelector('#tds-license-status-value');
+    const checkedEl = el.querySelector('#tds-license-checked');
+    const reasonRow = el.querySelector('#tds-license-reason-row');
+    const reasonEl = el.querySelector('#tds-license-reason');
+    if (!idEl || !statusEl || !checkedEl) return;
+
+    const license = state.license;
+    if (!license) {
+      idEl.textContent = '\u2014';
+      statusEl.textContent = 'Not checked yet';
+      statusEl.className = 'tds-row-value tds-v-dim';
+      checkedEl.textContent = '\u2014';
+      if (reasonRow) reasonRow.style.display = 'none';
+      return;
+    }
+
+    idEl.textContent = license.userId ?? '\u2014';
+    const meta = licenseStatusMeta(license.status);
+    statusEl.textContent = meta.label;
+    statusEl.className = `tds-row-value ${meta.cls}`;
+    checkedEl.textContent = license.checkedAt ? formatTimestampRelative(license.checkedAt) : '\u2014';
+
+    if (license.reason && reasonRow && reasonEl) {
+      reasonRow.style.display = '';
+      reasonEl.textContent = license.reason;
+    } else if (reasonRow) {
+      reasonRow.style.display = 'none';
+    }
+  }
+
+  function applyLicenseGate(panel) {
+    const license = state.license || { status: 'unknown' };
+    const active = license.status === 'active';
+
+    LICENSE_GATED_TABS.forEach((tab) => {
+      const btn = panel.querySelector(`.tds-tab[data-tab="${tab}"]`);
+      if (!btn) return;
+      btn.classList.toggle('tds-tab-locked', !active);
+      if (!active) btn.title = 'Requires an active license \u2014 see Settings';
+      else btn.removeAttribute('title');
+    });
+
+    if (!active) {
+      const meta = licenseStatusMeta(license.status);
+      const msg = `
+        <div class="tds-box tds-box-warn">
+          <strong>License required.</strong> Status: <span class="${meta.cls}">${meta.label}</span>${license.reason ? ` \u2014 ${escapeHtml(license.reason)}` : ''}.
+          Go to Settings for details.
+        </div>`;
+      LICENSE_GATED_TABS.forEach((tab) => {
+        const panelEl = panel.querySelector(`[data-tabpanel="${tab}"]`);
+        if (panelEl) panelEl.innerHTML = msg;
+      });
+
+      const activeTabBtn = panel.querySelector('.tds-tab-active');
+      if (activeTabBtn && LICENSE_GATED_TABS.includes(activeTabBtn.dataset.tab)) {
+        switchTab(panel, 'settings');
+      }
+    }
+
+    renderLicenseStatusInSettings(panel);
+  }
+
+
+  // ---------------------------------------------------------------------
+  // 5b. SHARED HELPERS for Finance / Training / Benchmark tabs
+  // ---------------------------------------------------------------------
+  function findRaw(results, section, selections) {
+    const r = results?.find((x) => x.section === section && x.selections === selections && x.status === 'ok');
+    return r ? r.raw : null;
+  }
+
+  function findBlockedReason(results, section, selections) {
+    const r = results?.find((x) => x.section === section && x.selections === selections);
+    if (!r || r.status !== 'blocked') return null;
+    return `Torn error ${r.code ?? ''}: ${r.reason}`.trim();
+  }
+
+  // Normalizes the employee payload into a consistent [{ id, raw, name, position }]
+  // shape. Torn responses can arrive as an object keyed by employee ID, an
+  // array of [id, employee] pairs, an array of employee objects, or a wrapper
+  // object containing an employees collection. Never stringify the payload
+  // into the UI as the fallback.
+  function extractEmployeesEntries(companyEmployeesRaw) {
+    if (!companyEmployeesRaw) return [];
+
+    let list = companyEmployeesRaw;
+
+    if (!Array.isArray(list) && typeof list === 'object') {
+      const employeesKey = Object.keys(list).find((k) => /employees?/i.test(k));
+      if (employeesKey && list[employeesKey] && typeof list[employeesKey] === 'object') {
+        list = list[employeesKey];
+      }
+    }
+
+    let entries = [];
+
+    if (Array.isArray(list)) {
+      // A single Object.entries-style pair: ["3951439", { ...employee... }]
+      if (list.length === 2 && (typeof list[0] === 'string' || typeof list[0] === 'number') &&
+          list[1] && typeof list[1] === 'object' && !Array.isArray(list[1])) {
+        entries = [[list[0], list[1]]];
+      } else {
+        entries = list.map((value, index) => {
+          if (Array.isArray(value) && value.length >= 2 && value[1] && typeof value[1] === 'object') {
+            return [value[0], value[1]];
+          }
+          return [value?.id ?? index, value];
+        });
+      }
+    } else if (typeof list === 'object') {
+      // A single employee object: treat it as one entry only if it looks like
+      // an employee rather than a wrapper/container.
+      const looksLikeEmployee = ['name', 'position', 'days_in_company', 'manual_labor',
+        'intelligence', 'endurance', 'effectiveness', 'last_action', 'status']
+        .some((key) => Object.prototype.hasOwnProperty.call(list, key));
+
+      entries = looksLikeEmployee
+        ? [[list.id ?? 'employee', list]]
+        : Object.entries(list);
+    }
+
+    return entries
+      .filter(([, emp]) => emp && typeof emp === 'object' && !Array.isArray(emp))
+      .map(([id, emp]) => ({
+        id,
+        raw: emp,
+        name: emp.name ?? `#${id}`,
+        position: emp.position ?? ''
+      }));
+  }
+
+  function normalizeFieldName(name) {
+    return String(name || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  }
+
+  function findValueDeep(obj, preferredNames) {
+    if (!obj || typeof obj !== 'object') return null;
+    const wanted = new Set(preferredNames.map(normalizeFieldName));
+    const seen = new WeakSet();
+    let found = null;
+
+    function walk(value) {
+      if (found !== null || !value || typeof value !== 'object' || seen.has(value)) return;
+      seen.add(value);
+
+      for (const [key, child] of Object.entries(value)) {
+        if (wanted.has(normalizeFieldName(key)) && child !== undefined && child !== null && typeof child !== 'object') {
+          found = child;
+          return;
+        }
+      }
+      for (const child of Object.values(value)) {
+        if (child && typeof child === 'object') walk(child);
+        if (found !== null) return;
+      }
+    }
+
+    walk(obj);
+    return found;
+  }
+
+  function numericValue(value) {
+    if (typeof value === 'number' && Number.isFinite(value)) return value;
+    if (typeof value === 'string' && value.trim() !== '' && Number.isFinite(Number(value))) return Number(value);
+    return null;
+  }
+
+  function displayValue(value) {
+    if (value === undefined || value === null || value === '') return '—';
+    if (typeof value === 'number') return formatNumber(value);
+    return String(value);
+  }
+
+  function companyOverviewRow(label, value, formatter = displayValue) {
+    return `<div class="tds-row"><span class="tds-row-label">${escapeHtml(label)}</span><span class="tds-row-value">${escapeHtml(formatter(value))}</span></div>`;
+  }
+
+  function humanizeFieldName(name) {
+    return String(name || '')
+      .replace(/[_-]+/g, ' ')
+      .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+      .replace(/\b\w/g, (c) => c.toUpperCase());
+  }
+
+  function collectDisplayFields(raw, options = {}) {
+    if (!raw || typeof raw !== 'object') return [];
+    const skip = new Set((options.skipObjectKeys || []).map(normalizeFieldName));
+    const rows = [];
+    const seen = new WeakSet();
+
+    function walk(value, pathParts = [], depth = 0) {
+      if (!value || typeof value !== 'object' || seen.has(value) || depth > 5) return;
+      seen.add(value);
+
+      for (const [key, child] of Object.entries(value)) {
+        const nextPath = [...pathParts, key];
+        const path = nextPath.join('.');
+        if (child && typeof child === 'object' && !Array.isArray(child)) {
+          if (skip.has(normalizeFieldName(key))) continue;
+          walk(child, nextPath, depth + 1);
+          continue;
+        }
+        if (Array.isArray(child)) {
+          if (skip.has(normalizeFieldName(key))) continue;
+          if (child.every((v) => v === null || ['string', 'number', 'boolean'].includes(typeof v))) {
+            rows.push({ key, path, label: humanizeFieldName(key), value: child.join(', ') });
+          }
+          continue;
+        }
+        if (child === undefined || child === null || child === '') continue;
+        rows.push({ key, path, label: humanizeFieldName(key), value: child });
+      }
+    }
+
+    // Common Torn API wrapper objects should not make labels read like
+    // "Company > Name"; recurse into them directly when they are the only
+    // meaningful container.
+    const keys = Object.keys(raw);
+    const wrapperKey = keys.find((k) => /^(company|profile|detailed|details)$/i.test(k) && raw[k] && typeof raw[k] === 'object' && !Array.isArray(raw[k]));
+    if (wrapperKey && keys.length <= 3) walk(raw[wrapperKey]);
+    else walk(raw);
+    return rows;
+  }
+
+  function formatCompanyValue(value) {
+    if (value === undefined || value === null || value === '') return '—';
+    if (typeof value === 'boolean') return value ? 'Yes' : 'No';
+    if (typeof value === 'number') return formatNumber(value);
+    return String(value);
+  }
+
+  function formatCurrency(value) {
+    const n = numericValue(value);
+    if (n === null) return formatCompanyValue(value);
+    return `$${formatNumber(n)}`;
+  }
+
+  function formatPercent(value) {
+    if (value === undefined || value === null || value === '') return '—';
+    const text = String(value).trim();
+    if (text.endsWith('%')) return text;
+    const n = numericValue(value);
+    return n === null ? formatCompanyValue(value) : `${formatNumber(n)}%`;
+  }
+
+  function formatCompanyAge(value) {
+    const totalDays = numericValue(value);
+    if (totalDays === null) return formatCompanyValue(value);
+
+    const days = Math.max(0, Math.floor(totalDays));
+    if (days < 365) return `${formatNumber(days)} ${days === 1 ? 'day' : 'days'}`;
+
+    // The API exposes company age as a day count, not a foundation date, so
+    // month values here use 30-day company-age months after each 365-day year.
+    const years = Math.floor(days / 365);
+    const afterYears = days % 365;
+    const months = Math.floor(afterYears / 30);
+    const remainingDays = afterYears % 30;
+    const parts = [`${years} ${years === 1 ? 'year' : 'years'}`];
+    if (months) parts.push(`${months} ${months === 1 ? 'month' : 'months'}`);
+    if (remainingDays || !months) parts.push(`${remainingDays} ${remainingDays === 1 ? 'day' : 'days'}`);
+    return parts.join(', ');
+  }
+
+  function formatDirectorName(value, employees, results) {
+    if (value && typeof value === 'object') {
+      const objectName = findValueDeep(value, ['name', 'player_name', 'username']);
+      if (objectName) return String(objectName);
+      const objectId = findValueDeep(value, ['id', 'player_id', 'user_id']);
+      if (objectId !== null) value = objectId;
+    }
+
+    const directorId = String(value ?? '').trim();
+    if (!directorId) return '—';
+
+    const rosterMatch = (employees || []).find((employee) => String(employee.id) === directorId);
+    if (rosterMatch?.name && !String(rosterMatch.name).startsWith('#')) return String(rosterMatch.name);
+
+    const basic = findRaw(results, 'user', 'basic');
+    const basicId = basic && findValueDeep(basic, ['player_id', 'user_id', 'id']);
+    const basicName = basic && findValueDeep(basic, ['name', 'player_name', 'username']);
+    if (basicId !== null && String(basicId) === directorId && basicName) return String(basicName);
+
+    return String(value);
+  }
+
+  function formatCompanyType(value, results) {
+    if (value && typeof value === 'object') {
+      const name = findValueDeep(value, ['name', 'type_name', 'company_type_name']);
+      const id = findValueDeep(value, ['id', 'type', 'type_id', 'company_type']);
+      if (name && id !== null) return `${name} (${id})`;
+      if (name) return String(name);
+      if (id !== null) value = id;
+    }
+
+    const typeId = numericValue(value);
+    if (typeId === null) return formatCompanyValue(value);
+
+    const reference = findRaw(results, 'torn', 'companies');
+    const typeName = resolveCompanyTypeName(reference, typeId);
+    return typeName ? `${typeName} (${typeId})` : String(typeId);
+  }
+
+  function resolveCompanyTypeName(raw, typeId) {
+    if (!raw || typeof raw !== 'object') return null;
+    const wanted = String(typeId);
+    const seen = new WeakSet();
+    let found = null;
+
+    function walk(value) {
+      if (found || !value || typeof value !== 'object' || seen.has(value)) return;
+      seen.add(value);
+
+      if (!Array.isArray(value) && Object.prototype.hasOwnProperty.call(value, wanted)) {
+        const candidate = value[wanted];
+        if (candidate && typeof candidate === 'object') {
+          const name = findValueDeep(candidate, ['name', 'company_name', 'type_name']);
+          if (name) {
+            found = String(name);
+            return;
+          }
+        } else if (typeof candidate === 'string') {
+          found = candidate;
+          return;
+        }
+      }
+
+      for (const child of Object.values(value)) {
+        if (!child || typeof child !== 'object') continue;
+        const id = findValueDeep(child, ['id', 'type_id', 'company_type']);
+        if (id !== null && String(id) === wanted) {
+          const name = findValueDeep(child, ['name', 'company_name', 'type_name']);
+          if (name) {
+            found = String(name);
+            return;
+          }
+        }
+      }
+
+      for (const child of Object.values(value)) {
+        if (child && typeof child === 'object') walk(child);
+        if (found) return;
+      }
+    }
+
+    walk(raw);
+    return found;
+  }
+
+  function findNestedObject(obj, keyPattern) {
+    if (!obj || typeof obj !== 'object') return null;
+    if (Object.keys(obj).some((k) => keyPattern.test(k))) return obj;
+    return null;
+  }
+
+  function formatNumber(n) {
+    if (typeof n !== 'number' || Number.isNaN(n)) return '—';
+    return n.toLocaleString('en-GB');
+  }
+
+  function formatTimestampRelative(ts) {
+    if (!ts) return '—';
+    const seconds = Math.max(0, Math.floor((Date.now() - Number(ts)) / 1000));
+    if (seconds < 60) return `${seconds}s ago`;
+    const minutes = Math.floor(seconds / 60);
+    if (minutes < 60) return `${minutes}m ago`;
+    const hours = Math.floor(minutes / 60);
+    if (hours < 24) return `${hours}h ${minutes % 60}m ago`;
+    const days = Math.floor(hours / 24);
+    return `${days}d ${hours % 24}h ago`;
+  }
+
+  // Looks for a wage/salary-shaped numeric field on an employee object
+  // without assuming its exact name — flags what it found so the UI can
+  // label it EXACT (real field) rather than a guess.
+  function findWageField(emp) {
+    if (!emp || typeof emp !== 'object') return null;
+    const key = Object.keys(emp).find((k) => /wage|salary/i.test(k) && typeof emp[k] === 'number');
+    return key ? { key, value: emp[key] } : null;
+  }
+
+  function getEmployeeEffectiveness(emp) {
+    if (!emp || typeof emp !== 'object') return null;
+
+    // Current Torn company/employees responses expose effectiveness as an
+    // object. This is the same breakdown Torn shows in the employee table:
+    // working stats + settled in + director education + addiction = total.
+    const raw = emp.effectiveness;
+    if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+      const total = numericValue(raw.total);
+      return {
+        source: 'effectiveness',
+        workingStats: numericValue(raw.working_stats),
+        settledIn: numericValue(raw.settled_in),
+        directorEducation: numericValue(raw.director_education),
+        addiction: numericValue(raw.addiction),
+        total,
+      };
+    }
+
+    // Backwards compatibility for older/alternate response shapes where EE
+    // may be returned as a single numeric field.
+    const key = Object.keys(emp).find((k) => /effectiveness|^ee$/i.test(k) && typeof emp[k] === 'number');
+    if (!key) return null;
+    return {
+      source: key,
+      workingStats: null,
+      settledIn: null,
+      directorEducation: null,
+      addiction: null,
+      total: emp[key],
+    };
+  }
+
+  function findEffectivenessField(emp) {
+    const ee = getEmployeeEffectiveness(emp);
+    return ee && typeof ee.total === 'number' ? { key: ee.source, value: ee.total } : null;
+  }
+
+  function formatMoney(n) {
+    if (typeof n !== 'number' || Number.isNaN(n)) return '—';
+    const sign = n < 0 ? '-' : '';
+    const abs = Math.abs(n);
+    if (abs >= 1e9) return `${sign}$${(abs / 1e9).toFixed(2)}B`;
+    if (abs >= 1e6) return `${sign}$${(abs / 1e6).toFixed(2)}M`;
+    if (abs >= 1e3) return `${sign}$${(abs / 1e3).toFixed(1)}K`;
+    return `${sign}$${abs.toFixed(0)}`;
+  }
+
+  function dayKey(ts) {
+    const d = new Date(ts);
+    return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+  }
+
+  async function getSnapshotsSorted() {
+    const all = await LocalDB.getAll('snapshots');
+    return all.sort((a, b) => a.timestamp - b.timestamp);
+  }
+
+  // One entry per distinct local calendar day, keeping the LAST snapshot
+  // taken that day (freshest read for that day). This is purely local,
+  // locally-timestamped data — never backfilled or invented for days
+  // before you started running the diagnostic.
+  function collapseToDaily(snapshots) {
+    const byDay = new Map();
+    for (const snap of snapshots) byDay.set(dayKey(snap.timestamp), snap); // later overwrites earlier same-day
+    return [...byDay.values()].sort((a, b) => a.timestamp - b.timestamp);
+  }
+
+  // =======================================================================
+  // FINANCE TAB
+  // =======================================================================
+  async function renderFinanceTab(panel) {
+    const el = panel.querySelector('[data-tabpanel="finance"]');
+    const results = state.lastResults;
+    if (!results) {
+      el.innerHTML = `<div class="tds-box tds-box-neutral">Run the diagnostic first (Overview tab or the \u27f3 button) \u2014 Finance reads from that data plus your local snapshot history.</div>`;
+      return;
+    }
+
+    const profile = findRaw(results, 'company', 'profile');
+    const detailed = findRaw(results, 'company', 'detailed');
+    const employeesRaw = findRaw(results, 'company', 'employees');
+    const blockedProfile = findBlockedReason(results, 'company', 'profile');
+    const blockedDetailed = findBlockedReason(results, 'company', 'detailed');
+
+    let html = '';
+
+    if (!profile && !detailed) {
+      html += `<div class="tds-box tds-box-danger"><strong>Company profile unavailable.</strong> ${blockedProfile || 'No data returned.'} Finance needs at least this to show anything.</div>`;
+      el.innerHTML = html;
+      return;
+    }
+
+    // Torn refactored the company API in 2026. The current company/profile
+    // response can contain the former detailed data, and income fields are
+    // normally named daily_income / weekly_income. Search recursively so the
+    // Finance tab works with both legacy and wrapped response shapes.
+    const combined = { ...(profile || {}), ...(detailed || {}) };
+
+    function findNumericFieldDeep(obj, preferredNames, fallbackPattern) {
+      const preferred = new Set(preferredNames.map((name) => name.toLowerCase()));
+      const seen = new WeakSet();
+      let fallback = null;
+      function walk(value, path = '') {
+        if (!value || typeof value !== 'object' || seen.has(value)) return null;
+        seen.add(value);
+        for (const [key, child] of Object.entries(value)) {
+          const currentPath = path ? `${path}.${key}` : key;
+          if (typeof child === 'number' && Number.isFinite(child)) {
+            const lower = key.toLowerCase();
+            if (preferred.has(lower)) return { key, value: child, path: currentPath };
+            if (!fallback && fallbackPattern.test(key)) fallback = { key, value: child, path: currentPath };
+          } else if (child && typeof child === 'object') {
+            const found = walk(child, currentPath);
+            if (found && preferred.has(found.key.toLowerCase())) return found;
+          }
+        }
+        return null;
+      }
+      return walk(obj) || fallback;
+    }
+
+    const dailyField = findNumericFieldDeep(combined, ['daily_income', 'daily_profit'], /daily[_ ]?(income|profit)/i);
+    const weeklyField = findNumericFieldDeep(combined, ['weekly_income', 'weekly_profit'], /weekly[_ ]?(income|profit)/i);
+
+    const employees = extractEmployeesEntries(employeesRaw);
+    const wageFields = employees.map((e) => findWageField(e.raw)).filter(Boolean);
+    let totalSalary = wageFields.length > 0 ? wageFields.reduce((sum, w) => sum + w.value, 0) : null;
+    let salaryFieldName = wageFields[0]?.key;
+    // Fallback: some responses may only expose an aggregate wage/salary
+    // figure at the company level rather than per employee.
+    if (totalSalary === null) {
+      const aggregateWage = Object.entries(combined).find(([k, v]) => typeof v === 'number' && /wage|salar/i.test(k));
+      if (aggregateWage) {
+        totalSalary = aggregateWage[1];
+        salaryFieldName = aggregateWage[0];
+      }
+    }
+
+    const todayGross = dailyField ? dailyField.value : null;
+    const todayNet = todayGross !== null && totalSalary !== null ? todayGross - totalSalary : null;
+
+    // --- Today snapshot card ---
+    html += '<div class="tds-section-label">Today</div><div class="tds-card">';
+    html += `<div class="tds-row"><span class="tds-row-label">Gross${dailyField ? ` (${dailyField.path})` : ''}</span><span class="tds-row-value">${todayGross !== null ? formatMoney(todayGross) : '<span class="tds-v-dim">unavailable</span>'}</span></div>`;
+    html += `<div class="tds-row"><span class="tds-row-label">Salaries${salaryFieldName ? ` (${salaryFieldName})` : ''}</span><span class="tds-row-value tds-v-bad">${totalSalary !== null ? '-' + formatMoney(totalSalary) : '<span class="tds-v-dim">no wage field in this key\u2019s response</span>'}</span></div>`;
+    html += `<div class="tds-row"><span class="tds-row-label">Net (DERIVED)</span><span class="tds-row-value ${todayNet !== null ? (todayNet >= 0 ? 'tds-v-good' : 'tds-v-bad') : ''}">${todayNet !== null ? formatMoney(todayNet) : '<span class="tds-v-dim">needs gross + salary above</span>'}</span></div>`;
+    if (weeklyField) {
+      html += `<div class="tds-row"><span class="tds-row-label">Weekly (${weeklyField.path})</span><span class="tds-row-value">${formatMoney(weeklyField.value)}</span></div>`;
+    }
+    html += '</div>';
+    if (todayGross === null) {
+      html += `<div class="tds-box tds-box-warn">No numeric daily_income/daily_profit field was found in the company profile or detailed response. Fields actually present — profile: ${profile ? Object.keys(profile).join(', ') : (blockedProfile || 'blocked')}; detailed: ${detailed ? Object.keys(detailed).join(', ') : (blockedDetailed || 'blocked')}.</div>`;
+    }
+
+    // --- Company health, if company/detailed is accessible with this key ---
+    if (detailed) {
+      const bankField = Object.entries(detailed).find(([k, v]) => typeof v === 'number' && /bank/i.test(k));
+      const popField = Object.entries(detailed).find(([k, v]) => typeof v === 'number' && /popular/i.test(k));
+      const effField = Object.entries(detailed).find(([k, v]) => typeof v === 'number' && /efficien/i.test(k));
+      const envField = Object.entries(detailed).find(([k, v]) => typeof v === 'number' && /environ/i.test(k));
+      if (bankField || popField || effField || envField) {
+        html += '<div class="tds-section-label">Company Health</div><div class="tds-card">';
+        if (bankField) html += `<div class="tds-row"><span class="tds-row-label">Company bank</span><span class="tds-row-value">${formatMoney(bankField[1])}</span></div>`;
+        if (popField) html += `<div class="tds-row"><span class="tds-row-label">Popularity</span><span class="tds-row-value">${popField[1]}%</span></div>`;
+        if (effField) html += `<div class="tds-row"><span class="tds-row-label">Efficiency</span><span class="tds-row-value">${effField[1]}%</span></div>`;
+        if (envField) html += `<div class="tds-row"><span class="tds-row-label">Environment</span><span class="tds-row-value">${envField[1]}%</span></div>`;
+        html += '</div>';
+      }
+    }
+
+    // --- Historical comparison from local snapshots ---
+    // Snapshots store profile and detailed under separate keys (matching how
+    // they were fetched), so merge them per-snapshot the same way as above —
+    // otherwise a snapshot taken when only "detailed" held the income field
+    // would silently be treated as having no income data at all.
+    function snapshotIncomeFields(snap) {
+      return { ...(snap.company_profile || {}), ...(snap.company_detailed || {}) };
+    }
+    function findDailyIncome(snap) {
+      const merged = snapshotIncomeFields(snap);
+      return Object.entries(merged).find(([k, v]) => typeof v === 'number' && /daily/i.test(k) && /profit|income/i.test(k));
+    }
+
+    const allSnapshots = await getSnapshotsSorted();
+    const withIncomeData = allSnapshots.filter((s) => s.company_profile || s.company_detailed);
+    const daily = collapseToDaily(withIncomeData);
+
+    html += '<div class="tds-section-label">Today vs Yesterday <span class="tds-v-dim" style="font-weight:400;">(HISTORICAL \u2014 from local snapshots only)</span></div>';
+    if (daily.length < 2) {
+      html += `<div class="tds-box tds-box-neutral">Insufficient data \u2014 only ${daily.length} day${daily.length === 1 ? '' : 's'} of local snapshots so far. This starts filling in from tomorrow\u2019s first run onward; nothing here is backfilled or estimated.</div>`;
+    } else {
+      const todaySnap = daily[daily.length - 1];
+      const ySnap = daily[daily.length - 2];
+      const gField = findDailyIncome(todaySnap);
+      const yField = gField ? [gField[0], snapshotIncomeFields(ySnap)[gField[0]]] : null;
+      html += '<div class="tds-card">';
+      if (gField && yField && typeof yField[1] === 'number') {
+        const change = gField[1] - yField[1];
+        const pct = yField[1] !== 0 ? (change / Math.abs(yField[1])) * 100 : null;
+        html += `<div class="tds-row"><span class="tds-row-label">Today</span><span class="tds-row-value">${formatMoney(gField[1])}</span></div>`;
+        html += `<div class="tds-row"><span class="tds-row-label">Yesterday (last snapshot that day)</span><span class="tds-row-value">${formatMoney(yField[1])}</span></div>`;
+        html += `<div class="tds-row"><span class="tds-row-label">Change</span><span class="tds-row-value ${change >= 0 ? 'tds-v-good' : 'tds-v-bad'}">${change >= 0 ? '+' : ''}${formatMoney(change)}${pct !== null ? ` (${change >= 0 ? '\u2191' : '\u2193'} ${Math.abs(pct).toFixed(1)}%)` : ''}</span></div>`;
+      } else {
+        html += `<div class="tds-row-label">Couldn\u2019t match a comparable income field between the two snapshots.</div>`;
+      }
+      html += '</div>';
+
+      // Sparkline of last up to 7 local daily snapshots
+      const recent = daily.slice(-7);
+      const values = recent.map((s) => {
+        const f = findDailyIncome(s);
+        return f ? f[1] : null;
+      }).filter((v) => v !== null);
+      if (values.length >= 2) {
+        const maxAbs = Math.max(...values.map((v) => Math.abs(v)), 1);
+        html += `<div class="tds-section-label">Last ${values.length} days <span class="tds-v-dim" style="font-weight:400;">(local snapshots)</span></div><div class="tds-card"><div class="tds-spark">`;
+        recent.forEach((s) => {
+          const f = findDailyIncome(s);
+          const v = f ? f[1] : 0;
+          const h = Math.max(2, Math.round((Math.abs(v) / maxAbs) * 40));
+          const cls = v >= 0 ? 'tds-bar-pos' : 'tds-bar-neg';
+          const d = new Date(s.timestamp);
+          html += `<div class="tds-spark-col"><div class="tds-spark-bar ${cls}" style="height:${h}px" title="${formatMoney(v)}"></div><div class="tds-spark-label">${d.getMonth() + 1}/${d.getDate()}</div></div>`;
+        });
+        html += '</div></div>';
+      }
+    }
+
+    html += `<div class="tds-box tds-box-neutral" style="margin-top:10px;">One snapshot is taken per diagnostic run, up to ${MAX_SNAPSHOTS} kept locally (oldest pruned first). Run Diagnostics Again when you want a fresh snapshot.</div>`;
+
+    el.innerHTML = html;
+  }
+
+  // =======================================================================
+  // STOCK MANAGEMENT TAB
+  // =======================================================================
+  const STOCK_NEWS_CACHE_MS = 5 * 60 * 1000;
+
+  function deepObjectEntries(raw) {
+    const out = [];
+    const seen = new WeakSet();
+    function walk(value, path = []) {
+      if (!value || typeof value !== 'object' || seen.has(value)) return;
+      seen.add(value);
+      out.push({ value, path });
+      if (Array.isArray(value)) value.forEach((child, i) => walk(child, [...path, String(i)]));
+      else Object.entries(value).forEach(([key, child]) => walk(child, [...path, key]));
+    }
+    walk(raw);
+    return out;
+  }
+
+  function pickNumeric(obj, names) {
+    if (!obj || typeof obj !== 'object') return null;
+    for (const name of names) {
+      const wanted = normalizeFieldName(name);
+      const entry = Object.entries(obj).find(([k, v]) => normalizeFieldName(k) === wanted && numericValue(v) !== null);
+      if (entry) return numericValue(entry[1]);
+    }
+    return null;
+  }
+
+  function pickText(obj, names) {
+    if (!obj || typeof obj !== 'object') return null;
+    for (const name of names) {
+      const wanted = normalizeFieldName(name);
+      const entry = Object.entries(obj).find(([k, v]) => normalizeFieldName(k) === wanted && (typeof v === 'string' || typeof v === 'number'));
+      if (entry && String(entry[1]).trim()) return String(entry[1]).trim();
+    }
+    return null;
+  }
+
+  function extractStockItems(stockRaw) {
+    if (!stockRaw) return [];
+    const candidates = [];
+    const seenKeys = new Set();
+
+    for (const { value, path } of deepObjectEntries(stockRaw)) {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) continue;
+      const name = pickText(value, ['name', 'item_name', 'stock_name', 'product_name']);
+      const id = pickText(value, ['id', 'item_id', 'stock_id', 'product_id']) || (path.length ? path[path.length - 1] : null);
+      const current = pickNumeric(value, ['amount', 'quantity', 'qty', 'stock', 'in_stock', 'instock', 'available', 'inventory']);
+      const setPrice = pickNumeric(value, ['price', 'selling_price', 'sell_price', 'price_each', 'priceeach']);
+      const costEach = pickNumeric(value, ['cost', 'cost_each', 'costeach', 'unit_cost', 'buy_price']);
+      const rrp = pickNumeric(value, ['rrp', 'recommended_retail_price', 'retail_price']);
+      const soldTotal = pickNumeric(value, ['sold_total', 'soldtotal', 'total_sold', 'units_sold_total']);
+      const soldDaily = pickNumeric(value, ['sold_daily', 'solddaily', 'daily_sold', 'sold_day', 'sold_today', 'daily_sales', 'sales_day']);
+      const sold24 = pickNumeric(value, ['sold_24h', 'sold24h', 'sold_day', 'sold_today', 'daily_sold', 'daily_sales', 'sales_day']);
+      const sold7 = pickNumeric(value, ['sold_7d', 'sold7d', 'sold_week', 'weekly_sold', 'weekly_sales', 'sales_week']);
+
+      if (!name || (current === null && sold24 === null && sold7 === null && soldDaily === null && setPrice === null)) continue;
+      const key = `${id || ''}|${name}`.toLowerCase();
+      if (seenKeys.has(key)) continue;
+      seenKeys.add(key);
+      candidates.push({
+        id,
+        name,
+        current,
+        setPrice,
+        costEach,
+        rrp,
+        soldTotal,
+        soldDaily,
+        sold24,
+        sold7,
+        raw: value
+      });
+    }
+
+    return candidates.sort((a, b) => a.name.localeCompare(b.name));
+  }
+
+  function flattenNewsEntries(newsRaw) {
+    if (!newsRaw) return [];
+    const rows = [];
+    const seen = new Set();
+    for (const { value, path } of deepObjectEntries(newsRaw)) {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) continue;
+      const timestamp = pickNumeric(value, ['timestamp', 'time', 'created_at', 'date']);
+      const text = pickText(value, ['text', 'news', 'message', 'description', 'event', 'title']);
+      const id = pickText(value, ['id', 'news_id', 'event_id']) || path.join('.');
+      if (!text || !timestamp) continue;
+      const key = `${id}|${timestamp}|${text}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      rows.push({ id, timestamp, text, raw: value });
+    }
+    return rows.sort((a, b) => b.timestamp - a.timestamp);
+  }
+
+  function parseSaleFromNews(entry, stockItems) {
+    const raw = entry.raw || {};
+    const text = String(entry.text || '');
+    if (!/(sold|sale|customer|purchased|bought)/i.test(text)) return null;
+
+    let qty = pickNumeric(raw, ['quantity', 'qty', 'amount', 'sold', 'units', 'count']);
+    let itemName = pickText(raw, ['item_name', 'stock_name', 'product_name', 'item', 'product']);
+
+    const patterns = [
+      /(?:sold|sale of)\s+(\d[\d,]*)\s+(?:x\s+)?(.+?)(?:\s+(?:for|at|to|worth)\b|[.!]|$)/i,
+      /(\d[\d,]*)\s+(?:x\s+)?(.+?)\s+(?:were\s+|was\s+)?sold\b/i,
+      /(.+?)\s*[:\-]\s*(\d[\d,]*)\s+(?:sold|sales)\b/i,
+    ];
+    if (qty === null || !itemName) {
+      for (const re of patterns) {
+        const m = text.match(re);
+        if (!m) continue;
+        if (/^\D/.test(m[1])) {
+          itemName = itemName || m[1].trim();
+          qty = qty ?? Number(String(m[2]).replace(/,/g, ''));
+        } else {
+          qty = qty ?? Number(String(m[1]).replace(/,/g, ''));
+          itemName = itemName || m[2].trim();
+        }
+        break;
+      }
+    }
+    if (!Number.isFinite(qty) || qty <= 0 || !itemName) return null;
+
+    // Prefer a current stock item name so minor wording differences in news
+    // aggregate into the same row.
+    const normalizedNewsName = normalizeFieldName(itemName);
+    const match = stockItems.find((item) => {
+      const n = normalizeFieldName(item.name);
+      return n === normalizedNewsName || n.includes(normalizedNewsName) || normalizedNewsName.includes(n);
+    });
+    let salePrice = pickNumeric(raw, [
+      'price', 'sale_price', 'sold_price', 'price_each', 'unit_price', 'selling_price'
+    ]);
+
+    if (salePrice === null) {
+      const pricePatterns = [
+        /(?:for|at)\s*\$\s*([\d,]+(?:\.\d+)?)(?:\s+each)?\b/i,
+        /\$\s*([\d,]+(?:\.\d+)?)\s*(?:each|per\s+item|per\s+unit)\b/i,
+      ];
+      for (const re of pricePatterns) {
+        const m = text.match(re);
+        if (!m) continue;
+        const parsed = Number(String(m[1]).replace(/,/g, ''));
+        if (Number.isFinite(parsed)) {
+          salePrice = parsed;
+          break;
+        }
+      }
+    }
+
+    return {
+      timestamp: entry.timestamp,
+      quantity: qty,
+      name: match?.name || itemName,
+      id: match?.id || null,
+      price: salePrice
+    };
+  }
+
+  function aggregateSales(newsRaw, stockItems) {
+    const nowSec = Math.floor(Date.now() / 1000);
+    const dayAgo = nowSec - 86400;
+    const weekAgo = nowSec - 7 * 86400;
+    const totals = new Map();
+    const entries = flattenNewsEntries(newsRaw);
+    let parsedEvents = 0;
+
+    for (const entry of entries) {
+      const sale = parseSaleFromNews(entry, stockItems);
+      if (!sale) continue;
+      parsedEvents += 1;
+      const key = String(sale.id || normalizeFieldName(sale.name));
+      const row = totals.get(key) || {
+        name: sale.name,
+        sold24: 0,
+        sold7: 0,
+        lastSoldPrice: null,
+        lastSoldAt: null,
+        pricedUnits24: 0,
+        pricedRevenue24: 0
+      };
+
+      if (sale.timestamp >= weekAgo) row.sold7 += sale.quantity;
+      if (sale.timestamp >= dayAgo) row.sold24 += sale.quantity;
+
+      if (sale.price !== null && sale.price !== undefined) {
+        if (!row.lastSoldAt || sale.timestamp > row.lastSoldAt) {
+          row.lastSoldAt = sale.timestamp;
+          row.lastSoldPrice = sale.price;
+        }
+        if (sale.timestamp >= dayAgo) {
+          row.pricedUnits24 += sale.quantity;
+          row.pricedRevenue24 += sale.quantity * sale.price;
+        }
+      }
+
+      totals.set(key, row);
+    }
+
+    const oldestTimestamp = entries.length ? Math.min(...entries.map((e) => e.timestamp)) : null;
+    return { totals, parsedEvents, newsEntries: entries.length, oldestTimestamp };
+  }
+
+  async function fetchCompanyNewsForStock() {
+    if (state.stock.newsCache && Date.now() - state.stock.newsCacheAt < STOCK_NEWS_CACHE_MS) return state.stock.newsCache;
+    const now = Math.floor(Date.now() / 1000);
+    const from = now - 7 * 86400;
+    let data;
+    try {
+      data = await ApiClient.call('company', 'news', '', { from, to: now });
+    } catch (err) {
+      // Some API versions ignore/rename the window parameters. Fall back to
+      // the normal news selection before declaring the history unavailable.
+      data = await ApiClient.call('company', 'news');
+    }
+    state.stock.newsCache = data;
+    state.stock.newsCacheAt = Date.now();
+    return data;
+  }
+
+  function stockDaysRemaining(current, dailyRate) {
+    if (current === null || typeof current !== 'number') return null;
+    if (!dailyRate || dailyRate <= 0) return null;
+    return current / dailyRate;
+  }
+
+  function stockGrossMargin(setPrice, costEach) {
+    if (setPrice === null || costEach === null) return null;
+    return setPrice - costEach;
+  }
+
+  function stockMarginPercent(setPrice, costEach) {
+    if (setPrice === null || costEach === null || costEach <= 0) return null;
+    return ((setPrice - costEach) / costEach) * 100;
+  }
+
+  function pricingRecommendation(item, sold24, sold7, lastSoldPrice) {
+    const setPrice = item.setPrice;
+    const rrp = item.rrp;
+    const current = item.current;
+    const day = sold24 !== null ? Math.max(0, Number(sold24) || 0) : null;
+    const week = sold7 !== null ? Math.max(0, Number(sold7) || 0) : null;
+    const weeklyDailyAverage = week !== null ? week / 7 : null;
+    const dailyRate = day !== null ? day : (item.soldDaily !== null ? item.soldDaily : weeklyDailyAverage);
+    const daysLeft = stockDaysRemaining(current, dailyRate);
+
+    if (setPrice === null) {
+      return {
+        action: 'No price data',
+        className: '',
+        suggested: null,
+        reason: 'Torn did not return the currently configured selling price.'
+      };
+    }
+
+    const trend =
+      day !== null && weeklyDailyAverage !== null && weeklyDailyAverage > 0
+        ? ((day - weeklyDailyAverage) / weeklyDailyAverage) * 100
+        : null;
+
+    let score = 0;
+    const reasons = [];
+
+    // Strong recent demand and plenty of cover suggests there is room to test
+    // a small increase. Weak demand with lots of inventory suggests the reverse.
+    if (trend !== null) {
+      if (trend >= 15) {
+        score += 2;
+        reasons.push(`24h sales are ${trend.toFixed(0)}% above the 7-day daily average`);
+      } else if (trend <= -15) {
+        score -= 2;
+        reasons.push(`24h sales are ${Math.abs(trend).toFixed(0)}% below the 7-day daily average`);
+      } else {
+        reasons.push('24h sales are close to the 7-day daily average');
+      }
+    }
+
+    if (daysLeft !== null) {
+      if (daysLeft >= 14) {
+        score += 1;
+        reasons.push(`${daysLeft.toFixed(1)} days of stock remain`);
+      } else if (daysLeft <= 4) {
+        score -= 1;
+        reasons.push(`only ${daysLeft.toFixed(1)} days of stock remain`);
+      }
+    }
+
+    if (rrp !== null) {
+      if (setPrice < rrp * 0.85) {
+        score += 1;
+        reasons.push(`set price is well below RRP (${formatCurrency(rrp)})`);
+      } else if (setPrice > rrp * 1.20) {
+        score -= 1;
+        reasons.push(`set price is well above RRP (${formatCurrency(rrp)})`);
+      }
+    }
+
+    if (lastSoldPrice !== null) {
+      if (lastSoldPrice >= setPrice) {
+        reasons.push(`latest observed sale cleared at ${formatCurrency(lastSoldPrice)}`);
+      } else {
+        score -= 1;
+        reasons.push(`latest observed sale price (${formatCurrency(lastSoldPrice)}) is below the set price`);
+      }
+    }
+
+    let action = 'Hold';
+    let suggested = setPrice;
+    let className = '';
+
+    if (score >= 2) {
+      action = 'Consider raising';
+      suggested = setPrice + 1;
+      className = 'tds-v-good';
+    } else if (score <= -2) {
+      action = 'Consider lowering';
+      suggested = Math.max(item.costEach !== null ? item.costEach : 0, setPrice - 1);
+      className = 'tds-v-bad';
+    }
+
+    return {
+      action,
+      suggested,
+      className,
+      daysLeft,
+      trend,
+      reason: reasons.length ? reasons.join('; ') : 'Not enough recent sales evidence to justify changing the price.'
+    };
+  }
+
+  function restockRecommendation(current, sold24, sold7) {
+    if (sold24 === null && sold7 === null) return null;
+    const day = Math.max(0, Number(sold24) || 0);
+    const week = Math.max(0, Number(sold7) || 0);
+    if (day === 0 && week === 0) return { target: 0, restock: 0, baseline: 0 };
+
+    // Use the faster of the recent one-day run-rate and the observed seven-day
+    // total, then add a 20% safety buffer. This is a recommendation, not a Torn
+    // API field, and is labelled DERIVED in the UI.
+    const baseline = Math.max(week, day * 7);
+    const target = Math.ceil(baseline * 1.20);
+    const restock = current === null ? null : Math.max(0, target - Math.max(0, current));
+    return { target, restock, baseline };
+  }
+
+  async function renderStockTab(panel, { refresh = false } = {}) {
+    const el = panel.querySelector('[data-tabpanel="stock"]');
+    if (!el) return;
+    const results = state.lastResults;
+
+    if (!results) {
+      el.innerHTML = `<div class="tds-box tds-box-neutral">Run Diagnostics once so Stock Management can read your company stock.</div>`;
+      return;
+    }
+
+    const stockRaw = findRaw(results, 'company', 'stock');
+    const blocked = findBlockedReason(results, 'company', 'stock');
+
+    if (!stockRaw) {
+      el.innerHTML = `<div class="tds-box tds-box-danger"><strong>Company stock unavailable.</strong> ${escapeHtml(blocked || 'No company/stock data was returned.')}</div>`;
+      return;
+    }
+
+    const items = extractStockItems(stockRaw);
+
+    if (el.hidden && !refresh) {
+      el.innerHTML = `<div class="tds-box tds-box-neutral">Stock data is ready. Open this tab to load recent sales history, restock targets, margins and read-only pricing recommendations.</div>`;
+      return;
+    }
+
+    if (!items.length) {
+      el.innerHTML = `<div class="tds-box tds-box-warn"><strong>Stock data was returned, but its item structure was not recognised yet.</strong><br>Open Diagnostics and check the fields shown for Company stock. The raw response is deliberately not guessed into fake item rows.</div>`;
+      return;
+    }
+
+    el.innerHTML = `<div class="tds-box tds-box-neutral">Loading recent sales and pricing history…</div>`;
+
+    let sales = { totals: new Map(), parsedEvents: 0, newsEntries: 0, oldestTimestamp: null };
+    let newsError = null;
+
+    try {
+      if (refresh) {
+        state.stock.newsCache = null;
+        state.stock.newsCacheAt = 0;
+      }
+      const diagnosticNews = findRaw(results, 'company', 'news');
+      const newsRaw = diagnosticNews || await fetchCompanyNewsForStock();
+      sales = aggregateSales(newsRaw, items);
+    } catch (err) {
+      newsError = err;
+    }
+
+    let html = `
+      <div class="tds-box tds-box-info">
+        <strong>Read-only pricing assistant:</strong> this tab does <strong>not</strong> submit prices or interact with Torn's Pricing form.
+        It only analyses data Torn returns and suggests <strong>Hold / Consider raising / Consider lowering</strong>.
+        Suggested prices are advisory and deliberately move only <strong>$1 at a time</strong>.
+      </div>
+      <div class="tds-box tds-box-info">
+        <strong>Restock recommendation:</strong> target = 120% of the higher of <em>last 7 days sold</em> or <em>last 24 hours × 7</em>.
+        This gives roughly one week of fast-moving stock plus a 20% buffer. Targets are <strong>DERIVED</strong>.
+      </div>`;
+
+    if (newsError) {
+      html += `<div class="tds-box tds-box-warn"><strong>Item-level sales history unavailable.</strong> ${escapeHtml(newsError.reason || 'company/news could not be read with this key')}. Current stock/pricing fields returned directly by Torn are still shown.</div>`;
+    } else if (!sales.parsedEvents) {
+      html += `<div class="tds-box tds-box-warn">Company news was accessible (${formatNumber(sales.newsEntries)} entries inspected), but no item-sale events were recognised. Direct <code>company/stock</code> sales fields are still used where available; Last Sold Price stays unavailable rather than being guessed.</div>`;
+    } else {
+      const coverage = sales.oldestTimestamp ? formatTimestampRelative(sales.oldestTimestamp * 1000) : 'unknown';
+      html += `<div class="tds-box tds-box-neutral">Parsed ${formatNumber(sales.parsedEvents)} stock-sale event(s) from company news. Oldest returned news: ${escapeHtml(coverage)}.</div>`;
+    }
+
+    html += `<div style="overflow-x:auto;">
+      <table class="tds-table tds-stock-table">
+        <thead>
+          <tr>
+            <th>Product</th>
+            <th>Cost</th>
+            <th>RRP</th>
+            <th>Set Price</th>
+            <th>Last Sold</th>
+            <th>In Stock</th>
+            <th>Sold Daily</th>
+            <th>Sold 24h</th>
+            <th>Sold 7d</th>
+            <th>Days Left</th>
+            <th>Margin / Unit</th>
+            <th>Est. Daily Gross</th>
+            <th>Target Stock</th>
+            <th>Restock</th>
+            <th>Pricing</th>
+            <th>Suggested</th>
+          </tr>
+        </thead>
+        <tbody>`;
+
+    for (const item of items) {
+      const keyById = String(item.id || '');
+      const keyByName = normalizeFieldName(item.name);
+      const fromNews = sales.totals.get(keyById) || sales.totals.get(keyByName);
+
+      const sold24 = item.sold24 !== null
+        ? item.sold24
+        : (fromNews ? fromNews.sold24 : (item.soldDaily !== null ? item.soldDaily : null));
+
+      const sold7 = item.sold7 !== null
+        ? item.sold7
+        : (fromNews ? fromNews.sold7 : null);
+
+      const soldDaily = item.soldDaily !== null
+        ? item.soldDaily
+        : (sold24 !== null ? sold24 : (sold7 !== null ? sold7 / 7 : null));
+
+      const lastSoldPrice = fromNews?.lastSoldPrice ?? null;
+      const averageSoldPrice24 =
+        fromNews && fromNews.pricedUnits24 > 0
+          ? fromNews.pricedRevenue24 / fromNews.pricedUnits24
+          : null;
+
+      const rec = restockRecommendation(item.current, sold24, sold7);
+      const priceRec = pricingRecommendation(item, sold24, sold7, lastSoldPrice);
+
+      const margin = stockGrossMargin(item.setPrice, item.costEach);
+      const marginPct = stockMarginPercent(item.setPrice, item.costEach);
+      const daysLeft = stockDaysRemaining(item.current, soldDaily);
+      const estDailyGross =
+        margin !== null && soldDaily !== null
+          ? margin * soldDaily
+          : null;
+
+      const restockText = rec
+        ? (rec.restock === null ? '—' : formatNumber(rec.restock))
+        : '—';
+
+      const lastPriceHtml = lastSoldPrice !== null
+        ? `${formatCurrency(lastSoldPrice)}${averageSoldPrice24 !== null ? `<div class="tds-v-dim">24h avg ${formatCurrency(averageSoldPrice24)}</div>` : ''}`
+        : '—';
+
+      html += `<tr>
+        <td><strong>${escapeHtml(item.name)}</strong>${item.soldTotal !== null ? `<div class="tds-v-dim">Lifetime sold: ${formatNumber(item.soldTotal)}</div>` : ''}</td>
+        <td>${item.costEach === null ? '—' : formatCurrency(item.costEach)}</td>
+        <td>${item.rrp === null ? '—' : formatCurrency(item.rrp)}</td>
+        <td><strong>${item.setPrice === null ? '—' : formatCurrency(item.setPrice)}</strong></td>
+        <td>${lastPriceHtml}</td>
+        <td>${item.current === null ? '—' : formatNumber(item.current)}</td>
+        <td>${soldDaily === null ? '—' : formatNumber(Math.round(soldDaily))}</td>
+        <td>${sold24 === null ? '—' : formatNumber(Math.round(sold24))}</td>
+        <td>${sold7 === null ? '—' : formatNumber(Math.round(sold7))}</td>
+        <td>${daysLeft === null ? '—' : `${daysLeft.toFixed(1)}d`}</td>
+        <td>${margin === null ? '—' : `${formatCurrency(margin)}${marginPct !== null ? `<div class="tds-v-dim">${marginPct.toFixed(0)}%</div>` : ''}`}</td>
+        <td>${estDailyGross === null ? '—' : formatCurrency(estDailyGross)}</td>
+        <td>${rec ? formatNumber(rec.target) : '—'}</td>
+        <td><strong>${restockText}</strong></td>
+        <td class="${priceRec.className}">
+          <strong>${escapeHtml(priceRec.action)}</strong>
+          <div class="tds-v-dim" style="max-width:240px;white-space:normal;">${escapeHtml(priceRec.reason)}</div>
+        </td>
+        <td class="${priceRec.className}"><strong>${priceRec.suggested === null ? '—' : formatCurrency(priceRec.suggested)}</strong></td>
+      </tr>`;
+    }
+
+    html += `</tbody></table></div>
+      <div class="tds-box tds-box-neutral" style="margin-top:10px;">
+        <strong>Pricing recommendation rules:</strong> recent 24h sales are compared with the 7-day daily average, stock cover is considered, RRP is used when Torn supplies it, and an observed Last Sold Price is used when it can be parsed reliably.
+        A recommendation only moves one dollar from the configured price so the tool stays conservative.
+      </div>
+      <div style="margin-top:10px;">
+        <button class="tds-btn-ghost" id="tds-stock-refresh">Refresh sales</button>
+      </div>`;
+
+    el.innerHTML = html;
+    el.querySelector('#tds-stock-refresh')?.addEventListener('click', () =>
+      renderStockTab(panel, { refresh: true })
+    );
+  }
+
+
+  // =======================================================================
+  // OPTIMIZE TAB — position requirement fit, not a fabricated EE formula
+  // =======================================================================
+  function findCompanyTypeReferenceNode(reference, typeId) {
+    if (!reference || typeId === null || typeId === undefined) return null;
+    const wanted = String(typeId);
+    const seen = new WeakSet();
+    let best = null;
+    function walk(value) {
+      if (best || !value || typeof value !== 'object' || seen.has(value)) return;
+      seen.add(value);
+      if (!Array.isArray(value) && Object.prototype.hasOwnProperty.call(value, wanted)) {
+        const candidate = value[wanted];
+        if (candidate && typeof candidate === 'object') { best = candidate; return; }
+      }
+      if (!Array.isArray(value)) {
+        const id = findValueDeep(value, ['id', 'type_id', 'company_type']);
+        if (id !== null && String(id) === wanted) { best = value; return; }
+      }
+      for (const child of Object.values(value)) {
+        if (child && typeof child === 'object') walk(child);
+        if (best) return;
+      }
+    }
+    walk(reference);
+    return best;
+  }
+
+  function extractPositionRequirements(reference, typeId) {
+    const root = findCompanyTypeReferenceNode(reference, typeId) || reference;
+    if (!root) return [];
+    const positions = [];
+    const seen = new Set();
+    for (const { value, path } of deepObjectEntries(root)) {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) continue;
+      const name = pickText(value, ['name', 'position', 'position_name', 'title']) || (path.length ? path[path.length - 1] : null);
+      const manual = pickNumeric(value, ['manual_labor', 'manual', 'man_required', 'manual_required', 'man']);
+      const intelligence = pickNumeric(value, ['intelligence', 'int_required', 'intelligence_required', 'int']);
+      const endurance = pickNumeric(value, ['endurance', 'end_required', 'endurance_required', 'end']);
+      const statCount = [manual, intelligence, endurance].filter((v) => v !== null && v > 0).length;
+      if (!name || statCount < 1) continue;
+      const key = normalizeFieldName(name);
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      positions.push({ name: String(name), manual, intelligence, endurance });
+    }
+    return positions;
+  }
+
+  function employeePositionFit(emp, position) {
+    const actual = {
+      manual: numericValue(emp.manual_labor) ?? 0,
+      intelligence: numericValue(emp.intelligence) ?? 0,
+      endurance: numericValue(emp.endurance) ?? 0,
+    };
+    const req = { manual: position.manual, intelligence: position.intelligence, endurance: position.endurance };
+    const ratios = [];
+    let shortfall = 0;
+    let requiredCount = 0;
+    for (const key of Object.keys(req)) {
+      if (req[key] === null || req[key] <= 0) continue;
+      requiredCount += 1;
+      const ratio = actual[key] / req[key];
+      ratios.push(Math.min(1, ratio));
+      shortfall += Math.max(0, req[key] - actual[key]) / req[key];
+    }
+    if (!requiredCount) return null;
+    const coverage = Math.round((ratios.reduce((a, b) => a + b, 0) / requiredCount) * 100);
+    return { coverage, shortfall, requiredCount };
+  }
+
+  // Official Torn work-stat efficiency formula, applied once per required
+  // position stat. Company positions normally use a primary + secondary stat.
+  // Exact requirement on both stats therefore gives 90 Working Stats EE.
+  function calculatePositionWorkingStats(emp, position) {
+    const actual = {
+      manual: numericValue(emp.manual_labor) ?? 0,
+      intelligence: numericValue(emp.intelligence) ?? 0,
+      endurance: numericValue(emp.endurance) ?? 0,
+    };
+    const req = {
+      manual: numericValue(position.manual),
+      intelligence: numericValue(position.intelligence),
+      endurance: numericValue(position.endurance),
+    };
+
+    let total = 0;
+    let used = 0;
+    for (const key of Object.keys(req)) {
+      const required = req[key];
+      if (required === null || required <= 0) continue;
+
+      const stat = Math.max(0, actual[key] || 0);
+      const ratio = stat / required;
+      const base = Math.min(45, 45 * ratio);
+      const overRequirement = ratio > 0 ? Math.max(0, 5 * Math.log2(ratio)) : 0;
+
+      total += Math.floor(base + overRequirement);
+      used += 1;
+    }
+
+    return used ? total : null;
+  }
+
+  function estimateEffectivenessAtPosition(emp, ee, position) {
+    const workingStats = calculatePositionWorkingStats(emp, position);
+    if (workingStats === null) return null;
+
+    // Everything except Working Stats is retained from Torn's current Total EE.
+    // This automatically preserves Settled In, Director Education, Merits,
+    // Addiction, inactivity adjustments, and any future components Torn may add
+    // without us needing to guess each field individually.
+    const currentWorking = typeof ee?.workingStats === 'number' ? ee.workingStats : null;
+    const currentTotal = typeof ee?.total === 'number' ? ee.total : null;
+    const nonPositionAdjustment =
+      currentWorking !== null && currentTotal !== null
+        ? currentTotal - currentWorking
+        : 0;
+
+    return {
+      workingStats,
+      total: workingStats + nonPositionAdjustment,
+      nonPositionAdjustment,
+    };
+  }
+
+  function renderOptimizeTab(panel) {
+    const el = panel.querySelector('[data-tabpanel="optimize"]');
+    if (!el) return;
+    const results = state.lastResults;
+    if (!results) {
+      el.innerHTML = `<div class="tds-box tds-box-neutral">Run Diagnostics once so Optimize can read your employee working stats and effectiveness.</div>`;
+      return;
+    }
+
+    const employees = extractEmployeesEntries(findRaw(results, 'company', 'employees'));
+    const profile = findRaw(results, 'company', 'profile');
+    const reference = findRaw(results, 'torn', 'companies');
+    const typeId = numericValue(findValueDeep(profile, ['company_type', 'type_id', 'type']));
+    const positions = extractPositionRequirements(reference, typeId);
+
+    let html = `<div class="tds-box tds-box-info"><strong>How Employee Effectiveness works:</strong> Current EE is Torn's real employee effectiveness. For each available position, Optimize calculates the Working Stats component using Torn's published work-stat efficiency formula, then carries across the employee's current non-position EE adjustment (Total EE minus Working Stats). The resulting <strong>Estimated EE</strong> is a prediction for comparison, not a live Torn value.</div>`;
+
+    if (!employees.length) {
+      el.innerHTML = html + `<div class="tds-box tds-box-danger">No employee data is available.</div>`;
+      return;
+    }
+
+    const rows = employees.map((employee) => {
+      const ee = getEmployeeEffectiveness(employee.raw);
+      let best = null;
+
+      if (positions.length) {
+        const ranked = positions
+          .map((position) => {
+            const fit = employeePositionFit(employee.raw, position);
+            const estimate = estimateEffectivenessAtPosition(employee.raw, ee, position);
+            return { position, fit, estimate };
+          })
+          .filter((row) => row.fit && row.estimate)
+          .sort((a, b) =>
+            b.estimate.total - a.estimate.total ||
+            b.estimate.workingStats - a.estimate.workingStats ||
+            b.fit.coverage - a.fit.coverage ||
+            a.fit.shortfall - b.fit.shortfall
+          );
+        best = ranked[0] || null;
+      }
+
+      return { employee, ee, best };
+    }).sort((a, b) => {
+      const av = typeof a.ee?.total === 'number' ? a.ee.total : Number.POSITIVE_INFINITY;
+      const bv = typeof b.ee?.total === 'number' ? b.ee.total : Number.POSITIVE_INFINITY;
+      return av - bv;
+    });
+
+    html += `<div class="tds-section-label">Employee effectiveness</div>`;
+    html += `<div style="overflow-x:auto;">
+      <table class="tds-table tds-optimize-table">
+        <thead>
+          <tr>
+            <th>Employee</th>
+            <th>Current Position</th>
+            <th>Working Stats</th>
+            <th>Settled In</th>
+            <th>Director Ed.</th>
+            <th>Addiction</th>
+            <th>Total EE</th>
+            ${positions.length ? '<th>Best Position</th><th>New Working Stats</th><th>Est. New EE</th><th>Change</th><th>Fit</th>' : ''}
+          </tr>
+        </thead>
+        <tbody>`;
+
+    for (const row of rows) {
+      const { employee, ee, best } = row;
+      const currentTotal = typeof ee?.total === 'number' ? ee.total : null;
+      const estimatedTotal = best?.estimate && typeof best.estimate.total === 'number' ? best.estimate.total : null;
+      const delta = currentTotal !== null && estimatedTotal !== null ? estimatedTotal - currentTotal : null;
+      const deltaText = delta === null ? '—' : `${delta > 0 ? '+' : ''}${formatNumber(delta)}`;
+
+      html += `<tr>`;
+      html += `<td><strong>${escapeHtml(employee.name)}</strong></td>`;
+      html += `<td>${escapeHtml(employee.position || '—')}</td>`;
+      html += `<td>${typeof ee?.workingStats === 'number' ? formatNumber(ee.workingStats) : '—'}</td>`;
+      html += `<td>${typeof ee?.settledIn === 'number' ? formatNumber(ee.settledIn) : '—'}</td>`;
+      html += `<td>${typeof ee?.directorEducation === 'number' ? formatNumber(ee.directorEducation) : '—'}</td>`;
+      html += `<td>${typeof ee?.addiction === 'number' ? formatNumber(ee.addiction) : '—'}</td>`;
+      html += `<td><strong>${currentTotal !== null ? formatNumber(currentTotal) : '—'}</strong></td>`;
+
+      if (positions.length) {
+        html += `<td>${best ? escapeHtml(best.position.name) : '—'}</td>`;
+        html += `<td>${best?.estimate ? formatNumber(best.estimate.workingStats) : '—'}</td>`;
+        html += `<td><strong>${estimatedTotal !== null ? formatNumber(estimatedTotal) : '—'}</strong></td>`;
+        html += `<td><strong>${deltaText}</strong></td>`;
+        html += `<td>${best ? `${best.fit.coverage}%` : '—'}</td>`;
+      }
+      html += `</tr>`;
+    }
+
+    html += `</tbody></table></div>`;
+
+    if (!positions.length) {
+      html += `<div class="tds-box tds-box-warn" style="margin-top:10px;">No reliable position requirement data was found for company type ${escapeHtml(String(typeId ?? 'unknown'))}, so Optimize is showing Torn's real current effectiveness values without inventing position recommendations.</div>`;
+    } else {
+      html += `<div class="tds-box tds-box-neutral" style="margin-top:10px;">
+        <strong>Estimated EE:</strong> the target position's calculated Working Stats EE plus the employee's current non-position adjustment.
+        This preserves bonuses/penalties already reflected in Torn's Total EE while changing only the position-dependent Working Stats component.
+        Rows remain sorted by current <strong>Total EE, lowest first</strong>.
+      </div>`;
+    }
+
+    el.innerHTML = html;
+  }
+
+  // -----------------------------------------------------------------------
+  // TRAINING / ROTATIONAL DEBT HELPERS
+  // -----------------------------------------------------------------------
+  function normalizePersonName(value) {
+    return String(value || '')
+      .toLowerCase()
+      .replace(/<[^>]*>/g, '')
+      .replace(/[^a-z0-9]+/g, ' ')
+      .trim()
+      .replace(/\s+/g, ' ');
+  }
+
+  function parseTrainingEvent(entry, employees) {
+    if (!entry) return null;
+
+    const raw = entry.raw || {};
+    const text = String(entry.text || '');
+    if (!/\btrain(?:ed|ing|s)?\b/i.test(text)) return null;
+
+    // Structured recipient fields are preferred. Avoid a plain `user_id`
+    // first because some log shapes use it for the director/trainer.
+    const structuredId = pickNumeric(raw, [
+      'employee_id', 'target_id', 'recipient_id', 'trained_id',
+      'employee', 'target', 'recipient'
+    ]);
+
+    const structuredName = pickText(raw, [
+      'employee_name', 'target_name', 'recipient_name', 'trained_name',
+      'employee', 'target', 'recipient'
+    ]);
+
+    let employee = null;
+
+    if (structuredId !== null) {
+      employee = employees.find((e) => String(e.id) === String(structuredId)) || null;
+    }
+
+    if (!employee && structuredName) {
+      const wanted = normalizePersonName(structuredName);
+      employee = employees.find((e) => normalizePersonName(e.name) === wanted) || null;
+    }
+
+    // Most Torn company-news/log messages include the recipient's visible
+    // name. Match longest names first so one employee's name does not become
+    // a substring match inside another employee's name.
+    if (!employee) {
+      const normalizedText = normalizePersonName(text);
+      const byLength = [...employees].sort((a, b) => String(b.name).length - String(a.name).length);
+      employee = byLength.find((e) => {
+        const n = normalizePersonName(e.name);
+        return n && (` ${normalizedText} `).includes(` ${n} `);
+      }) || null;
+    }
+
+    if (!employee) return null;
+
+    let quantity = pickNumeric(raw, [
+      'quantity', 'qty', 'count', 'trains', 'train_count', 'amount'
+    ]);
+
+    if (quantity === null) {
+      const patterns = [
+        /(\d[\d,]*)\s+trains?\b/i,
+        /\btrains?\s*[x×:]?\s*(\d[\d,]*)\b/i,
+        /\btrained\b.*?\b(\d[\d,]*)\s+times?\b/i,
+      ];
+      for (const pattern of patterns) {
+        const m = text.match(pattern);
+        if (!m) continue;
+        quantity = Number(String(m[1]).replace(/,/g, ''));
+        break;
+      }
+    }
+
+    // A normal Torn "trained employee" event represents one train unless an
+    // explicit quantity is present.
+    if (quantity === null) quantity = 1;
+    if (!Number.isFinite(quantity) || quantity <= 0) return null;
+
+    return {
+      eventId: String(entry.id || ''),
+      timestamp: Number(entry.timestamp),
+      employeeId: String(employee.id),
+      employeeName: employee.name,
+      quantity,
+      text,
+    };
+  }
+
+  function collectTrainingEvents(raw, employees) {
+    const sourceEntries = flattenNewsEntries(raw);
+    const events = [];
+    const seen = new Set();
+
+    for (const entry of sourceEntries) {
+      const parsed = parseTrainingEvent(entry, employees);
+      if (!parsed) continue;
+
+      const key = parsed.eventId
+        ? `id:${parsed.eventId}`
+        : `${parsed.timestamp}|${parsed.employeeId}|${parsed.quantity}`;
+
+      if (seen.has(key)) continue;
+      seen.add(key);
+      events.push(parsed);
+    }
+
+    events.sort((a, b) => b.timestamp - a.timestamp);
+    return { sourceEntries, events };
+  }
+
+  function mergeTrainingEventSources(primary, secondary) {
+    const rows = [...(primary || []), ...(secondary || [])]
+      .sort((a, b) => b.timestamp - a.timestamp);
+
+    const merged = [];
+    for (const event of rows) {
+      // The same train can appear in both company/news and user/log with
+      // different event IDs. Treat matching employee/quantity within a
+      // two-second window as the same action.
+      const duplicate = merged.some((existing) =>
+        existing.employeeId === event.employeeId &&
+        existing.quantity === event.quantity &&
+        Math.abs(existing.timestamp - event.timestamp) <= 2
+      );
+      if (!duplicate) merged.push(event);
+    }
+    return merged;
+  }
+
+  function formatTrainingCoverage(timestamp) {
+    if (!timestamp) return 'Unknown';
+    const ms = Number(timestamp) * 1000;
+    const days = Math.max(0, Math.floor((Date.now() - ms) / 86400000));
+    if (days < 1) return 'Less than 1 day';
+    return `${formatNumber(days)} day${days === 1 ? '' : 's'}`;
+  }
+
+  function calculateRotationalDebt(employees, events, coverageStart) {
+    const now = Math.floor(Date.now() / 1000);
+    const THREE_DAYS = 3 * 86400;
+
+    const actualByEmployee = new Map();
+    const lastTrainByEmployee = new Map();
+    const trains7ByEmployee = new Map();
+    const trains30ByEmployee = new Map();
+    const sevenAgo = now - 7 * 86400;
+    const thirtyAgo = now - 30 * 86400;
+
+    for (const event of events) {
+      const id = String(event.employeeId);
+      actualByEmployee.set(id, (actualByEmployee.get(id) || 0) + event.quantity);
+
+      const prev = lastTrainByEmployee.get(id);
+      if (!prev || event.timestamp > prev) lastTrainByEmployee.set(id, event.timestamp);
+
+      if (event.timestamp >= sevenAgo) {
+        trains7ByEmployee.set(id, (trains7ByEmployee.get(id) || 0) + event.quantity);
+      }
+      if (event.timestamp >= thirtyAgo) {
+        trains30ByEmployee.set(id, (trains30ByEmployee.get(id) || 0) + event.quantity);
+      }
+    }
+
+    const rows = employees.map((employee) => {
+      const days = numericValue(employee.raw?.days_in_company) ?? 0;
+      const joinedAt = now - Math.max(0, days) * 86400;
+      const eligibleAt = joinedAt + THREE_DAYS;
+      const fairStart = Math.max(coverageStart || now, eligibleAt);
+      const eligibleSeconds = Math.max(0, now - fairStart);
+      const eligibleWeight = eligibleSeconds / 86400;
+
+      return {
+        employee,
+        eligibleWeight,
+        actual: actualByEmployee.get(String(employee.id)) || 0,
+        lastTrain: lastTrainByEmployee.get(String(employee.id)) || null,
+        trains7: trains7ByEmployee.get(String(employee.id)) || 0,
+        trains30: trains30ByEmployee.get(String(employee.id)) || 0,
+      };
+    });
+
+    const totalObserved = rows.reduce((sum, row) => sum + row.actual, 0);
+    const totalWeight = rows.reduce((sum, row) => sum + row.eligibleWeight, 0);
+
+    for (const row of rows) {
+      row.expected = totalWeight > 0
+        ? totalObserved * (row.eligibleWeight / totalWeight)
+        : 0;
+      row.debt = row.expected - row.actual;
+    }
+
+    rows.sort((a, b) =>
+      b.debt - a.debt ||
+      (a.lastTrain || 0) - (b.lastTrain || 0) ||
+      String(a.employee.name).localeCompare(String(b.employee.name))
+    );
+
+    return { rows, totalObserved, totalWeight };
+  }
+
+  async function fetchTrainingHistorySources(results) {
+    const diagnosticNews = findRaw(results, 'company', 'news');
+    const diagnosticLog = findRaw(results, 'user', 'log');
+
+    let newsRaw = diagnosticNews;
+    let logRaw = diagnosticLog;
+    let newsError = null;
+    let logError = null;
+
+    if (!newsRaw) {
+      try {
+        // Reuse the already rate-limited/cached company news helper. It asks
+        // Torn for a recent history window and gracefully falls back when
+        // from/to are not accepted by a particular API shape.
+        newsRaw = await fetchCompanyNewsForStock();
+      } catch (err) {
+        newsError = err;
+      }
+    }
+
+    // `user/log` remains a fallback/second source because directors' personal
+    // logs can contain the same training actions. Do not make an extra request
+    // here if Diagnostics did not already return it.
+    if (!logRaw) {
+      logError = findBlockedReason(results, 'user', 'log');
+    }
+
+    return { newsRaw, logRaw, newsError, logError };
+  }
+
+  // =======================================================================
+  // TRAINING TAB
+  // =======================================================================
+  async function renderTrainingTab(panel) {
+    const el = panel.querySelector('[data-tabpanel="training"]');
+    const results = state.lastResults;
+    if (!results) {
+      el.innerHTML = `<div class="tds-box tds-box-neutral">Run Diagnostics first — Training reads the employee roster and training-history sources.</div>`;
+      return;
+    }
+
+    const employeesRaw = findRaw(results, 'company', 'employees');
+    const employees = extractEmployeesEntries(employeesRaw);
+    const profile = findRaw(results, 'company', 'profile');
+    const mode = state.trainingMode || 'priority';
+
+    let html = `
+      <div class="tds-segmented">
+        <div class="tds-segment ${mode === 'priority' ? 'tds-segment-active' : ''}" data-trainmode="priority">PRIORITY</div>
+        <div class="tds-segment ${mode === 'rotational' ? 'tds-segment-active' : ''}" data-trainmode="rotational">ROTATIONAL / DEBT</div>
+      </div>`;
+
+    if (employees.length === 0) {
+      html += `<div class="tds-box tds-box-danger">Employee roster unavailable, so there’s nothing to build a training queue from.</div>`;
+      el.innerHTML = html;
+      return;
+    }
+
+    const ratingValue = numericValue(findValueDeep(profile, ['rating', 'star_rating', 'stars']));
+    html += `<div class="tds-box tds-box-neutral">
+      ${ratingValue !== null ? `Current company rating: <strong>${escapeHtml(String(ratingValue))}★</strong>. ` : ''}
+      Rotational debt below is based on <strong>observed trains actually given</strong>, not an assumed star-rating budget. This keeps the queue fair if ratings, staffing, saved trains or training-role bonuses changed during the period.
+    </div>`;
+
+    if (mode === 'priority') {
+      html += `<div class="tds-box tds-box-info">
+        Sorted by <strong>current effectiveness, lowest first</strong>. This mode answers “who currently needs EE help most?”; Rotational / Debt answers “who has received less than their fair share of actual trains?”
+      </div>`;
+
+      const withEE = employees.map((e) => ({ ...e, ee: findEffectivenessField(e.raw) }));
+      withEE.sort((a, b) => (a.ee?.value ?? Infinity) - (b.ee?.value ?? Infinity));
+
+      html += '<div class="tds-section-label">Priority queue</div><div class="tds-card">';
+      withEE.forEach((e, i) => {
+        html += `
+          <div class="tds-employee-row">
+            <div class="tds-employee-top">
+              <div>
+                <div class="tds-employee-name">${i === 0 ? '▶ ' : ''}${escapeHtml(String(e.name))}</div>
+                <div class="tds-employee-meta">${escapeHtml(String(e.position))}</div>
+              </div>
+              <div class="tds-row-value">${e.ee ? e.ee.value : '<span class="tds-v-dim">no EE field</span>'}</div>
+            </div>
+          </div>`;
+      });
+      html += '</div>';
+    } else {
+      html += `<div class="tds-box tds-box-neutral" id="tds-training-loading">
+        Reading Torn training history and calculating fair-share debt…
+      </div>`;
+      el.innerHTML = html;
+      bindTrainingModeButtons(panel);
+      await renderRotationalDebt(panel, employees, results);
+      return;
+    }
+
+    el.innerHTML = html;
+    bindTrainingModeButtons(panel);
+  }
+
+  function bindTrainingModeButtons(panel) {
+    const el = panel.querySelector('[data-tabpanel="training"]');
+    if (!el) return;
+
+    el.querySelectorAll('[data-trainmode]').forEach((seg) => {
+      seg.addEventListener('click', () => {
+        state.trainingMode = seg.dataset.trainmode;
+        el.querySelectorAll('[data-trainmode]').forEach((button) => {
+          button.classList.toggle('tds-segment-active', button === seg);
+        });
+        renderTrainingTab(panel).catch((err) => {
+          console.error('[TDS] Training tab render failed:', err);
+        });
+      });
+    });
+  }
+
+  async function renderRotationalDebt(panel, employees, results) {
+    const el = panel.querySelector('[data-tabpanel="training"]');
+    if (!el || state.trainingMode !== 'rotational') return;
+
+    let sources;
+    try {
+      sources = await fetchTrainingHistorySources(results);
+    } catch (err) {
+      el.innerHTML += `<div class="tds-box tds-box-danger"><strong>Training history failed:</strong> ${escapeHtml(String(err.reason || err.message || err))}</div>`;
+      return;
+    }
+
+    const newsParsed = collectTrainingEvents(sources.newsRaw, employees);
+    const logParsed = collectTrainingEvents(sources.logRaw, employees);
+
+    // Prefer the union but deduplicate mirrored news/log records.
+    const events = mergeTrainingEventSources(newsParsed.events, logParsed.events);
+
+    const allSourceEntries = [
+      ...newsParsed.sourceEntries,
+      ...logParsed.sourceEntries,
+    ];
+    const coverageStart = allSourceEntries.length
+      ? Math.min(...allSourceEntries.map((entry) => Number(entry.timestamp)).filter(Number.isFinite))
+      : null;
+
+    const loading = el.querySelector('#tds-training-loading');
+    if (loading) loading.remove();
+
+    if (!events.length) {
+      let detail = '';
+      if (newsParsed.sourceEntries.length || logParsed.sourceEntries.length) {
+        detail = `Torn history was readable (${formatNumber(newsParsed.sourceEntries.length + logParsed.sourceEntries.length)} entries inspected), but no employee-training events were recognised.`;
+      } else {
+        detail = 'No readable company-news or user-log history was returned.';
+      }
+
+      el.insertAdjacentHTML('beforeend', `
+        <div class="tds-box tds-box-warn">
+          <strong>No training events matched yet.</strong> ${escapeHtml(detail)}
+          The parser deliberately refuses to invent train counts. If you have recently trained an employee, send me the Training tab after that action and we can map Torn’s exact live event wording/fields.
+        </div>
+        <div class="tds-card">
+          <div class="tds-row"><span class="tds-row-label">Company-news entries inspected</span><span class="tds-row-value">${formatNumber(newsParsed.sourceEntries.length)}</span></div>
+          <div class="tds-row"><span class="tds-row-label">User-log entries inspected</span><span class="tds-row-value">${formatNumber(logParsed.sourceEntries.length)}</span></div>
+        </div>
+      `);
+      return;
+    }
+
+    const debt = calculateRotationalDebt(employees, events, coverageStart);
+    const next = debt.rows.find((row) => row.eligibleWeight > 0) || null;
+
+    let html = `
+      <div class="tds-box tds-box-info">
+        <strong>Rotational / Debt is live.</strong>
+        It found <strong>${formatNumber(events.reduce((sum, event) => sum + event.quantity, 0))}</strong> train(s) across
+        ${formatTrainingCoverage(coverageStart)} of returned history.
+        Fair share is weighted by how long each current employee was eligible during that same history window.
+      </div>`;
+
+    if (next) {
+      html += `
+        <div class="tds-box ${next.debt > 0.05 ? 'tds-box-warn' : 'tds-box-info'}">
+          <strong>Train next:</strong> ${escapeHtml(String(next.employee.name))}
+          ${next.debt > 0.05 ? ` — approximately <strong>${next.debt.toFixed(2)}</strong> train(s) behind their fair share.` : ' — the rotation is currently close to balanced.'}
+        </div>`;
+    }
+
+    html += `
+      <div class="tds-card">
+        <div class="tds-row"><span class="tds-row-label">Training events recognised</span><span class="tds-row-value">${formatNumber(events.length)}</span></div>
+        <div class="tds-row"><span class="tds-row-label">Trains represented</span><span class="tds-row-value">${formatNumber(debt.totalObserved)}</span></div>
+        <div class="tds-row"><span class="tds-row-label">History coverage</span><span class="tds-row-value">${escapeHtml(formatTrainingCoverage(coverageStart))}</span></div>
+        <div class="tds-row"><span class="tds-row-label">Company-news entries inspected</span><span class="tds-row-value">${formatNumber(newsParsed.sourceEntries.length)}</span></div>
+        <div class="tds-row"><span class="tds-row-label">User-log entries inspected</span><span class="tds-row-value">${formatNumber(logParsed.sourceEntries.length)}</span></div>
+      </div>
+
+      <div class="tds-section-label">Rotational queue</div>
+      <div style="overflow-x:auto;">
+        <table class="tds-table tds-training-debt-table">
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>Employee</th>
+              <th>Position</th>
+              <th>Eligible Days*</th>
+              <th>Received</th>
+              <th>Fair Share</th>
+              <th>Debt</th>
+              <th>Last 7d</th>
+              <th>Last 30d</th>
+              <th>Last Train</th>
+            </tr>
+          </thead>
+          <tbody>`;
+
+    debt.rows.forEach((row, index) => {
+      const debtClass = row.debt > 0.05
+        ? 'tds-v-bad'
+        : row.debt < -0.05
+          ? 'tds-v-good'
+          : '';
+
+      const debtText = `${row.debt > 0 ? '+' : ''}${row.debt.toFixed(2)}`;
+      const lastTrain = row.lastTrain ? formatTimestampRelative(row.lastTrain) : 'None in history';
+
+      html += `
+        <tr>
+          <td>${index + 1}</td>
+          <td><strong>${index === 0 ? '▶ ' : ''}${escapeHtml(String(row.employee.name))}</strong></td>
+          <td>${escapeHtml(String(row.employee.position || '—'))}</td>
+          <td>${row.eligibleWeight.toFixed(1)}</td>
+          <td>${formatNumber(row.actual)}</td>
+          <td>${row.expected.toFixed(2)}</td>
+          <td class="${debtClass}"><strong>${debtText}</strong></td>
+          <td>${formatNumber(row.trains7)}</td>
+          <td>${formatNumber(row.trains30)}</td>
+          <td>${escapeHtml(lastTrain)}</td>
+        </tr>`;
+    });
+
+    html += `
+          </tbody>
+        </table>
+      </div>
+
+      <div class="tds-box tds-box-neutral" style="margin-top:10px;">
+        <strong>How debt is calculated:</strong> actual trains observed in Torn history are distributed as a fair-share target across current employees, weighted by eligible time in the same returned history window. Employees are treated as training-eligible after their first 3 days. <strong>Debt = Fair Share − Received.</strong>
+        Positive/red means owed trains; negative/green means ahead of the rotation.
+        <br><br>
+        *Eligible Days is limited to the history Torn actually returned — this is not presented as an all-time figure unless the returned history genuinely covers the employee’s full tenure.
+      </div>`;
+
+    el.insertAdjacentHTML('beforeend', html);
+  }
+
+
+  // =======================================================================
+  // COMPARE TAB
+  // =======================================================================
+  const BENCHMARK_CACHE_TTL_MS = 4 * 60 * 60 * 1000;
+
+  function getOwnCompanyCompareInfo(profile, results) {
+    if (!profile || typeof profile !== 'object') {
+      return { id: null, name: null, typeId: null, typeName: null, rating: null };
+    }
+
+    const candidates = [profile];
+    for (const key of ['company', 'profile', 'data']) {
+      if (profile[key] && typeof profile[key] === 'object' && !Array.isArray(profile[key])) {
+        candidates.push(profile[key]);
+      }
+    }
+
+    let id = null;
+    let name = null;
+    let typeId = null;
+    let typeName = null;
+    let rating = null;
+
+    for (const obj of candidates) {
+      if (id === null) {
+        id = numericValue(obj.id ?? obj.company_id ?? obj.companyId);
+      }
+
+      if (!name) {
+        const nameValue = obj.name ?? obj.company_name ?? obj.companyName;
+        if (nameValue !== null && nameValue !== undefined && String(nameValue).trim()) {
+          name = String(nameValue).trim();
+        }
+      }
+
+      if (rating === null) {
+        rating = numericValue(obj.rating ?? obj.star_rating ?? obj.stars);
+      }
+
+      const typeValue = obj.company_type ?? obj.type_id ?? obj.companyType ?? obj.type;
+      if (typeValue && typeof typeValue === 'object') {
+        if (typeId === null) typeId = numericValue(typeValue.id ?? typeValue.type_id ?? typeValue.type);
+        if (!typeName) typeName = typeValue.name ?? typeValue.type_name ?? null;
+      } else if (typeId === null) {
+        typeId = numericValue(typeValue);
+      }
+    }
+
+    if (typeId === null) {
+      typeId = numericValue(findValueDeep(profile, ['company_type', 'type_id', 'companyType']));
+    }
+    if (rating === null) {
+      rating = numericValue(findValueDeep(profile, ['rating', 'star_rating', 'stars']));
+    }
+
+    if (typeId !== null && !typeName) {
+      typeName = resolveCompanyTypeName(findRaw(results, 'torn', 'companies'), typeId);
+    }
+
+    if (!name) {
+      const deepName = findValueDeep(profile, ['name', 'company_name', 'companyName']);
+      if (deepName !== null && deepName !== undefined && String(deepName).trim()) {
+        name = String(deepName).trim();
+      }
+    }
+
+    return { id, name, typeId, typeName, rating };
+  }
+
+  function buildCompareFilters(typeId, tier, ownRating) {
+    const filters = [`type:Equal:${typeId}`];
+
+    if (tier === 'same' && ownRating !== null) {
+      filters.push(`rating:=:${ownRating}`);
+    } else if (tier === 'mid') {
+      filters.push('rating:>=:3', 'rating:<=:5');
+    } else if (tier === 'top') {
+      filters.push('rating:>=:8', 'rating:<=:10');
+    }
+
+    return filters.join(',');
+  }
+
+  async function fetchBenchmarkCompanies(typeId, tier, ownRating, offset = 0) {
+    // company/search is the correct v2 endpoint for Compare because Torn
+    // explicitly exposes filtering by company type, rating, daily/weekly
+    // income and daily/weekly customers here.
+    const filters = buildCompareFilters(typeId, tier, ownRating);
+    return ApiClient.callV2('company/search', {
+      filters,
+      limit: 100,
+      offset,
+      striptags: 'true',
+    });
+  }
+
+  function extractCompareCompanies(data) {
+    if (!data || typeof data !== 'object') return [];
+
+    for (const key of ['companies', 'company_search', 'results', 'data']) {
+      const value = data[key];
+      if (Array.isArray(value)) return value;
+      if (value && typeof value === 'object' && !Array.isArray(value)) {
+        const values = Object.values(value).filter((x) => x && typeof x === 'object');
+        if (values.length) return values;
+      }
+    }
+
+    const seen = new WeakSet();
+    let found = null;
+
+    function walk(value) {
+      if (found || !value || typeof value !== 'object' || seen.has(value)) return;
+      seen.add(value);
+
+      if (Array.isArray(value) && value.length && value.every((x) => x && typeof x === 'object')) {
+        const keys = new Set(value.flatMap((x) => Object.keys(x)));
+        if ([...keys].some((k) => /company|name|daily.*income|weekly.*income|rating/i.test(k))) {
+          found = value;
+          return;
+        }
+      }
+
+      for (const child of Object.values(value)) {
+        if (child && typeof child === 'object') walk(child);
+        if (found) return;
+      }
+    }
+
+    walk(data);
+    return found || [];
+  }
+
+  function compareField(row, names, pattern = null) {
+    if (!row || typeof row !== 'object') return null;
+
+    for (const name of names) {
+      if (Object.prototype.hasOwnProperty.call(row, name) &&
+          row[name] !== null &&
+          row[name] !== undefined) {
+        return row[name];
+      }
+    }
+
+    if (pattern) {
+      const entry = Object.entries(row).find(([k, v]) =>
+        pattern.test(k) && v !== null && v !== undefined
+      );
+      if (entry) return entry[1];
+    }
+
+    return null;
+  }
+
+  function normalizeCompareCompany(row) {
+    return {
+      raw: row,
+      id: numericValue(compareField(
+        row,
+        ['id', 'company_id', 'companyId'],
+        /^id$|company.*id/i
+      )),
+      name: compareField(
+        row,
+        ['name', 'company_name', 'companyName'],
+        /^name$|company.*name/i
+      ),
+      rating: numericValue(compareField(
+        row,
+        ['rating', 'stars', 'star_rating', 'starRating'],
+        /^rating$|^stars$|star.*rating/i
+      )),
+      dailyIncome: numericValue(compareField(
+        row,
+        ['daily_income', 'dailyIncome'],
+        /daily.*income/i
+      )),
+      weeklyIncome: numericValue(compareField(
+        row,
+        ['weekly_income', 'weeklyIncome'],
+        /weekly.*income/i
+      )),
+      dailyCustomers: numericValue(compareField(
+        row,
+        ['daily_customers', 'dailyCustomers'],
+        /daily.*customer/i
+      )),
+      weeklyCustomers: numericValue(compareField(
+        row,
+        ['weekly_customers', 'weeklyCustomers'],
+        /weekly.*customer/i
+      )),
+      employees: numericValue(compareField(
+        row,
+        ['employees', 'employees_current', 'employeesCurrent'],
+        /^employees$|employees.*current/i
+      )),
+    };
+  }
+
+  function compareTierLabel(tier, ownRating) {
+    if (tier === 'same') return ownRating !== null ? `Same Rating (${ownRating}★)` : 'Same Rating';
+    if (tier === 'mid') return '3–5★';
+    if (tier === 'top') return '8–10★';
+    return 'All Ratings';
+  }
+
+
+  function parseCsvLine(line) {
+    const out = [];
+    let value = '';
+    let quoted = false;
+
+    for (let i = 0; i < line.length; i += 1) {
+      const ch = line[i];
+      if (ch === '"') {
+        if (quoted && line[i + 1] === '"') {
+          value += '"';
+          i += 1;
+        } else {
+          quoted = !quoted;
+        }
+      } else if (ch === ',' && !quoted) {
+        out.push(value);
+        value = '';
+      } else {
+        value += ch;
+      }
+    }
+    out.push(value);
+    return out;
+  }
+
+  function normalizeCsvHeader(value) {
+    return String(value || '')
+      .trim()
+      .toLowerCase()
+      .replace(/^\uFEFF/, '')
+      .replace(/[\s-]+/g, '_');
+  }
+
+  function parseCompanySnapshotCsv(csvText) {
+    const lines = String(csvText || '')
+      .split(/\r?\n/)
+      .filter((line) => line.trim().length > 0);
+
+    if (lines.length < 2) return [];
+
+    const headers = parseCsvLine(lines[0]).map(normalizeCsvHeader);
+    const rows = [];
+
+    for (let i = 1; i < lines.length; i += 1) {
+      const values = parseCsvLine(lines[i]);
+      const row = {};
+      headers.forEach((header, index) => {
+        row[header] = values[index] ?? '';
+      });
+      rows.push(row);
+    }
+
+    return rows;
+  }
+
+  function snapshotNumber(row, names) {
+    for (const name of names) {
+      if (!Object.prototype.hasOwnProperty.call(row, name)) continue;
+      const raw = row[name];
+      if (raw === '' || raw === null || raw === undefined) continue;
+      const cleaned = String(raw).replace(/[$,\s]/g, '');
+      const n = Number(cleaned);
+      if (Number.isFinite(n)) return n;
+    }
+    return null;
+  }
+
+  function snapshotCompanyId(row) {
+    return snapshotNumber(row, ['id', 'company_id', 'companyid']);
+  }
+
+  async function getCompanySnapshotMap({ force = false } = {}) {
+    const cached = state.benchmark.snapshot;
+    // Snapshot changes only daily; 30 minutes is conservative and avoids
+    // repeatedly downloading the all-company CSV while switching filters.
+    const ttl = 30 * 60 * 1000;
+    if (!force && cached && Date.now() - cached.timestamp < ttl) {
+      return cached.map;
+    }
+
+    const csv = await ApiClient.callV2Text('company/snapshot');
+    const rows = parseCompanySnapshotCsv(csv);
+    const map = new Map();
+
+    for (const row of rows) {
+      const id = snapshotCompanyId(row);
+      if (id === null) continue;
+      map.set(String(id), {
+        dailyIncome: snapshotNumber(row, ['daily_income', 'dailyincome']),
+        weeklyIncome: snapshotNumber(row, ['weekly_income', 'weeklyincome']),
+        dailyCustomers: snapshotNumber(row, ['daily_customers', 'dailycustomers']),
+        weeklyCustomers: snapshotNumber(row, ['weekly_customers', 'weeklycustomers']),
+      });
+    }
+
+    state.benchmark.snapshot = {
+      timestamp: Date.now(),
+      map,
+    };
+    return map;
+  }
+
+  function mergeCompareFinancials(rows, snapshotMap) {
+    if (!snapshotMap || !snapshotMap.size) return rows;
+
+    return rows.map((row) => {
+      if (row.id === null) return row;
+      const snap = snapshotMap.get(String(row.id));
+      if (!snap) return row;
+
+      return {
+        ...row,
+        dailyIncome: row.dailyIncome ?? snap.dailyIncome,
+        weeklyIncome: row.weeklyIncome ?? snap.weeklyIncome,
+        dailyCustomers: row.dailyCustomers ?? snap.dailyCustomers,
+        weeklyCustomers: row.weeklyCustomers ?? snap.weeklyCustomers,
+      };
+    });
+  }
+
+  function renderBenchmarkTab(panel) {
+    const el = panel.querySelector('[data-tabpanel="benchmark"]');
+    const results = state.lastResults;
+    const profile = results ? findRaw(results, 'company', 'profile') : null;
+    const own = getOwnCompanyCompareInfo(profile, results);
+
+    const typeLabel = own.typeName
+      ? `${escapeHtml(String(own.typeName))} (${escapeHtml(String(own.typeId))})`
+      : own.typeId !== null
+        ? `Company type ${escapeHtml(String(own.typeId))}`
+        : 'Not detected';
+
+    let html = `
+      <div class="tds-box tds-box-neutral">
+        Compare uses Torn API v2's <code>/company/search</code> endpoint so company type,
+        star rating and financial/customer comparison fields come from the same search response.
+        This comparison does not require director access.
+      </div>
+
+      <div class="tds-card">
+        <div class="tds-row">
+          <span class="tds-row-label">Detected company type</span>
+          <span class="tds-row-value">${typeLabel}</span>
+        </div>
+        ${own.rating !== null
+          ? `<div class="tds-row"><span class="tds-row-label">Your rating</span><span class="tds-row-value">${escapeHtml(String(own.rating))}★</span></div>`
+          : ''}
+      </div>
+
+      <div class="tds-segmented">
+        <div class="tds-segment ${state.benchmark.tier === 'same' ? 'tds-segment-active' : ''}" data-tier="same">SAME RATING${own.rating !== null ? ` (${own.rating}★)` : ''}</div>
+        <div class="tds-segment ${state.benchmark.tier === 'mid' ? 'tds-segment-active' : ''}" data-tier="mid">3–5★</div>
+        <div class="tds-segment ${state.benchmark.tier === 'top' ? 'tds-segment-active' : ''}" data-tier="top">8–10★ TOP</div>
+        <div class="tds-segment ${state.benchmark.tier === 'all' ? 'tds-segment-active' : ''}" data-tier="all">ALL RATINGS</div>
+      </div>
+
+      <button class="tds-btn" id="tds-bench-reload">↻ Refresh Compare</button>
+      <div id="tds-bench-results" style="margin-top:10px;"></div>
+    `;
+
+    el.innerHTML = html;
+
+    el.querySelectorAll('[data-tier]').forEach((seg) => {
+      seg.addEventListener('click', () => {
+        state.benchmark.tier = seg.dataset.tier;
+
+        el.querySelectorAll('[data-tier]').forEach((button) => {
+          button.classList.toggle('tds-segment-active', button === seg);
+        });
+
+        runBenchmark(panel);
+      });
+    });
+
+    el.querySelector('#tds-bench-reload').addEventListener('click', () =>
+      runBenchmark(panel, { force: true })
+    );
+
+    if (own.typeId === null) {
+      el.querySelector('#tds-bench-results').innerHTML =
+        `<div class="tds-box tds-box-warn">I couldn't detect your company type ID from company/profile, so Compare cannot build the Torn search filter.</div>`;
+      return;
+    }
+
+    if (state.benchmark.tier === 'same' && own.rating === null) {
+      state.benchmark.tier = 'all';
+      el.querySelectorAll('[data-tier]').forEach((button) => {
+        button.classList.toggle('tds-segment-active', button.dataset.tier === 'all');
+      });
+    }
+
+    setTimeout(() => runBenchmark(panel), 0);
+  }
+
+  async function runBenchmark(panel, { force = false } = {}) {
+    const el = panel.querySelector('[data-tabpanel="benchmark"]');
+    if (!el) return;
+
+    const results = state.lastResults;
+    const profile = results ? findRaw(results, 'company', 'profile') : null;
+    const own = getOwnCompanyCompareInfo(profile, results);
+    const resultsEl = el.querySelector('#tds-bench-results');
+
+    if (own.typeId === null) {
+      if (resultsEl) {
+        resultsEl.innerHTML =
+          `<div class="tds-box tds-box-warn">Company type could not be detected.</div>`;
+      }
+      return;
+    }
+
+    const tier = state.benchmark.tier || 'same';
+    const cacheKey = `${own.typeId}:${tier}:${tier === 'same' ? own.rating ?? 'unknown' : ''}`;
+    const cached = state.benchmark.cache[cacheKey];
+
+    if (!force &&
+        cached &&
+        Date.now() - cached.timestamp < BENCHMARK_CACHE_TTL_MS) {
+      renderBenchmarkResults(panel, cached.data, own, tier);
+      return;
+    }
+
+    if (resultsEl) {
+      resultsEl.innerHTML =
+        `<div class="tds-box tds-box-neutral">Fetching ${escapeHtml(String(own.typeName || `company type ${own.typeId}`))} — ${escapeHtml(compareTierLabel(tier, own.rating))}…</div>`;
+    }
+
+    try {
+      const data = await fetchBenchmarkCompanies(own.typeId, tier, own.rating, 0);
+      state.benchmark.cache[cacheKey] = {
+        timestamp: Date.now(),
+        data,
+      };
+      renderBenchmarkResults(panel, data, own, tier);
+    } catch (err) {
+      if (!resultsEl) return;
+
+      const permissionHint = err.code === 16
+        ? `<br><br><strong>Custom-key note:</strong> your current key may not include Company → Search. Generate the updated Custom API Key from Settings once.`
+        : '';
+
+      resultsEl.innerHTML =
+        `<div class="tds-box tds-box-danger"><strong>Compare fetch failed:</strong> Torn error ${err.code ?? ''}: ${escapeHtml(String(err.reason || 'unknown'))}.${permissionHint}</div>`;
+    }
+  }
+
+
+  function averageNumeric(values) {
+    const nums = values.filter((v) => typeof v === 'number' && Number.isFinite(v));
+    if (!nums.length) return null;
+    return nums.reduce((sum, value) => sum + value, 0) / nums.length;
+  }
+
+  function medianNumeric(values) {
+    const nums = values
+      .filter((v) => typeof v === 'number' && Number.isFinite(v))
+      .sort((a, b) => a - b);
+    if (!nums.length) return null;
+    const mid = Math.floor(nums.length / 2);
+    return nums.length % 2
+      ? nums[mid]
+      : (nums[mid - 1] + nums[mid]) / 2;
+  }
+
+  function percentageDifference(value, baseline) {
+    if (typeof value !== 'number' || typeof baseline !== 'number' || baseline === 0) return null;
+    return ((value - baseline) / baseline) * 100;
+  }
+
+  function formatSignedPercent(value, digits = 1) {
+    if (typeof value !== 'number' || !Number.isFinite(value)) return '—';
+    return `${value > 0 ? '+' : ''}${value.toFixed(digits)}%`;
+  }
+
+  function formatPercentile(rank, total) {
+    if (!rank || !total || total < 1) return '—';
+    if (total === 1) return '100th';
+    const percentile = Math.round(((total - rank) / (total - 1)) * 100);
+    return `${percentile}th percentile`;
+  }
+
+  function revenuePerCustomer(income, customers) {
+    if (typeof income !== 'number' || typeof customers !== 'number' || customers <= 0) return null;
+    return income / customers;
+  }
+
+  function compareValueClass(value, baseline) {
+    if (typeof value !== 'number' || typeof baseline !== 'number') return '';
+    return value >= baseline ? 'tds-v-good' : 'tds-v-bad';
+  }
+
+  function normalizeCompanyNameForMatch(value) {
+    return String(value || '')
+      .trim()
+      .toLowerCase()
+      .replace(/\s+/g, ' ');
+  }
+
+  function isOwnCompareCompany(row, own) {
+    if (!row || !own) return false;
+
+    if (own.id !== null && row.id !== null &&
+        String(row.id) === String(own.id)) {
+      return true;
+    }
+
+    const ownName = normalizeCompanyNameForMatch(own.name);
+    const rowName = normalizeCompanyNameForMatch(row.name);
+    return Boolean(ownName && rowName && ownName === rowName);
+  }
+
+  async function renderBenchmarkResults(panel, data, own, tier) {
+    const el = panel.querySelector('[data-tabpanel="benchmark"] #tds-bench-results');
+    if (!el) return;
+
+    const rawRows = extractCompareCompanies(data);
+    let rows = rawRows.map(normalizeCompareCompany);
+
+    if (!rows.length) {
+      el.innerHTML = `
+        <div class="tds-card">
+          <div class="tds-row"><span class="tds-row-label">Company type</span><span class="tds-row-value">${escapeHtml(String(own.typeName || own.typeId))}</span></div>
+          <div class="tds-row"><span class="tds-row-label">Selected rating</span><span class="tds-row-value">${escapeHtml(compareTierLabel(tier, own.rating))}</span></div>
+          <div class="tds-row"><span class="tds-row-label">Companies returned</span><span class="tds-row-value">0</span></div>
+        </div>
+        <div class="tds-box tds-box-neutral">Torn returned no companies matching this search filter.</div>`;
+      return;
+    }
+
+    // company/search is ideal for locating/filtering companies, but Torn may
+    // omit financial fields from its returned row shape. In that case enrich
+    // the same company IDs from the daily company/snapshot CSV.
+    const needsSnapshot = rows.some((row) =>
+      row.dailyIncome === null ||
+      row.weeklyIncome === null ||
+      row.dailyCustomers === null ||
+      row.weeklyCustomers === null
+    );
+
+    let snapshotUsed = false;
+    let snapshotError = null;
+    if (needsSnapshot) {
+      try {
+        const snapshotMap = await getCompanySnapshotMap();
+        rows = mergeCompareFinancials(rows, snapshotMap);
+        snapshotUsed = true;
+      } catch (err) {
+        snapshotError = err;
+        console.warn('[TDS] Compare snapshot financial enrichment failed:', err);
+      }
+    }
+
+    // The search endpoint is already filtered server-side. This secondary
+    // check protects the UI if Torn ever returns an out-of-band row.
+    const filtered = rows.filter((row) => {
+      if (tier === 'all') return true;
+      if (row.rating === null) return true;
+      if (tier === 'same') {
+        return own.rating === null || row.rating === own.rating;
+      }
+      if (tier === 'mid') return row.rating >= 3 && row.rating <= 5;
+      if (tier === 'top') return row.rating >= 8 && row.rating <= 10;
+      return true;
+    });
+
+    const usableRows = filtered.length ? filtered : rows;
+
+    const hasDailyIncome = usableRows.some((r) => r.dailyIncome !== null);
+    const hasWeeklyIncome = usableRows.some((r) => r.weeklyIncome !== null);
+    const hasDailyCustomers = usableRows.some((r) => r.dailyCustomers !== null);
+    const hasWeeklyCustomers = usableRows.some((r) => r.weeklyCustomers !== null);
+
+    const metric = hasWeeklyIncome
+      ? 'weeklyIncome'
+      : hasDailyIncome
+        ? 'dailyIncome'
+        : null;
+
+    const metricLabel = metric === 'weeklyIncome'
+      ? 'Weekly Income'
+      : metric === 'dailyIncome'
+        ? 'Daily Income'
+        : 'Company';
+
+    const sorted = [...usableRows].sort((a, b) => {
+      if (!metric) return String(a.name || '').localeCompare(String(b.name || ''));
+      return (b[metric] ?? -1) - (a[metric] ?? -1);
+    });
+
+    const ownIndex = sorted.findIndex((row) => isOwnCompareCompany(row, own));
+    let ownRow = ownIndex >= 0 ? sorted[ownIndex] : null;
+
+    // If company/search does not include our own row, still build "Your Company"
+    // from the already-loaded company profile/detailed response. This makes the
+    // summary visible even when Torn's search result set omits the current company.
+    if (!ownRow) {
+      const currentResults = state.lastResults;
+      const ownProfile = currentResults ? findRaw(currentResults, 'company', 'profile') : null;
+      const ownDetailed = currentResults ? findRaw(currentResults, 'company', 'detailed') : null;
+      const ownCombined = { ...(ownProfile || {}), ...(ownDetailed || {}) };
+
+      ownRow = {
+        id: own.id,
+        name: own.name,
+        rating: own.rating,
+        dailyIncome: numericValue(findValueDeep(ownCombined, ['daily_income', 'dailyIncome'])),
+        weeklyIncome: numericValue(findValueDeep(ownCombined, ['weekly_income', 'weeklyIncome'])),
+        dailyCustomers: numericValue(findValueDeep(ownCombined, ['daily_customers', 'dailyCustomers'])),
+        weeklyCustomers: numericValue(findValueDeep(ownCombined, ['weekly_customers', 'weeklyCustomers'])),
+        employees: null,
+        raw: ownCombined,
+      };
+
+      const hasAnyOwnValue =
+        ownRow.dailyIncome !== null ||
+        ownRow.weeklyIncome !== null ||
+        ownRow.dailyCustomers !== null ||
+        ownRow.weeklyCustomers !== null;
+
+      if (!hasAnyOwnValue) ownRow = null;
+    }
+
+    const weeklyIncomeValues = usableRows.map((r) => r.weeklyIncome);
+    const dailyIncomeValues = usableRows.map((r) => r.dailyIncome);
+    const weeklyCustomerValues = usableRows.map((r) => r.weeklyCustomers);
+    const dailyCustomerValues = usableRows.map((r) => r.dailyCustomers);
+
+    const avgWeeklyIncome = averageNumeric(weeklyIncomeValues);
+    const medianWeeklyIncome = medianNumeric(weeklyIncomeValues);
+    const avgDailyIncome = averageNumeric(dailyIncomeValues);
+    const medianDailyIncome = medianNumeric(dailyIncomeValues);
+    const avgWeeklyCustomers = averageNumeric(weeklyCustomerValues);
+    const medianWeeklyCustomers = medianNumeric(weeklyCustomerValues);
+    const avgDailyCustomers = averageNumeric(dailyCustomerValues);
+    const medianDailyCustomers = medianNumeric(dailyCustomerValues);
+
+    const totalWeeklyIncome = weeklyIncomeValues
+      .filter((v) => typeof v === 'number' && Number.isFinite(v))
+      .reduce((sum, v) => sum + v, 0);
+
+    const ownWeeklyIncome = ownRow?.weeklyIncome ?? null;
+    const ownDailyIncome = ownRow?.dailyIncome ?? null;
+    const ownWeeklyCustomers = ownRow?.weeklyCustomers ?? null;
+    const ownDailyCustomers = ownRow?.dailyCustomers ?? null;
+
+    const incomeAbove = ownIndex > 0 ? sorted[ownIndex - 1]?.[metric] ?? null : null;
+    const incomeLeader = sorted.length ? sorted[0]?.[metric] ?? null : null;
+    const ownMetricValue = ownRow && metric ? ownRow[metric] : null;
+
+    const gapToAbove =
+      typeof incomeAbove === 'number' && typeof ownMetricValue === 'number'
+        ? Math.max(0, incomeAbove - ownMetricValue)
+        : null;
+    const gapToLeader =
+      typeof incomeLeader === 'number' && typeof ownMetricValue === 'number'
+        ? Math.max(0, incomeLeader - ownMetricValue)
+        : null;
+
+    const ownWeeklyRpc = revenuePerCustomer(ownWeeklyIncome, ownWeeklyCustomers);
+    const ownDailyRpc = revenuePerCustomer(ownDailyIncome, ownDailyCustomers);
+
+    const weeklyRpcRows = usableRows
+      .map((r) => ({
+        row: r,
+        value: revenuePerCustomer(r.weeklyIncome, r.weeklyCustomers),
+      }))
+      .filter((x) => typeof x.value === 'number')
+      .sort((a, b) => b.value - a.value);
+
+    const dailyRpcRows = usableRows
+      .map((r) => ({
+        row: r,
+        value: revenuePerCustomer(r.dailyIncome, r.dailyCustomers),
+      }))
+      .filter((x) => typeof x.value === 'number')
+      .sort((a, b) => b.value - a.value);
+
+    const avgWeeklyRpc = averageNumeric(weeklyRpcRows.map((x) => x.value));
+    const medianWeeklyRpc = medianNumeric(weeklyRpcRows.map((x) => x.value));
+    const avgDailyRpc = averageNumeric(dailyRpcRows.map((x) => x.value));
+
+    const ownWeeklyRpcIndex = weeklyRpcRows.findIndex((x) =>
+      isOwnCompareCompany(x.row, own)
+    );
+
+    const weeklyCustomerRankRows = usableRows
+      .filter((r) => typeof r.weeklyCustomers === 'number')
+      .sort((a, b) => b.weeklyCustomers - a.weeklyCustomers);
+    const ownWeeklyCustomerIndex = weeklyCustomerRankRows.findIndex((r) =>
+      isOwnCompareCompany(r, own)
+    );
+
+    let html = `<div class="tds-card">`;
+    html += `<div class="tds-row"><span class="tds-row-label">Company type</span><span class="tds-row-value">${escapeHtml(String(own.typeName || own.typeId))}${own.typeName ? ` (${escapeHtml(String(own.typeId))})` : ''}</span></div>`;
+    html += `<div class="tds-row"><span class="tds-row-label">Selected rating</span><span class="tds-row-value">${escapeHtml(compareTierLabel(tier, own.rating))}</span></div>`;
+    html += `<div class="tds-row"><span class="tds-row-label">Companies returned</span><span class="tds-row-value">${formatNumber(sorted.length)}</span></div>`;
+
+    if (ownIndex >= 0 && metric) {
+      html += `<div class="tds-row"><span class="tds-row-label">Your rank by ${metricLabel}</span><span class="tds-row-value">#${ownIndex + 1} / ${sorted.length} · ${formatPercentile(ownIndex + 1, sorted.length)}</span></div>`;
+    }
+
+    html += `</div>`;
+
+    if (ownRow) {
+      html += `<div class="tds-section-label">Your company</div><div class="tds-card">`;
+      html += `<div class="tds-row"><span class="tds-row-label">Company</span><span class="tds-row-value">${escapeHtml(String(own.name || ownRow.name || 'Your company'))}</span></div>`;
+
+      if (ownWeeklyIncome !== null) {
+        html += `<div class="tds-row"><span class="tds-row-label">Weekly income</span><span class="tds-row-value ${compareValueClass(ownWeeklyIncome, avgWeeklyIncome)}">${formatMoney(ownWeeklyIncome)}</span></div>`;
+        html += `<div class="tds-row"><span class="tds-row-label">vs weekly average</span><span class="tds-row-value ${compareValueClass(ownWeeklyIncome, avgWeeklyIncome)}">${formatSignedPercent(percentageDifference(ownWeeklyIncome, avgWeeklyIncome))}</span></div>`;
+        html += `<div class="tds-row"><span class="tds-row-label">vs weekly median</span><span class="tds-row-value ${compareValueClass(ownWeeklyIncome, medianWeeklyIncome)}">${formatSignedPercent(percentageDifference(ownWeeklyIncome, medianWeeklyIncome))}</span></div>`;
+      }
+
+      if (ownDailyIncome !== null) {
+        html += `<div class="tds-row"><span class="tds-row-label">Daily income</span><span class="tds-row-value ${compareValueClass(ownDailyIncome, avgDailyIncome)}">${formatMoney(ownDailyIncome)}</span></div>`;
+        html += `<div class="tds-row"><span class="tds-row-label">vs daily average</span><span class="tds-row-value ${compareValueClass(ownDailyIncome, avgDailyIncome)}">${formatSignedPercent(percentageDifference(ownDailyIncome, avgDailyIncome))}</span></div>`;
+      }
+
+      if (ownWeeklyCustomers !== null) {
+        html += `<div class="tds-row"><span class="tds-row-label">Weekly customers</span><span class="tds-row-value ${compareValueClass(ownWeeklyCustomers, avgWeeklyCustomers)}">${formatNumber(ownWeeklyCustomers)}</span></div>`;
+        html += `<div class="tds-row"><span class="tds-row-label">vs weekly-customer average</span><span class="tds-row-value ${compareValueClass(ownWeeklyCustomers, avgWeeklyCustomers)}">${formatSignedPercent(percentageDifference(ownWeeklyCustomers, avgWeeklyCustomers))}</span></div>`;
+      }
+
+      if (ownDailyCustomers !== null) {
+        html += `<div class="tds-row"><span class="tds-row-label">Daily customers</span><span class="tds-row-value ${compareValueClass(ownDailyCustomers, avgDailyCustomers)}">${formatNumber(ownDailyCustomers)}</span></div>`;
+      }
+
+      if (ownWeeklyRpc !== null) {
+        html += `<div class="tds-row"><span class="tds-row-label">Weekly revenue / customer</span><span class="tds-row-value ${compareValueClass(ownWeeklyRpc, avgWeeklyRpc)}">${formatMoney(ownWeeklyRpc)}</span></div>`;
+        html += `<div class="tds-row"><span class="tds-row-label">vs efficiency average</span><span class="tds-row-value ${compareValueClass(ownWeeklyRpc, avgWeeklyRpc)}">${formatSignedPercent(percentageDifference(ownWeeklyRpc, avgWeeklyRpc))}</span></div>`;
+      }
+
+      if (ownIndex >= 0 && metric) {
+        html += `<div class="tds-row"><span class="tds-row-label">${metricLabel} rank</span><span class="tds-row-value">#${ownIndex + 1} / ${sorted.length}</span></div>`;
+        html += `<div class="tds-row"><span class="tds-row-label">Percentile</span><span class="tds-row-value">${formatPercentile(ownIndex + 1, sorted.length)}</span></div>`;
+      }
+
+      if (ownWeeklyCustomerIndex >= 0) {
+        html += `<div class="tds-row"><span class="tds-row-label">Weekly customer rank</span><span class="tds-row-value">#${ownWeeklyCustomerIndex + 1} / ${weeklyCustomerRankRows.length}</span></div>`;
+      }
+
+      if (ownWeeklyRpcIndex >= 0) {
+        html += `<div class="tds-row"><span class="tds-row-label">Revenue / customer rank</span><span class="tds-row-value">#${ownWeeklyRpcIndex + 1} / ${weeklyRpcRows.length}</span></div>`;
+      }
+
+      html += `</div>`;
+    }
+
+    if (ownRow && metric && typeof ownMetricValue === 'number') {
+      // If Torn omitted our company from the search list, determine the rank
+      // position from our own metric value so Targets can still be calculated.
+      const effectiveOwnIndex = ownIndex >= 0
+        ? ownIndex
+        : sorted.findIndex((row) => typeof row[metric] === 'number' && row[metric] <= ownMetricValue);
+
+      const resolvedOwnIndex = effectiveOwnIndex >= 0 ? effectiveOwnIndex : sorted.length;
+
+      const targetRows = [
+        { label: 'Next position', index: resolvedOwnIndex > 0 ? resolvedOwnIndex - 1 : null },
+        { label: 'Top 10', index: sorted.length >= 10 ? 9 : null },
+        { label: 'Top 5', index: sorted.length >= 5 ? 4 : null },
+        { label: '#1', index: sorted.length >= 1 ? 0 : null },
+      ];
+
+      html += `<div class="tds-section-label">Targets</div><div class="tds-card">`;
+
+      for (const target of targetRows) {
+        if (target.index === null || target.index < 0 || target.index >= sorted.length) {
+          continue;
+        }
+
+        // If we're already above a target rank, report it as achieved.
+        if (resolvedOwnIndex <= target.index) {
+          html += `<div class="tds-row"><span class="tds-row-label">${target.label}</span><span class="tds-row-value tds-v-good">Achieved</span></div>`;
+          continue;
+        }
+
+        const targetValue = sorted[target.index]?.[metric];
+        if (typeof targetValue !== 'number') continue;
+
+        // +1 avoids showing a zero gap when tied on the displayed metric.
+        const needed = Math.max(0, targetValue - ownMetricValue + 1);
+        const pctNeeded = ownMetricValue > 0 ? (needed / ownMetricValue) * 100 : null;
+
+        html += `<div class="tds-row"><span class="tds-row-label">${target.label}</span><span class="tds-row-value">${formatMoney(needed)}${pctNeeded !== null ? ` (${pctNeeded.toFixed(1)}%)` : ''}</span></div>`;
+      }
+
+      html += `<div class="tds-row"><span class="tds-row-label">Target metric</span><span class="tds-row-value">${escapeHtml(metricLabel)}</span></div>`;
+      html += `</div>`;
+    }
+
+    if (hasWeeklyIncome || hasDailyIncome) {
+      html += `<div class="tds-section-label">Income performance</div><div class="tds-card">`;
+
+      if (hasWeeklyIncome) {
+        html += `<div class="tds-row"><span class="tds-row-label">Average weekly income</span><span class="tds-row-value">${avgWeeklyIncome !== null ? formatMoney(avgWeeklyIncome) : '—'}</span></div>`;
+        html += `<div class="tds-row"><span class="tds-row-label">Median weekly income</span><span class="tds-row-value">${medianWeeklyIncome !== null ? formatMoney(medianWeeklyIncome) : '—'}</span></div>`;
+        if (ownWeeklyIncome !== null) {
+          html += `<div class="tds-row"><span class="tds-row-label">Your weekly income vs average</span><span class="tds-row-value ${compareValueClass(ownWeeklyIncome, avgWeeklyIncome)}">${formatSignedPercent(percentageDifference(ownWeeklyIncome, avgWeeklyIncome))}</span></div>`;
+          html += `<div class="tds-row"><span class="tds-row-label">Your weekly income vs median</span><span class="tds-row-value ${compareValueClass(ownWeeklyIncome, medianWeeklyIncome)}">${formatSignedPercent(percentageDifference(ownWeeklyIncome, medianWeeklyIncome))}</span></div>`;
+          if (totalWeeklyIncome > 0) {
+            html += `<div class="tds-row"><span class="tds-row-label">Share of returned weekly income</span><span class="tds-row-value">${((ownWeeklyIncome / totalWeeklyIncome) * 100).toFixed(2)}%</span></div>`;
+          }
+        }
+      }
+
+      if (hasDailyIncome) {
+        html += `<div class="tds-row"><span class="tds-row-label">Average daily income</span><span class="tds-row-value">${avgDailyIncome !== null ? formatMoney(avgDailyIncome) : '—'}</span></div>`;
+        html += `<div class="tds-row"><span class="tds-row-label">Median daily income</span><span class="tds-row-value">${medianDailyIncome !== null ? formatMoney(medianDailyIncome) : '—'}</span></div>`;
+      }
+
+      if (ownIndex >= 0 && metric) {
+        html += `<div class="tds-row"><span class="tds-row-label">Gap to company above you</span><span class="tds-row-value">${gapToAbove !== null ? (gapToAbove === 0 ? 'You are #1' : formatMoney(gapToAbove)) : '—'}</span></div>`;
+        html += `<div class="tds-row"><span class="tds-row-label">Gap to #1</span><span class="tds-row-value">${gapToLeader !== null ? (gapToLeader === 0 ? 'You are #1' : formatMoney(gapToLeader)) : '—'}</span></div>`;
+      }
+
+      html += `</div>`;
+    }
+
+    if (hasWeeklyCustomers || hasDailyCustomers) {
+      html += `<div class="tds-section-label">Customer performance</div><div class="tds-card">`;
+
+      if (hasWeeklyCustomers) {
+        html += `<div class="tds-row"><span class="tds-row-label">Average weekly customers</span><span class="tds-row-value">${avgWeeklyCustomers !== null ? formatNumber(Math.round(avgWeeklyCustomers)) : '—'}</span></div>`;
+        html += `<div class="tds-row"><span class="tds-row-label">Median weekly customers</span><span class="tds-row-value">${medianWeeklyCustomers !== null ? formatNumber(Math.round(medianWeeklyCustomers)) : '—'}</span></div>`;
+        if (ownWeeklyCustomerIndex >= 0) {
+          html += `<div class="tds-row"><span class="tds-row-label">Your weekly-customer rank</span><span class="tds-row-value">#${ownWeeklyCustomerIndex + 1} / ${weeklyCustomerRankRows.length}</span></div>`;
+        }
+      }
+
+      if (hasDailyCustomers) {
+        html += `<div class="tds-row"><span class="tds-row-label">Average daily customers</span><span class="tds-row-value">${avgDailyCustomers !== null ? formatNumber(Math.round(avgDailyCustomers)) : '—'}</span></div>`;
+        html += `<div class="tds-row"><span class="tds-row-label">Median daily customers</span><span class="tds-row-value">${medianDailyCustomers !== null ? formatNumber(Math.round(medianDailyCustomers)) : '—'}</span></div>`;
+      }
+
+      html += `</div>`;
+    }
+
+    if ((hasWeeklyIncome && hasWeeklyCustomers) || (hasDailyIncome && hasDailyCustomers)) {
+      html += `<div class="tds-section-label">Revenue efficiency</div><div class="tds-card">`;
+
+      if (hasWeeklyIncome && hasWeeklyCustomers) {
+        html += `<div class="tds-row"><span class="tds-row-label">Average weekly revenue / customer</span><span class="tds-row-value">${avgWeeklyRpc !== null ? formatMoney(avgWeeklyRpc) : '—'}</span></div>`;
+        html += `<div class="tds-row"><span class="tds-row-label">Median weekly revenue / customer</span><span class="tds-row-value">${medianWeeklyRpc !== null ? formatMoney(medianWeeklyRpc) : '—'}</span></div>`;
+        if (ownWeeklyRpc !== null) {
+          html += `<div class="tds-row"><span class="tds-row-label">Your weekly revenue / customer</span><span class="tds-row-value">${formatMoney(ownWeeklyRpc)}</span></div>`;
+          html += `<div class="tds-row"><span class="tds-row-label">Your efficiency vs average</span><span class="tds-row-value ${compareValueClass(ownWeeklyRpc, avgWeeklyRpc)}">${formatSignedPercent(percentageDifference(ownWeeklyRpc, avgWeeklyRpc))}</span></div>`;
+        }
+        if (ownWeeklyRpcIndex >= 0) {
+          html += `<div class="tds-row"><span class="tds-row-label">Revenue / customer rank</span><span class="tds-row-value">#${ownWeeklyRpcIndex + 1} / ${weeklyRpcRows.length}</span></div>`;
+        }
+      }
+
+      if (hasDailyIncome && hasDailyCustomers && ownDailyRpc !== null) {
+        html += `<div class="tds-row"><span class="tds-row-label">Your daily revenue / customer</span><span class="tds-row-value">${formatMoney(ownDailyRpc)}</span></div>`;
+        if (avgDailyRpc !== null) {
+          html += `<div class="tds-row"><span class="tds-row-label">Daily efficiency vs average</span><span class="tds-row-value ${compareValueClass(ownDailyRpc, avgDailyRpc)}">${formatSignedPercent(percentageDifference(ownDailyRpc, avgDailyRpc))}</span></div>`;
+        }
+      }
+
+      html += `</div>`;
+    }
+
+    const availableFinancialFields = [
+      hasDailyIncome ? 'Daily income' : null,
+      hasWeeklyIncome ? 'Weekly income' : null,
+      hasDailyCustomers ? 'Daily customers' : null,
+      hasWeeklyCustomers ? 'Weekly customers' : null,
+    ].filter(Boolean);
+
+    if (!availableFinancialFields.length) {
+      html += `<div class="tds-box tds-box-warn">
+        Torn returned the companies, but no financial/customer figures could be matched for these rows.
+        ${snapshotError
+          ? `The Company Snapshot fallback also failed: ${escapeHtml(String(snapshotError.reason || 'unknown error'))}.`
+          : 'Compare will not invent financial values.'}
+      </div>`;
+    } else {
+      html += `<div class="tds-box tds-box-info">
+        Financial fields available: <strong>${escapeHtml(availableFinancialFields.join(', '))}</strong>.
+        ${snapshotUsed ? 'Missing search values were filled from Torn’s daily Company Snapshot.' : 'These values were supplied directly by Torn’s company search response.'}
+      </div>`;
+    }
+
+    if (sorted.length > 25 || rows.length >= 100) {
+      html += `<div class="tds-box tds-box-warn">
+        Showing <strong>${Math.min(25, sorted.length)} companies</strong> in this table. Summary statistics above use all <strong>${formatNumber(sorted.length)}</strong> companies returned by Torn.
+      </div>`;
+    }
+
+    if (ownIndex >= 25 && ownRow) {
+      html += `<div class="tds-box tds-box-info">
+        Your company ranks <strong>#${ownIndex + 1}</strong>, so it falls outside the Top 25 table below.
+        Your figures are still included in all summary statistics.
+      </div>`;
+    }
+
+    html += `<div class="tds-section-label">Top ${Math.min(25, sorted.length)}${metric ? ` — ${metricLabel}` : ''}</div>`;
+    html += `<div style="overflow-x:auto;"><table class="tds-table tds-compare-table"><thead><tr>
+      <th>#</th>
+      <th>Company</th>
+      <th>★</th>
+      ${hasDailyIncome ? '<th>Daily Income</th>' : ''}
+      ${hasWeeklyIncome ? '<th>Weekly Income</th>' : ''}
+      ${hasDailyCustomers ? '<th>Daily Customers</th>' : ''}
+      ${hasWeeklyCustomers ? '<th>Weekly Customers</th>' : ''}
+    </tr></thead><tbody>`;
+
+    sorted.slice(0, 25).forEach((row, i) => {
+      const isYou =
+        own.id !== null &&
+        row.id !== null &&
+        String(row.id) === String(own.id);
+
+      html += `<tr style="${isYou ? 'color:var(--tds-accent,#3ddc84);font-weight:700;' : ''}">
+        <td>${i + 1}</td>
+        <td>${escapeHtml(String(row.name ?? `#${row.id ?? '?'}`))}${isYou ? ' (you)' : ''}</td>
+        <td>${row.rating !== null ? `${escapeHtml(String(row.rating))}★` : '—'}</td>
+        ${hasDailyIncome ? `<td class="tds-num">${row.dailyIncome !== null ? formatMoney(row.dailyIncome) : '—'}</td>` : ''}
+        ${hasWeeklyIncome ? `<td class="tds-num">${row.weeklyIncome !== null ? formatMoney(row.weeklyIncome) : '—'}</td>` : ''}
+        ${hasDailyCustomers ? `<td class="tds-num">${row.dailyCustomers !== null ? formatNumber(row.dailyCustomers) : '—'}</td>` : ''}
+        ${hasWeeklyCustomers ? `<td class="tds-num">${row.weeklyCustomers !== null ? formatNumber(row.weeklyCustomers) : '—'}</td>` : ''}
+      </tr>`;
+    });
+
+    html += `</tbody></table></div>`;
+    el.innerHTML = html;
+  }
+
+
+  let footerTicker = null;
+
+  function formatElapsed(seconds) {
+    const total = Math.max(0, Math.floor(Number(seconds) || 0));
+    if (total < 60) return `${total}s`;
+    const minutes = Math.floor(total / 60);
+    const secs = total % 60;
+    if (minutes < 60) return `${minutes}:${String(secs).padStart(2, '0')}`;
+    const hours = Math.floor(minutes / 60);
+    const mins = minutes % 60;
+    return `${hours}:${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+  }
+
+  function updateFooter(panel) {
+    const status = panel.querySelector('#tds-footer-status');
+    if (!status) return;
+
+    if (!state.lastRunAt) {
+      status.textContent = 'Last run: Never';
+      return;
+    }
+
+    const secs = Math.floor((Date.now() - state.lastRunAt) / 1000);
+    status.textContent = `Last run: ${formatElapsed(secs)}`;
+  }
+
+  function startFooterTicker(panel) {
+    if (footerTicker) clearInterval(footerTicker);
+    updateFooter(panel);
+    footerTicker = setInterval(() => updateFooter(panel), 1000);
+  }
+
+  async function loadPersistedDiagnostic(panel) {
+    try {
+      const latest = await LocalDB.getLatest('diagnostics');
+      if (!latest?.results?.length) return false;
+
+      const results = latest.results;
+      const verdict = classifyAccess(results);
+      state.lastResults = results;
+      state.lastVerdict = verdict;
+      state.lastRunAt = Number(latest.timestamp) || Number(tdsGetValue(STORAGE_KEY_LAST_RUN_AT, 0)) || null;
+
+      if (state.lastRunAt) tdsSetValue(STORAGE_KEY_LAST_RUN_AT, state.lastRunAt);
+
+      renderOverviewTab(panel, results, verdict);
+      renderDiagnosticsTab(panel, results);
+      await renderFinanceTab(panel);
+      await renderStockTab(panel);
+      renderTrainingTab(panel).catch((err) => console.error('[TDS] Training render failed:', err));
+      renderBenchmarkTab(panel);
+      renderOptimizeTab(panel);
+      startFooterTicker(panel);
+      await checkLicense(panel);
+      return true;
+    } catch (err) {
+      console.warn('[TDS] Could not load persisted diagnostics:', err);
+      return false;
+    }
+  }
+
+  async function runFullDiagnostic(panel, { force = false } = {}) {
+    if (state.diagnosticRunning) return;
+
+    if (force) {
+      tdsDeleteValue(STORAGE_KEY_LAST_RUN_AT);
+      try {
+        // Remove only the diagnostic capability records. Historical snapshots
+        // remain intact so the Finance trend is not destroyed by a rerun.
+        await LocalDB.clear('diagnostics');
+      } catch (err) {
+        console.warn('[TDS] Could not clear previous diagnostic state:', err);
+      }
+    }
+
+    const apiKey = tdsGetValue(STORAGE_KEY_APIKEY, '');
+    if (!apiKey) {
+      panel.querySelector('#tds-footer-status').textContent = 'Last run: Never';
+      switchTab(panel, 'settings');
+      return;
+    }
+
+    state.diagnosticRunning = true;
+    panel.querySelector('#tds-footer-status').textContent = 'Running diagnostic\u2026';
+
+    try {
+      const results = await runDiagnostic();
+      const verdict = classifyAccess(results);
+      await takeSnapshotFromDiagnostic(results);
+
+      state.lastResults = results;
+      state.lastVerdict = verdict;
+      state.lastRunAt = Date.now();
+
+      tdsSetValue(STORAGE_KEY_LAST_RUN_AT, state.lastRunAt);
+
+      renderOverviewTab(panel, results, verdict);
+      renderDiagnosticsTab(panel, results);
+      await renderFinanceTab(panel);
+      await renderStockTab(panel);
+      renderTrainingTab(panel).catch((err) => console.error('[TDS] Training render failed:', err));
+      renderBenchmarkTab(panel);
+      renderOptimizeTab(panel);
+      startFooterTicker(panel);
+      await checkLicense(panel, { force });
+    } finally {
+      state.diagnosticRunning = false;
+    }
+  }
+
+  // ---------------------------------------------------------------------
+  // 6. BOOT \u2014 the Management Suite lives only inside Torn's Jobs page.
+  // Torn uses joblist.php with hash routes for the company/employment views.
+  // We therefore watch route/DOM changes so the suite survives Torn's SPA-style
+  // navigation without creating duplicate panels.
+  //
+  // Startup no longer relies on a separate "diagnostics completed" flag \u2014
+  // whether a diagnostic has run is read directly from the persisted
+  // IndexedDB record (the actual source of truth), which is simpler and
+  // can't drift out of sync with what's really stored.
+  // ---------------------------------------------------------------------
+  let jobsBootTimer = null;
+  let jobsObserver = null;
+  let jobsBootPoll = null;
+
+  async function bootJobsPage() {
+    tdsTrace('30 bootJobsPage entered', window.location.href);
+    console.debug('[TDS] boot check', window.location.href, 'companyPage=', isJobsPage());
+    if (!isJobsPage()) {
+      removePanel();
+      return;
+    }
+
+    if (document.getElementById('tds-panel')) return;
+
+    const mount = findJobsMount();
+    tdsTrace('31 mount resolved', Boolean(mount));
+    if (!mount) return;
+
+    tdsTrace('32 before colour detection');
+    detectTornColours();
+    tdsTrace('33 after colour detection');
+
+    let panel;
+    try {
+      tdsTrace('34 before buildPanel');
+      panel = buildPanel(mount);
+      tdsTrace('35 after buildPanel');
+    } catch (err) {
+      console.error('[TDS] Panel build failed:', err);
+
+      // PDA-visible fallback so a future compatibility error does not look
+      // like "the script did nothing".
+      if (!document.getElementById('tds-boot-error')) {
+        const errorBox = document.createElement('div');
+        errorBox.id = 'tds-boot-error';
+        errorBox.style.cssText =
+          'margin:10px;padding:10px;border:1px solid #d66;border-radius:6px;' +
+          'background:#3a2222;color:#ffd0d0;font:12px sans-serif;position:relative;z-index:9999;';
+        errorBox.textContent =
+          'Torn Company Management Suite v' + TDS_VERSION +
+          ' loaded, but the dashboard could not be built. Check the TornPDA script console for [TDS] Panel build failed.';
+        try {
+          (mount || document.body || document.documentElement).prepend(errorBox);
+        } catch (_) {}
+      }
+      return;
+    }
+
+    // Hydrate the UI from the last persisted diagnostic first. This means a
+    // Torn navigation/refresh does not trigger another API diagnostic.
+    tdsTrace('36 before IndexedDB hydration');
+    const hydrated = await loadPersistedDiagnostic(panel);
+    tdsTrace('37 after IndexedDB hydration', hydrated);
+    if (hydrated) return;
+
+    if (tdsGetValue(STORAGE_KEY_APIKEY, '')) {
+      try {
+        tdsTrace('38 before automatic diagnostic');
+        await runFullDiagnostic(panel);
+        tdsTrace('39 after automatic diagnostic');
+      } catch (err) {
+        const status = panel.querySelector('#tds-footer-status');
+        if (status) status.textContent = 'Last run: Never';
+        console.error('[TDS] Automatic startup run failed:', err);
+      }
+    } else {
+      updateFooter(panel);
+      switchTab(panel, 'settings');
+    }
+  }
+
+  function scheduleJobsBoot() {
+    clearTimeout(jobsBootTimer);
+    jobsBootTimer = setTimeout(() => {
+      bootJobsPage().catch((err) => console.error('[TDS] Jobs page boot failed:', err));
+    }, 80);
+  }
+
+  function startJobsNavigationWatcher() {
+    tdsTrace('40 startJobsNavigationWatcher');
+    const routeEvents = ['hashchange', 'popstate', 'pageshow'];
+    routeEvents.forEach((eventName) =>
+      window.addEventListener(eventName, scheduleJobsBoot, { passive: true })
+    );
+
+    if (!jobsObserver && document.documentElement) {
+      jobsObserver = new MutationObserver(() => {
+        if (isJobsPage() && !document.getElementById('tds-panel')) scheduleJobsBoot();
+        if (!isJobsPage() && document.getElementById('tds-panel')) removePanel();
+      });
+
+      // Observe documentElement rather than body because TornPDA/WebView can
+      // replace major page containers during navigation.
+      jobsObserver.observe(document.documentElement, { childList: true, subtree: true });
+    }
+
+    // PDA-safe fallback: retry briefly while Torn's mobile company DOM is
+    // being assembled. Stop once the panel exists or after ~30 seconds.
+    if (!jobsBootPoll) {
+      let attempts = 0;
+      jobsBootPoll = setInterval(() => {
+        attempts += 1;
+
+        if (isJobsPage()) {
+          if (!document.getElementById('tds-panel')) scheduleJobsBoot();
+          else {
+            clearInterval(jobsBootPoll);
+            jobsBootPoll = null;
+          }
+        }
+
+        if (attempts >= 60 && jobsBootPoll) {
+          clearInterval(jobsBootPoll);
+          jobsBootPoll = null;
+        }
+      }, 500);
+    }
+
+    scheduleJobsBoot();
+  }
+
+  function initialiseTds() {
+    tdsTrace('41 initialiseTds entered', document.readyState);
+    if (!document.getElementById('tds-styles')) injectStyles();
+    startJobsNavigationWatcher();
+    tdsTrace('42 initialiseTds complete');
+  }
+
+  // Works whether TornPDA injects the script at Start, End, or after the page
+  // has already completed loading.
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initialiseTds, { once: true });
+    window.addEventListener('load', initialiseTds, { once: true });
+  } else {
+    initialiseTds();
+  }
+})();
