@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Company Management Suite
 // @namespace    torn-company-management-suite
-// @version      1.3.1
+// @version      1.2.9
 // @description  Local-only company management dashboard for Torn directors, embedded in the Jobs page. No company data ever leaves your browser; only your Torn User ID is checked against a public license list.
 // @author       DooBiiE
 // @match        https://www.torn.com/*
@@ -67,7 +67,7 @@
   // TornPDA does not always expose the legacy GM_info object that desktop
   // userscript managers provide. Try both common metadata APIs, then use the
   // release version as a PDA-safe fallback so the UI never shows vunknown.
-  const TDS_VERSION_FALLBACK = '1.3.1';
+  const TDS_VERSION_FALLBACK = '1.2.9';
   const TDS_VERSION =
     (typeof GM_info !== 'undefined' && GM_info?.script?.version) ||
     (typeof GM !== 'undefined' && GM?.info?.script?.version) ||
@@ -2545,7 +2545,7 @@
 
   function getOwnCompanyCompareInfo(profile, results) {
     if (!profile || typeof profile !== 'object') {
-      return { id: null, name: null, typeId: null, typeName: null, rating: null };
+      return { id: null, typeId: null, typeName: null, rating: null };
     }
 
     const candidates = [profile];
@@ -2556,7 +2556,6 @@
     }
 
     let id = null;
-    let name = null;
     let typeId = null;
     let typeName = null;
     let rating = null;
@@ -2564,13 +2563,6 @@
     for (const obj of candidates) {
       if (id === null) {
         id = numericValue(obj.id ?? obj.company_id ?? obj.companyId);
-      }
-
-      if (!name) {
-        const nameValue = obj.name ?? obj.company_name ?? obj.companyName;
-        if (nameValue !== null && nameValue !== undefined && String(nameValue).trim()) {
-          name = String(nameValue).trim();
-        }
       }
 
       if (rating === null) {
@@ -2597,14 +2589,7 @@
       typeName = resolveCompanyTypeName(findRaw(results, 'torn', 'companies'), typeId);
     }
 
-    if (!name) {
-      const deepName = findValueDeep(profile, ['name', 'company_name', 'companyName']);
-      if (deepName !== null && deepName !== undefined && String(deepName).trim()) {
-        name = String(deepName).trim();
-      }
-    }
-
-    return { id, name, typeId, typeName, rating };
+    return { id, typeId, typeName, rating };
   }
 
   function buildCompareFilters(typeId, tier, ownRating) {
@@ -3032,31 +3017,6 @@
     return income / customers;
   }
 
-  function compareValueClass(value, baseline) {
-    if (typeof value !== 'number' || typeof baseline !== 'number') return '';
-    return value >= baseline ? 'tds-v-good' : 'tds-v-bad';
-  }
-
-  function normalizeCompanyNameForMatch(value) {
-    return String(value || '')
-      .trim()
-      .toLowerCase()
-      .replace(/\s+/g, ' ');
-  }
-
-  function isOwnCompareCompany(row, own) {
-    if (!row || !own) return false;
-
-    if (own.id !== null && row.id !== null &&
-        String(row.id) === String(own.id)) {
-      return true;
-    }
-
-    const ownName = normalizeCompanyNameForMatch(own.name);
-    const rowName = normalizeCompanyNameForMatch(row.name);
-    return Boolean(ownName && rowName && ownName === rowName);
-  }
-
   async function renderBenchmarkResults(panel, data, own, tier) {
     const el = panel.querySelector('[data-tabpanel="benchmark"] #tds-bench-results');
     if (!el) return;
@@ -3135,38 +3095,12 @@
       return (b[metric] ?? -1) - (a[metric] ?? -1);
     });
 
-    const ownIndex = sorted.findIndex((row) => isOwnCompareCompany(row, own));
-    let ownRow = ownIndex >= 0 ? sorted[ownIndex] : null;
-
-    // If company/search does not include our own row, still build "Your Company"
-    // from the already-loaded company profile/detailed response. This makes the
-    // summary visible even when Torn's search result set omits the current company.
-    if (!ownRow) {
-      const currentResults = state.lastResults;
-      const ownProfile = currentResults ? findRaw(currentResults, 'company', 'profile') : null;
-      const ownDetailed = currentResults ? findRaw(currentResults, 'company', 'detailed') : null;
-      const ownCombined = { ...(ownProfile || {}), ...(ownDetailed || {}) };
-
-      ownRow = {
-        id: own.id,
-        name: own.name,
-        rating: own.rating,
-        dailyIncome: numericValue(findValueDeep(ownCombined, ['daily_income', 'dailyIncome'])),
-        weeklyIncome: numericValue(findValueDeep(ownCombined, ['weekly_income', 'weeklyIncome'])),
-        dailyCustomers: numericValue(findValueDeep(ownCombined, ['daily_customers', 'dailyCustomers'])),
-        weeklyCustomers: numericValue(findValueDeep(ownCombined, ['weekly_customers', 'weeklyCustomers'])),
-        employees: null,
-        raw: ownCombined,
-      };
-
-      const hasAnyOwnValue =
-        ownRow.dailyIncome !== null ||
-        ownRow.weeklyIncome !== null ||
-        ownRow.dailyCustomers !== null ||
-        ownRow.weeklyCustomers !== null;
-
-      if (!hasAnyOwnValue) ownRow = null;
-    }
+    const ownIndex = own.id !== null
+      ? sorted.findIndex((row) =>
+          row.id !== null && String(row.id) === String(own.id)
+        )
+      : -1;
+    const ownRow = ownIndex >= 0 ? sorted[ownIndex] : null;
 
     const weeklyIncomeValues = usableRows.map((r) => r.weeklyIncome);
     const dailyIncomeValues = usableRows.map((r) => r.dailyIncome);
@@ -3227,16 +3161,20 @@
     const medianWeeklyRpc = medianNumeric(weeklyRpcRows.map((x) => x.value));
     const avgDailyRpc = averageNumeric(dailyRpcRows.map((x) => x.value));
 
-    const ownWeeklyRpcIndex = weeklyRpcRows.findIndex((x) =>
-      isOwnCompareCompany(x.row, own)
-    );
+    const ownWeeklyRpcIndex = own.id !== null
+      ? weeklyRpcRows.findIndex((x) =>
+          x.row.id !== null && String(x.row.id) === String(own.id)
+        )
+      : -1;
 
     const weeklyCustomerRankRows = usableRows
       .filter((r) => typeof r.weeklyCustomers === 'number')
       .sort((a, b) => b.weeklyCustomers - a.weeklyCustomers);
-    const ownWeeklyCustomerIndex = weeklyCustomerRankRows.findIndex((r) =>
-      isOwnCompareCompany(r, own)
-    );
+    const ownWeeklyCustomerIndex = own.id !== null
+      ? weeklyCustomerRankRows.findIndex((r) =>
+          r.id !== null && String(r.id) === String(own.id)
+        )
+      : -1;
 
     let html = `<div class="tds-card">`;
     html += `<div class="tds-row"><span class="tds-row-label">Company type</span><span class="tds-row-value">${escapeHtml(String(own.typeName || own.typeId))}${own.typeName ? ` (${escapeHtml(String(own.typeId))})` : ''}</span></div>`;
@@ -3249,94 +3187,6 @@
 
     html += `</div>`;
 
-    if (ownRow) {
-      html += `<div class="tds-section-label">Your company</div><div class="tds-card">`;
-      html += `<div class="tds-row"><span class="tds-row-label">Company</span><span class="tds-row-value">${escapeHtml(String(own.name || ownRow.name || 'Your company'))}</span></div>`;
-
-      if (ownWeeklyIncome !== null) {
-        html += `<div class="tds-row"><span class="tds-row-label">Weekly income</span><span class="tds-row-value ${compareValueClass(ownWeeklyIncome, avgWeeklyIncome)}">${formatMoney(ownWeeklyIncome)}</span></div>`;
-        html += `<div class="tds-row"><span class="tds-row-label">vs weekly average</span><span class="tds-row-value ${compareValueClass(ownWeeklyIncome, avgWeeklyIncome)}">${formatSignedPercent(percentageDifference(ownWeeklyIncome, avgWeeklyIncome))}</span></div>`;
-        html += `<div class="tds-row"><span class="tds-row-label">vs weekly median</span><span class="tds-row-value ${compareValueClass(ownWeeklyIncome, medianWeeklyIncome)}">${formatSignedPercent(percentageDifference(ownWeeklyIncome, medianWeeklyIncome))}</span></div>`;
-      }
-
-      if (ownDailyIncome !== null) {
-        html += `<div class="tds-row"><span class="tds-row-label">Daily income</span><span class="tds-row-value ${compareValueClass(ownDailyIncome, avgDailyIncome)}">${formatMoney(ownDailyIncome)}</span></div>`;
-        html += `<div class="tds-row"><span class="tds-row-label">vs daily average</span><span class="tds-row-value ${compareValueClass(ownDailyIncome, avgDailyIncome)}">${formatSignedPercent(percentageDifference(ownDailyIncome, avgDailyIncome))}</span></div>`;
-      }
-
-      if (ownWeeklyCustomers !== null) {
-        html += `<div class="tds-row"><span class="tds-row-label">Weekly customers</span><span class="tds-row-value ${compareValueClass(ownWeeklyCustomers, avgWeeklyCustomers)}">${formatNumber(ownWeeklyCustomers)}</span></div>`;
-        html += `<div class="tds-row"><span class="tds-row-label">vs weekly-customer average</span><span class="tds-row-value ${compareValueClass(ownWeeklyCustomers, avgWeeklyCustomers)}">${formatSignedPercent(percentageDifference(ownWeeklyCustomers, avgWeeklyCustomers))}</span></div>`;
-      }
-
-      if (ownDailyCustomers !== null) {
-        html += `<div class="tds-row"><span class="tds-row-label">Daily customers</span><span class="tds-row-value ${compareValueClass(ownDailyCustomers, avgDailyCustomers)}">${formatNumber(ownDailyCustomers)}</span></div>`;
-      }
-
-      if (ownWeeklyRpc !== null) {
-        html += `<div class="tds-row"><span class="tds-row-label">Weekly revenue / customer</span><span class="tds-row-value ${compareValueClass(ownWeeklyRpc, avgWeeklyRpc)}">${formatMoney(ownWeeklyRpc)}</span></div>`;
-        html += `<div class="tds-row"><span class="tds-row-label">vs efficiency average</span><span class="tds-row-value ${compareValueClass(ownWeeklyRpc, avgWeeklyRpc)}">${formatSignedPercent(percentageDifference(ownWeeklyRpc, avgWeeklyRpc))}</span></div>`;
-      }
-
-      if (ownIndex >= 0 && metric) {
-        html += `<div class="tds-row"><span class="tds-row-label">${metricLabel} rank</span><span class="tds-row-value">#${ownIndex + 1} / ${sorted.length}</span></div>`;
-        html += `<div class="tds-row"><span class="tds-row-label">Percentile</span><span class="tds-row-value">${formatPercentile(ownIndex + 1, sorted.length)}</span></div>`;
-      }
-
-      if (ownWeeklyCustomerIndex >= 0) {
-        html += `<div class="tds-row"><span class="tds-row-label">Weekly customer rank</span><span class="tds-row-value">#${ownWeeklyCustomerIndex + 1} / ${weeklyCustomerRankRows.length}</span></div>`;
-      }
-
-      if (ownWeeklyRpcIndex >= 0) {
-        html += `<div class="tds-row"><span class="tds-row-label">Revenue / customer rank</span><span class="tds-row-value">#${ownWeeklyRpcIndex + 1} / ${weeklyRpcRows.length}</span></div>`;
-      }
-
-      html += `</div>`;
-    }
-
-    if (ownRow && metric && typeof ownMetricValue === 'number') {
-      // If Torn omitted our company from the search list, determine the rank
-      // position from our own metric value so Targets can still be calculated.
-      const effectiveOwnIndex = ownIndex >= 0
-        ? ownIndex
-        : sorted.findIndex((row) => typeof row[metric] === 'number' && row[metric] <= ownMetricValue);
-
-      const resolvedOwnIndex = effectiveOwnIndex >= 0 ? effectiveOwnIndex : sorted.length;
-
-      const targetRows = [
-        { label: 'Next position', index: resolvedOwnIndex > 0 ? resolvedOwnIndex - 1 : null },
-        { label: 'Top 10', index: sorted.length >= 10 ? 9 : null },
-        { label: 'Top 5', index: sorted.length >= 5 ? 4 : null },
-        { label: '#1', index: sorted.length >= 1 ? 0 : null },
-      ];
-
-      html += `<div class="tds-section-label">Targets</div><div class="tds-card">`;
-
-      for (const target of targetRows) {
-        if (target.index === null || target.index < 0 || target.index >= sorted.length) {
-          continue;
-        }
-
-        // If we're already above a target rank, report it as achieved.
-        if (resolvedOwnIndex <= target.index) {
-          html += `<div class="tds-row"><span class="tds-row-label">${target.label}</span><span class="tds-row-value tds-v-good">Achieved</span></div>`;
-          continue;
-        }
-
-        const targetValue = sorted[target.index]?.[metric];
-        if (typeof targetValue !== 'number') continue;
-
-        // +1 avoids showing a zero gap when tied on the displayed metric.
-        const needed = Math.max(0, targetValue - ownMetricValue + 1);
-        const pctNeeded = ownMetricValue > 0 ? (needed / ownMetricValue) * 100 : null;
-
-        html += `<div class="tds-row"><span class="tds-row-label">${target.label}</span><span class="tds-row-value">${formatMoney(needed)}${pctNeeded !== null ? ` (${pctNeeded.toFixed(1)}%)` : ''}</span></div>`;
-      }
-
-      html += `<div class="tds-row"><span class="tds-row-label">Target metric</span><span class="tds-row-value">${escapeHtml(metricLabel)}</span></div>`;
-      html += `</div>`;
-    }
-
     if (hasWeeklyIncome || hasDailyIncome) {
       html += `<div class="tds-section-label">Income performance</div><div class="tds-card">`;
 
@@ -3344,8 +3194,8 @@
         html += `<div class="tds-row"><span class="tds-row-label">Average weekly income</span><span class="tds-row-value">${avgWeeklyIncome !== null ? formatMoney(avgWeeklyIncome) : '—'}</span></div>`;
         html += `<div class="tds-row"><span class="tds-row-label">Median weekly income</span><span class="tds-row-value">${medianWeeklyIncome !== null ? formatMoney(medianWeeklyIncome) : '—'}</span></div>`;
         if (ownWeeklyIncome !== null) {
-          html += `<div class="tds-row"><span class="tds-row-label">Your weekly income vs average</span><span class="tds-row-value ${compareValueClass(ownWeeklyIncome, avgWeeklyIncome)}">${formatSignedPercent(percentageDifference(ownWeeklyIncome, avgWeeklyIncome))}</span></div>`;
-          html += `<div class="tds-row"><span class="tds-row-label">Your weekly income vs median</span><span class="tds-row-value ${compareValueClass(ownWeeklyIncome, medianWeeklyIncome)}">${formatSignedPercent(percentageDifference(ownWeeklyIncome, medianWeeklyIncome))}</span></div>`;
+          html += `<div class="tds-row"><span class="tds-row-label">Your weekly income vs average</span><span class="tds-row-value">${formatSignedPercent(percentageDifference(ownWeeklyIncome, avgWeeklyIncome))}</span></div>`;
+          html += `<div class="tds-row"><span class="tds-row-label">Your weekly income vs median</span><span class="tds-row-value">${formatSignedPercent(percentageDifference(ownWeeklyIncome, medianWeeklyIncome))}</span></div>`;
           if (totalWeeklyIncome > 0) {
             html += `<div class="tds-row"><span class="tds-row-label">Share of returned weekly income</span><span class="tds-row-value">${((ownWeeklyIncome / totalWeeklyIncome) * 100).toFixed(2)}%</span></div>`;
           }
@@ -3392,7 +3242,7 @@
         html += `<div class="tds-row"><span class="tds-row-label">Median weekly revenue / customer</span><span class="tds-row-value">${medianWeeklyRpc !== null ? formatMoney(medianWeeklyRpc) : '—'}</span></div>`;
         if (ownWeeklyRpc !== null) {
           html += `<div class="tds-row"><span class="tds-row-label">Your weekly revenue / customer</span><span class="tds-row-value">${formatMoney(ownWeeklyRpc)}</span></div>`;
-          html += `<div class="tds-row"><span class="tds-row-label">Your efficiency vs average</span><span class="tds-row-value ${compareValueClass(ownWeeklyRpc, avgWeeklyRpc)}">${formatSignedPercent(percentageDifference(ownWeeklyRpc, avgWeeklyRpc))}</span></div>`;
+          html += `<div class="tds-row"><span class="tds-row-label">Your efficiency vs average</span><span class="tds-row-value">${formatSignedPercent(percentageDifference(ownWeeklyRpc, avgWeeklyRpc))}</span></div>`;
         }
         if (ownWeeklyRpcIndex >= 0) {
           html += `<div class="tds-row"><span class="tds-row-label">Revenue / customer rank</span><span class="tds-row-value">#${ownWeeklyRpcIndex + 1} / ${weeklyRpcRows.length}</span></div>`;
@@ -3402,7 +3252,7 @@
       if (hasDailyIncome && hasDailyCustomers && ownDailyRpc !== null) {
         html += `<div class="tds-row"><span class="tds-row-label">Your daily revenue / customer</span><span class="tds-row-value">${formatMoney(ownDailyRpc)}</span></div>`;
         if (avgDailyRpc !== null) {
-          html += `<div class="tds-row"><span class="tds-row-label">Daily efficiency vs average</span><span class="tds-row-value ${compareValueClass(ownDailyRpc, avgDailyRpc)}">${formatSignedPercent(percentageDifference(ownDailyRpc, avgDailyRpc))}</span></div>`;
+          html += `<div class="tds-row"><span class="tds-row-label">Daily efficiency vs average</span><span class="tds-row-value">${formatSignedPercent(percentageDifference(ownDailyRpc, avgDailyRpc))}</span></div>`;
         }
       }
 
