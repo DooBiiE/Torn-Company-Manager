@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Company Management Suite
 // @namespace    torn-company-management-suite
-// @version      1.3.8
+// @version      1.3.9
 // @description  Torn company management dashboard
 // @author       DooBiiE
 // @match        https://www.torn.com/*
@@ -52,7 +52,7 @@
 (function () {
   'use strict';
 
-  console.log('[TDS] v1.3.8 script started');
+  console.log('[TDS] v1.3.9 PDA bisect started');
 
   // ---------------------------------------------------------------------
   // 0. CONSTANTS
@@ -115,7 +115,7 @@
   // TornPDA does not always expose the legacy GM_info object that desktop
   // userscript managers provide. Try both common metadata APIs, then use the
   // release version as a PDA-safe fallback so the UI never shows vunknown.
-  const TDS_VERSION_FALLBACK = '1.3.8';
+  const TDS_VERSION_FALLBACK = '1.3.9';
 
   let TDS_VERSION = TDS_VERSION_FALLBACK;
   try {
@@ -982,14 +982,11 @@
       });
     });
 
-    renderSettingsTab(panel);
-    renderDiagnosticsTab(panel, null);
-    renderOverviewTab(panel, null, null);
-    renderFinanceTab(panel);
-    renderStockTab(panel);
-    renderTrainingTab(panel).catch((err) => console.error('[TDS] Training render failed:', err));
-    renderBenchmarkTab(panel);
-    renderOptimizeTab(panel);
+    panel.querySelectorAll('.tds-tabpanel').forEach((p) => {
+      if (p.dataset.tabpanel !== 'overview') {
+        p.innerHTML = `<div class="tds-box tds-box-neutral">Disabled in PDA bisect build.</div>`;
+      }
+    });
     switchTab(panel, 'overview');
 
     return panel;
@@ -4314,10 +4311,7 @@
       renderDiagnosticsTab(panel, results);
       await renderFinanceTab(panel);
       await renderStockTab(panel);
-      renderTrainingTab(panel).catch((err) => console.error('[TDS] Training render failed:', err));
-      renderBenchmarkTab(panel);
-      renderOptimizeTab(panel);
-      startFooterTicker(panel);
+            startFooterTicker(panel);
       await checkLicense(panel);
       return true;
     } catch (err) {
@@ -4365,10 +4359,7 @@
       renderDiagnosticsTab(panel, results);
       await renderFinanceTab(panel);
       await renderStockTab(panel);
-      renderTrainingTab(panel).catch((err) => console.error('[TDS] Training render failed:', err));
-      renderBenchmarkTab(panel);
-      renderOptimizeTab(panel);
-      startFooterTicker(panel);
+            startFooterTicker(panel);
       await checkLicense(panel, { force });
     } finally {
       state.diagnosticRunning = false;
@@ -4391,7 +4382,8 @@
   let jobsBootPoll = null;
 
   async function bootJobsPage() {
-    console.debug('[TDS] boot check', window.location.href, 'companyPage=', isJobsPage());
+    console.log('[TDS] bootJobsPage entered', window.location.href);
+
     if (!isJobsPage()) {
       removePanel();
       return;
@@ -4400,51 +4392,46 @@
     if (document.getElementById('tds-panel')) return;
 
     const mount = findJobsMount();
+    console.log('[TDS] mount found:', Boolean(mount), mount);
     if (!mount) return;
 
-    detectTornColours();
+    try {
+      detectTornColours();
+    } catch (err) {
+      console.warn('[TDS] colour detection failed but continuing:', err);
+    }
 
     let panel;
     try {
       panel = buildPanel(mount);
+      console.log('[TDS] buildPanel success');
     } catch (err) {
-      console.error('[TDS] Panel build failed:', err);
-
-      // PDA-visible fallback so a future compatibility error does not look
-      // like "the script did nothing".
-      if (!document.getElementById('tds-boot-error')) {
-        const errorBox = document.createElement('div');
-        errorBox.id = 'tds-boot-error';
-        errorBox.style.cssText =
-          'margin:10px;padding:10px;border:1px solid #d66;border-radius:6px;' +
-          'background:#3a2222;color:#ffd0d0;font:12px sans-serif;position:relative;z-index:9999;';
-        errorBox.textContent =
-          'Torn Company Management Suite v' + TDS_VERSION +
-          ' loaded, but the dashboard could not be built. Check the TornPDA script console for [TDS] Panel build failed.';
-        try {
-          (mount || document.body || document.documentElement).prepend(errorBox);
-        } catch (_) {}
-      }
-      return;
+      console.error('[TDS] buildPanel failed:', err);
+      throw err;
     }
 
-    // Hydrate the UI from the last persisted diagnostic first. This means a
-    // Torn navigation/refresh does not trigger another API diagnostic.
-    const hydrated = await loadPersistedDiagnostic(panel);
-    if (hydrated) return;
-
-    if (tdsGetValue(STORAGE_KEY_APIKEY, '')) {
-      try {
-        await runFullDiagnostic(panel);
-      } catch (err) {
-        const status = panel.querySelector('#tds-footer-status');
-        if (status) status.textContent = 'Last run: Never';
-        console.error('[TDS] Automatic startup run failed:', err);
-      }
-    } else {
-      updateFooter(panel);
-      switchTab(panel, 'settings');
+    // PDA bisect build: intentionally stop here.
+    // This proves whether the dashboard shell + DOM/UI code works before
+    // IndexedDB, diagnostics, API calls, license checks or tab data hydration.
+    const overview = panel.querySelector('[data-tabpanel="overview"]');
+    if (overview) {
+      overview.innerHTML = `
+        <div class="tds-box tds-box-info">
+          <strong>PDA compatibility test passed.</strong><br>
+          The Company Management Suite UI shell mounted successfully.
+        </div>
+        <div class="tds-box tds-box-neutral">
+          This v1.3.9 bisect build deliberately does not load diagnostics,
+          IndexedDB history, API data, licensing, Compare, Stock or Training.
+          If you can see this box in TornPDA, the fault is in one of those
+          post-mount subsystems rather than the UI/mount code.
+        </div>`;
     }
+
+    const footer = panel.querySelector('#tds-footer-status');
+    if (footer) footer.textContent = 'PDA bisect: UI shell only';
+
+    console.log('[TDS] PDA bisect shell complete');
   }
 
   function scheduleJobsBoot() {
