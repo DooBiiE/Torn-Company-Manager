@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Company Management Suite
 // @namespace    torn-company-management-suite
-// @version      1.3.6
+// @version      1.3.5
 // @updateURL    https://raw.githubusercontent.com/DooBiiE/Torn-Company-Manager/main/torn-company-manager.user.js
 // @downloadURL  https://raw.githubusercontent.com/DooBiiE/Torn-Company-Manager/main/torn-company-manager.user.js
 // @description  Local-only company management dashboard for Torn directors, embedded in the Jobs page. No company data ever leaves your browser; only your Torn User ID is checked against a public license list.
@@ -13,7 +13,7 @@
 // @grant        GM_deleteValue
 // @connect      api.torn.com
 // @connect      raw.githubusercontent.com
-// @run-at       document-idle
+// @run-at       document-end
 // ==/UserScript==
 
 /**
@@ -69,7 +69,7 @@
   // TornPDA does not always expose the legacy GM_info object that desktop
   // userscript managers provide. Try both common metadata APIs, then use the
   // release version as a PDA-safe fallback so the UI never shows vunknown.
-  const TDS_VERSION_FALLBACK = '1.3.4';
+  const TDS_VERSION_FALLBACK = '1.3.5';
 // Update distribution uses the same GitHub-hosted .user.js for both version
 // checks and downloads. Release process: bump @version + this fallback, then
 // replace torn-company-manager.user.js on the main branch.
@@ -82,6 +82,53 @@
   const STORAGE_KEY_LAST_RUN_AT = 'tds_last_run_at';
   const STORAGE_KEY_THEME = 'tds_theme';
   const STORAGE_KEY_LICENSE_CACHE = 'tds_license_cache';
+
+  // TornPDA normally supplies the underscore-style GM storage functions, but
+  // keep a localStorage fallback so a missing/changed PDA GM shim cannot stop
+  // the entire dashboard from mounting. Desktop Tampermonkey/Violentmonkey
+  // continues to use the normal GM functions.
+  function tdsGetValue(key, fallback = null) {
+    try {
+      if (typeof GM_getValue === 'function') return tdsGetValue(key, fallback);
+    } catch (err) {
+      console.warn('[TDS] GM_getValue failed; using localStorage fallback:', err);
+    }
+    try {
+      const raw = localStorage.getItem(`tds_fallback_${key}`);
+      return raw === null ? fallback : JSON.parse(raw);
+    } catch (_) {
+      return fallback;
+    }
+  }
+
+  function tdsSetValue(key, value) {
+    try {
+      if (typeof GM_setValue === 'function') {
+        tdsSetValue(key, value);
+        return;
+      }
+    } catch (err) {
+      console.warn('[TDS] GM_setValue failed; using localStorage fallback:', err);
+    }
+    try {
+      localStorage.setItem(`tds_fallback_${key}`, JSON.stringify(value));
+    } catch (_) {}
+  }
+
+  function tdsDeleteValue(key) {
+    try {
+      if (typeof GM_deleteValue === 'function') {
+        tdsDeleteValue(key);
+        return;
+      }
+    } catch (err) {
+      console.warn('[TDS] GM_deleteValue failed; using localStorage fallback:', err);
+    }
+    try {
+      localStorage.removeItem(`tds_fallback_${key}`);
+    } catch (_) {}
+  }
+
   const MIN_CALL_INTERVAL_MS = 800; // ~75 req/min ceiling, well under Torn's 100/min cap
   const DB_NAME = 'torn_director_system';
   const DB_VERSION = 1;
@@ -162,7 +209,7 @@
     let lastCallAt = 0;
 
     function rawCall(section, selections, id = '', extraParams = {}) {
-      const key = GM_getValue(STORAGE_KEY_APIKEY, '');
+      const key = tdsGetValue(STORAGE_KEY_APIKEY, '');
       if (!key) return Promise.reject({ blocked: true, reason: 'No API key configured yet.' });
 
       const path = id ? `${section}/${id}` : section;
@@ -208,7 +255,7 @@
     }
 
     function rawCallV2(path, extraParams = {}) {
-      const key = GM_getValue(STORAGE_KEY_APIKEY, '');
+      const key = tdsGetValue(STORAGE_KEY_APIKEY, '');
       if (!key) return Promise.reject({ blocked: true, reason: 'No API key configured yet.' });
 
       // Torn API v2 / Swagger uses header authentication. Do NOT append the
@@ -261,7 +308,7 @@
     }
 
     function rawCallV2Text(path, extraParams = {}) {
-      const key = GM_getValue(STORAGE_KEY_APIKEY, '');
+      const key = tdsGetValue(STORAGE_KEY_APIKEY, '');
       if (!key) return Promise.reject({ blocked: true, reason: 'No API key configured yet.' });
 
       const params = new URLSearchParams({ ...extraParams });
@@ -781,23 +828,36 @@
   };
 
   function isJobsPage() {
-    return /(?:^|\/)companies\.php$/i.test(window.location.pathname);
+    // Desktop and TornPDA can expose slightly different URL shapes during
+    // WebView/SPA navigation. Match the real companies.php path even when
+    // there is a trailing slash, query string or hash route.
+    const path = String(window.location.pathname || '').replace(/\/+$/, '');
+    if (/(?:^|\/)companies\.php$/i.test(path)) return true;
+    return /\/companies\.php(?:[?#]|$)/i.test(String(window.location.href || ''));
   }
 
   function findJobsMount() {
     const anchors = [
       '.companies-wrap',
       '#companies-page',
+      '[class*="companies"][class*="wrap"]',
       '.content-wrapper',
       '#main-container',
       '#mainContainer',
       '.cont-gray',
+      'main',
+      '[role="main"]',
     ];
+
     for (const selector of anchors) {
       const el = document.querySelector(selector);
       if (el && !el.closest('#tds-panel')) return el;
     }
-    return null;
+
+    // TornPDA's mobile DOM can omit desktop wrapper classes. On the confirmed
+    // companies page, body is a safe last-resort mount rather than making the
+    // whole suite disappear.
+    return isJobsPage() ? document.body : null;
   }
 
   function removePanel() {
@@ -853,7 +913,7 @@
     mount.prepend(panel);
     state.panel = panel;
 
-    applyTheme(panel, GM_getValue(STORAGE_KEY_THEME, 'green'));
+    applyTheme(panel, tdsGetValue(STORAGE_KEY_THEME, 'green'));
 
     panel.querySelector('[data-action="tab-settings"]').addEventListener('click', () => switchTab(panel, 'settings'));
     panel.querySelector('[data-action="refresh"]').addEventListener('click', () => runFullDiagnostic(panel, { force: true }));
@@ -889,7 +949,7 @@
 
   function renderSettingsTab(panel) {
     const el = panel.querySelector('[data-tabpanel="settings"]');
-    const currentTheme = GM_getValue(STORAGE_KEY_THEME, 'green');
+    const currentTheme = tdsGetValue(STORAGE_KEY_THEME, 'green');
 
     el.innerHTML = `
       <div class="tds-section-label">API Key</div>
@@ -967,7 +1027,7 @@
 
     const keyInput = el.querySelector('#tds-keyinput');
     const toggleKey = el.querySelector('#tds-togglekey');
-    keyInput.value = GM_getValue(STORAGE_KEY_APIKEY, '');
+    keyInput.value = tdsGetValue(STORAGE_KEY_APIKEY, '');
 
     // Keep the API key masked by default. It can be temporarily revealed
     // with the Show button when the user needs to verify or edit it.
@@ -988,7 +1048,7 @@
 
     el.querySelector('#tds-savekey').addEventListener('click', async () => {
       const key = keyInput.value.trim();
-      GM_setValue(STORAGE_KEY_APIKEY, key);
+      tdsSetValue(STORAGE_KEY_APIKEY, key);
       keyInput.style.borderColor = 'var(--tds-accent)';
       setTimeout(() => (keyInput.style.borderColor = ''), 600);
       if (key && !state.diagnosticRunning) {
@@ -1022,7 +1082,7 @@
       sw.style.background = theme.accent;
       sw.title = name;
       sw.addEventListener('click', () => {
-        GM_setValue(STORAGE_KEY_THEME, name);
+        tdsSetValue(STORAGE_KEY_THEME, name);
         applyTheme(panel, name);
         swatchWrap.querySelectorAll('.tds-swatch').forEach((s) => s.classList.remove('tds-swatch-active'));
         sw.classList.add('tds-swatch-active');
@@ -1346,7 +1406,7 @@
       return;
     }
 
-    const cached = GM_getValue(STORAGE_KEY_LICENSE_CACHE, null);
+    const cached = tdsGetValue(STORAGE_KEY_LICENSE_CACHE, null);
     if (!force && cached && cached.userId === userId && (Date.now() - cached.checkedAt) < LICENSE_CACHE_TTL_MS) {
       state.license = cached;
       applyLicenseGate(panel);
@@ -1375,7 +1435,7 @@
       };
     }
 
-    GM_setValue(STORAGE_KEY_LICENSE_CACHE, state.license);
+    tdsSetValue(STORAGE_KEY_LICENSE_CACHE, state.license);
     applyLicenseGate(panel);
   }
 
@@ -4188,9 +4248,9 @@
       const verdict = classifyAccess(results);
       state.lastResults = results;
       state.lastVerdict = verdict;
-      state.lastRunAt = Number(latest.timestamp) || Number(GM_getValue(STORAGE_KEY_LAST_RUN_AT, 0)) || null;
+      state.lastRunAt = Number(latest.timestamp) || Number(tdsGetValue(STORAGE_KEY_LAST_RUN_AT, 0)) || null;
 
-      if (state.lastRunAt) GM_setValue(STORAGE_KEY_LAST_RUN_AT, state.lastRunAt);
+      if (state.lastRunAt) tdsSetValue(STORAGE_KEY_LAST_RUN_AT, state.lastRunAt);
 
       renderOverviewTab(panel, results, verdict);
       renderDiagnosticsTab(panel, results);
@@ -4212,7 +4272,7 @@
     if (state.diagnosticRunning) return;
 
     if (force) {
-      GM_deleteValue(STORAGE_KEY_LAST_RUN_AT);
+      tdsDeleteValue(STORAGE_KEY_LAST_RUN_AT);
       try {
         // Remove only the diagnostic capability records. Historical snapshots
         // remain intact so the Finance trend is not destroyed by a rerun.
@@ -4222,7 +4282,7 @@
       }
     }
 
-    const apiKey = GM_getValue(STORAGE_KEY_APIKEY, '');
+    const apiKey = tdsGetValue(STORAGE_KEY_APIKEY, '');
     if (!apiKey) {
       panel.querySelector('#tds-footer-status').textContent = 'Last run: Never';
       switchTab(panel, 'settings');
@@ -4241,7 +4301,7 @@
       state.lastVerdict = verdict;
       state.lastRunAt = Date.now();
 
-      GM_setValue(STORAGE_KEY_LAST_RUN_AT, state.lastRunAt);
+      tdsSetValue(STORAGE_KEY_LAST_RUN_AT, state.lastRunAt);
 
       renderOverviewTab(panel, results, verdict);
       renderDiagnosticsTab(panel, results);
@@ -4270,8 +4330,10 @@
   // ---------------------------------------------------------------------
   let jobsBootTimer = null;
   let jobsObserver = null;
+  let jobsBootPoll = null;
 
   async function bootJobsPage() {
+    console.debug('[TDS] boot check', window.location.href, 'companyPage=', isJobsPage());
     if (!isJobsPage()) {
       removePanel();
       return;
@@ -4290,7 +4352,7 @@
     const hydrated = await loadPersistedDiagnostic(panel);
     if (hydrated) return;
 
-    if (GM_getValue(STORAGE_KEY_APIKEY, '')) {
+    if (tdsGetValue(STORAGE_KEY_APIKEY, '')) {
       try {
         await runFullDiagnostic(panel);
       } catch (err) {
@@ -4312,27 +4374,58 @@
   }
 
   function startJobsNavigationWatcher() {
-    const routeEvents = ['hashchange', 'popstate'];
-    routeEvents.forEach((eventName) => window.addEventListener(eventName, scheduleJobsBoot));
+    const routeEvents = ['hashchange', 'popstate', 'pageshow'];
+    routeEvents.forEach((eventName) =>
+      window.addEventListener(eventName, scheduleJobsBoot, { passive: true })
+    );
 
-    if (!jobsObserver) {
+    if (!jobsObserver && document.documentElement) {
       jobsObserver = new MutationObserver(() => {
         if (isJobsPage() && !document.getElementById('tds-panel')) scheduleJobsBoot();
         if (!isJobsPage() && document.getElementById('tds-panel')) removePanel();
       });
-      jobsObserver.observe(document.body, { childList: true, subtree: true });
+
+      // Observe documentElement rather than body because TornPDA/WebView can
+      // replace major page containers during navigation.
+      jobsObserver.observe(document.documentElement, { childList: true, subtree: true });
+    }
+
+    // PDA-safe fallback: retry briefly while Torn's mobile company DOM is
+    // being assembled. Stop once the panel exists or after ~30 seconds.
+    if (!jobsBootPoll) {
+      let attempts = 0;
+      jobsBootPoll = setInterval(() => {
+        attempts += 1;
+
+        if (isJobsPage()) {
+          if (!document.getElementById('tds-panel')) scheduleJobsBoot();
+          else {
+            clearInterval(jobsBootPoll);
+            jobsBootPoll = null;
+          }
+        }
+
+        if (attempts >= 60 && jobsBootPoll) {
+          clearInterval(jobsBootPoll);
+          jobsBootPoll = null;
+        }
+      }, 500);
     }
 
     scheduleJobsBoot();
   }
 
-  if (document.readyState === 'complete' || document.readyState === 'interactive') {
-    injectStyles();
+  function initialiseTds() {
+    if (!document.getElementById('tds-styles')) injectStyles();
     startJobsNavigationWatcher();
+  }
+
+  // Works whether TornPDA injects the script at Start, End, or after the page
+  // has already completed loading.
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initialiseTds, { once: true });
+    window.addEventListener('load', initialiseTds, { once: true });
   } else {
-    document.addEventListener('DOMContentLoaded', () => {
-      injectStyles();
-      startJobsNavigationWatcher();
-    });
+    initialiseTds();
   }
 })();
