@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Company Management Suite
 // @namespace    torn-company-management-suite
-// @version      1.3.1
+// @version      1.3.2
 // @description  Local-only company management dashboard for Torn directors, embedded in the Jobs page. No company data ever leaves your browser; only your Torn User ID is checked against a public license list.
 // @author       DooBiiE
 // @match        https://www.torn.com/*
@@ -67,7 +67,7 @@
   // TornPDA does not always expose the legacy GM_info object that desktop
   // userscript managers provide. Try both common metadata APIs, then use the
   // release version as a PDA-safe fallback so the UI never shows vunknown.
-  const TDS_VERSION_FALLBACK = '1.3.1';
+  const TDS_VERSION_FALLBACK = '1.3.2';
   const TDS_VERSION =
     (typeof GM_info !== 'undefined' && GM_info?.script?.version) ||
     (typeof GM !== 'undefined' && GM?.info?.script?.version) ||
@@ -619,6 +619,17 @@
         vertical-align: middle;
       }
       .tds-compare-table td.tds-num { text-align: center !important; }
+      .tds-training-debt-table th,
+      .tds-training-debt-table td {
+        text-align: center !important;
+        vertical-align: middle;
+      }
+      .tds-training-debt-table tbody tr td {
+        border-bottom: 1px solid var(--tds-border-strong, #4a4a4a);
+        padding-top: 8px;
+        padding-bottom: 8px;
+      }
+      .tds-training-debt-table tbody tr:last-child td { border-bottom: none; }
       .tds-spark { display: flex; align-items: flex-end; gap: 4px; height: 46px; margin: 6px 0; }
       .tds-spark-col { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 3px; }
       .tds-spark-bar { width: 100%; border-radius: 2px 2px 0 0; min-height: 2px; }
@@ -841,7 +852,7 @@
     renderOverviewTab(panel, null, null);
     renderFinanceTab(panel);
     renderStockTab(panel);
-    renderTrainingTab(panel);
+    renderTrainingTab(panel).catch((err) => console.error('[TDS] Training render failed:', err));
     renderBenchmarkTab(panel);
     renderOptimizeTab(panel);
     switchTab(panel, 'overview');
@@ -2465,51 +2476,286 @@
     el.innerHTML = html;
   }
 
+  // -----------------------------------------------------------------------
+  // TRAINING / ROTATIONAL DEBT HELPERS
+  // -----------------------------------------------------------------------
+  function normalizePersonName(value) {
+    return String(value || '')
+      .toLowerCase()
+      .replace(/<[^>]*>/g, '')
+      .replace(/[^a-z0-9]+/g, ' ')
+      .trim()
+      .replace(/\s+/g, ' ');
+  }
+
+  function parseTrainingEvent(entry, employees) {
+    if (!entry) return null;
+
+    const raw = entry.raw || {};
+    const text = String(entry.text || '');
+    if (!/\btrain(?:ed|ing|s)?\b/i.test(text)) return null;
+
+    // Structured recipient fields are preferred. Avoid a plain `user_id`
+    // first because some log shapes use it for the director/trainer.
+    const structuredId = pickNumeric(raw, [
+      'employee_id', 'target_id', 'recipient_id', 'trained_id',
+      'employee', 'target', 'recipient'
+    ]);
+
+    const structuredName = pickText(raw, [
+      'employee_name', 'target_name', 'recipient_name', 'trained_name',
+      'employee', 'target', 'recipient'
+    ]);
+
+    let employee = null;
+
+    if (structuredId !== null) {
+      employee = employees.find((e) => String(e.id) === String(structuredId)) || null;
+    }
+
+    if (!employee && structuredName) {
+      const wanted = normalizePersonName(structuredName);
+      employee = employees.find((e) => normalizePersonName(e.name) === wanted) || null;
+    }
+
+    // Most Torn company-news/log messages include the recipient's visible
+    // name. Match longest names first so one employee's name does not become
+    // a substring match inside another employee's name.
+    if (!employee) {
+      const normalizedText = normalizePersonName(text);
+      const byLength = [...employees].sort((a, b) => String(b.name).length - String(a.name).length);
+      employee = byLength.find((e) => {
+        const n = normalizePersonName(e.name);
+        return n && (` ${normalizedText} `).includes(` ${n} `);
+      }) || null;
+    }
+
+    if (!employee) return null;
+
+    let quantity = pickNumeric(raw, [
+      'quantity', 'qty', 'count', 'trains', 'train_count', 'amount'
+    ]);
+
+    if (quantity === null) {
+      const patterns = [
+        /(\d[\d,]*)\s+trains?\b/i,
+        /\btrains?\s*[x×:]?\s*(\d[\d,]*)\b/i,
+        /\btrained\b.*?\b(\d[\d,]*)\s+times?\b/i,
+      ];
+      for (const pattern of patterns) {
+        const m = text.match(pattern);
+        if (!m) continue;
+        quantity = Number(String(m[1]).replace(/,/g, ''));
+        break;
+      }
+    }
+
+    // A normal Torn "trained employee" event represents one train unless an
+    // explicit quantity is present.
+    if (quantity === null) quantity = 1;
+    if (!Number.isFinite(quantity) || quantity <= 0) return null;
+
+    return {
+      eventId: String(entry.id || ''),
+      timestamp: Number(entry.timestamp),
+      employeeId: String(employee.id),
+      employeeName: employee.name,
+      quantity,
+      text,
+    };
+  }
+
+  function collectTrainingEvents(raw, employees) {
+    const sourceEntries = flattenNewsEntries(raw);
+    const events = [];
+    const seen = new Set();
+
+    for (const entry of sourceEntries) {
+      const parsed = parseTrainingEvent(entry, employees);
+      if (!parsed) continue;
+
+      const key = parsed.eventId
+        ? `id:${parsed.eventId}`
+        : `${parsed.timestamp}|${parsed.employeeId}|${parsed.quantity}`;
+
+      if (seen.has(key)) continue;
+      seen.add(key);
+      events.push(parsed);
+    }
+
+    events.sort((a, b) => b.timestamp - a.timestamp);
+    return { sourceEntries, events };
+  }
+
+  function mergeTrainingEventSources(primary, secondary) {
+    const rows = [...(primary || []), ...(secondary || [])]
+      .sort((a, b) => b.timestamp - a.timestamp);
+
+    const merged = [];
+    for (const event of rows) {
+      // The same train can appear in both company/news and user/log with
+      // different event IDs. Treat matching employee/quantity within a
+      // two-second window as the same action.
+      const duplicate = merged.some((existing) =>
+        existing.employeeId === event.employeeId &&
+        existing.quantity === event.quantity &&
+        Math.abs(existing.timestamp - event.timestamp) <= 2
+      );
+      if (!duplicate) merged.push(event);
+    }
+    return merged;
+  }
+
+  function formatTrainingCoverage(timestamp) {
+    if (!timestamp) return 'Unknown';
+    const ms = Number(timestamp) * 1000;
+    const days = Math.max(0, Math.floor((Date.now() - ms) / 86400000));
+    if (days < 1) return 'Less than 1 day';
+    return `${formatNumber(days)} day${days === 1 ? '' : 's'}`;
+  }
+
+  function calculateRotationalDebt(employees, events, coverageStart) {
+    const now = Math.floor(Date.now() / 1000);
+    const THREE_DAYS = 3 * 86400;
+
+    const actualByEmployee = new Map();
+    const lastTrainByEmployee = new Map();
+    const trains7ByEmployee = new Map();
+    const trains30ByEmployee = new Map();
+    const sevenAgo = now - 7 * 86400;
+    const thirtyAgo = now - 30 * 86400;
+
+    for (const event of events) {
+      const id = String(event.employeeId);
+      actualByEmployee.set(id, (actualByEmployee.get(id) || 0) + event.quantity);
+
+      const prev = lastTrainByEmployee.get(id);
+      if (!prev || event.timestamp > prev) lastTrainByEmployee.set(id, event.timestamp);
+
+      if (event.timestamp >= sevenAgo) {
+        trains7ByEmployee.set(id, (trains7ByEmployee.get(id) || 0) + event.quantity);
+      }
+      if (event.timestamp >= thirtyAgo) {
+        trains30ByEmployee.set(id, (trains30ByEmployee.get(id) || 0) + event.quantity);
+      }
+    }
+
+    const rows = employees.map((employee) => {
+      const days = numericValue(employee.raw?.days_in_company) ?? 0;
+      const joinedAt = now - Math.max(0, days) * 86400;
+      const eligibleAt = joinedAt + THREE_DAYS;
+      const fairStart = Math.max(coverageStart || now, eligibleAt);
+      const eligibleSeconds = Math.max(0, now - fairStart);
+      const eligibleWeight = eligibleSeconds / 86400;
+
+      return {
+        employee,
+        eligibleWeight,
+        actual: actualByEmployee.get(String(employee.id)) || 0,
+        lastTrain: lastTrainByEmployee.get(String(employee.id)) || null,
+        trains7: trains7ByEmployee.get(String(employee.id)) || 0,
+        trains30: trains30ByEmployee.get(String(employee.id)) || 0,
+      };
+    });
+
+    const totalObserved = rows.reduce((sum, row) => sum + row.actual, 0);
+    const totalWeight = rows.reduce((sum, row) => sum + row.eligibleWeight, 0);
+
+    for (const row of rows) {
+      row.expected = totalWeight > 0
+        ? totalObserved * (row.eligibleWeight / totalWeight)
+        : 0;
+      row.debt = row.expected - row.actual;
+    }
+
+    rows.sort((a, b) =>
+      b.debt - a.debt ||
+      (a.lastTrain || 0) - (b.lastTrain || 0) ||
+      String(a.employee.name).localeCompare(String(b.employee.name))
+    );
+
+    return { rows, totalObserved, totalWeight };
+  }
+
+  async function fetchTrainingHistorySources(results) {
+    const diagnosticNews = findRaw(results, 'company', 'news');
+    const diagnosticLog = findRaw(results, 'user', 'log');
+
+    let newsRaw = diagnosticNews;
+    let logRaw = diagnosticLog;
+    let newsError = null;
+    let logError = null;
+
+    if (!newsRaw) {
+      try {
+        // Reuse the already rate-limited/cached company news helper. It asks
+        // Torn for a recent history window and gracefully falls back when
+        // from/to are not accepted by a particular API shape.
+        newsRaw = await fetchCompanyNewsForStock();
+      } catch (err) {
+        newsError = err;
+      }
+    }
+
+    // `user/log` remains a fallback/second source because directors' personal
+    // logs can contain the same training actions. Do not make an extra request
+    // here if Diagnostics did not already return it.
+    if (!logRaw) {
+      logError = findBlockedReason(results, 'user', 'log');
+    }
+
+    return { newsRaw, logRaw, newsError, logError };
+  }
+
   // =======================================================================
   // TRAINING TAB
   // =======================================================================
-  function renderTrainingTab(panel) {
+  async function renderTrainingTab(panel) {
     const el = panel.querySelector('[data-tabpanel="training"]');
     const results = state.lastResults;
     if (!results) {
-      el.innerHTML = `<div class="tds-box tds-box-neutral">Run the diagnostic first \u2014 Training reads the employee roster and, where accessible, your event log.</div>`;
+      el.innerHTML = `<div class="tds-box tds-box-neutral">Run Diagnostics first — Training reads the employee roster and training-history sources.</div>`;
       return;
     }
 
     const employeesRaw = findRaw(results, 'company', 'employees');
     const employees = extractEmployeesEntries(employeesRaw);
     const profile = findRaw(results, 'company', 'profile');
-    const logRaw = findRaw(results, 'user', 'log');
-    const logBlockedReason = findBlockedReason(results, 'user', 'log');
     const mode = state.trainingMode || 'priority';
 
-    let html = '';
-    html += `
+    let html = `
       <div class="tds-segmented">
         <div class="tds-segment ${mode === 'priority' ? 'tds-segment-active' : ''}" data-trainmode="priority">PRIORITY</div>
         <div class="tds-segment ${mode === 'rotational' ? 'tds-segment-active' : ''}" data-trainmode="rotational">ROTATIONAL / DEBT</div>
       </div>`;
 
     if (employees.length === 0) {
-      html += `<div class="tds-box tds-box-danger">Employee roster unavailable, so there\u2019s nothing to build a queue from.</div>`;
+      html += `<div class="tds-box tds-box-danger">Employee roster unavailable, so there’s nothing to build a training queue from.</div>`;
       el.innerHTML = html;
       return;
     }
 
-    const ratingField = profile && Object.entries(profile).find(([k, v]) => typeof v === 'number' && /rating/i.test(k));
-    html += `<div class="tds-box tds-box-neutral">Daily train budget is commonly understood to equal your company\u2019s star rating${ratingField ? ` (rating: ${ratingField[1]}\u2605, so \u2248${ratingField[1]}/day)` : ''}, with unused trains banking up to a cap \u2014 this is a <strong>community-documented mechanic, not an official Torn publication</strong>, so treat the exact cap as ESTIMATED.</div>`;
+    const ratingValue = numericValue(findValueDeep(profile, ['rating', 'star_rating', 'stars']));
+    html += `<div class="tds-box tds-box-neutral">
+      ${ratingValue !== null ? `Current company rating: <strong>${escapeHtml(String(ratingValue))}★</strong>. ` : ''}
+      Rotational debt below is based on <strong>observed trains actually given</strong>, not an assumed star-rating budget. This keeps the queue fair if ratings, staffing, saved trains or training-role bonuses changed during the period.
+    </div>`;
 
     if (mode === 'priority') {
-      html += `<div class="tds-box tds-box-info">Sorted by <strong>current effectiveness, lowest first</strong> \u2014 a defensible proxy for \u201cneeds training most,\u201d used because Torn does not publish the exact EE numbers that mark each tier boundary. I won\u2019t invent \u201cN trains to next tier\u201d numbers without a verified threshold table. If you have one you trust (e.g. from the reference tool), share it and I\u2019ll wire in the real \u201ctrains to next tier\u201d calculation.</div>`;
+      html += `<div class="tds-box tds-box-info">
+        Sorted by <strong>current effectiveness, lowest first</strong>. This mode answers “who currently needs EE help most?”; Rotational / Debt answers “who has received less than their fair share of actual trains?”
+      </div>`;
+
       const withEE = employees.map((e) => ({ ...e, ee: findEffectivenessField(e.raw) }));
       withEE.sort((a, b) => (a.ee?.value ?? Infinity) - (b.ee?.value ?? Infinity));
+
       html += '<div class="tds-section-label">Priority queue</div><div class="tds-card">';
       withEE.forEach((e, i) => {
         html += `
           <div class="tds-employee-row">
             <div class="tds-employee-top">
               <div>
-                <div class="tds-employee-name">${i === 0 ? '\u25b6 ' : ''}${escapeHtml(String(e.name))}</div>
+                <div class="tds-employee-name">${i === 0 ? '▶ ' : ''}${escapeHtml(String(e.name))}</div>
                 <div class="tds-employee-meta">${escapeHtml(String(e.position))}</div>
               </div>
               <div class="tds-row-value">${e.ee ? e.ee.value : '<span class="tds-v-dim">no EE field</span>'}</div>
@@ -2518,25 +2764,173 @@
       });
       html += '</div>';
     } else {
-      html += `<div class="tds-section-label">Training log access</div>`;
-      if (logRaw) {
-        const sampleCount = Array.isArray(logRaw) ? logRaw.length : (logRaw.log ? Object.keys(logRaw.log).length : Object.keys(logRaw).length);
-        html += `<div class="tds-box tds-box-info"><strong>Log selection is accessible</strong> \u2014 fields returned: ${Object.keys(logRaw).join(', ')}${sampleCount ? `, ~${sampleCount} entries in this response` : ''}. This is <em>your own</em> event log, not the whole company\u2019s. The specific log type ID for \u201ctrained an employee\u201d still needs to be identified from real entries before debt numbers can be trusted \u2014 not implemented yet rather than guessed.</div>`;
-      } else {
-        html += `<div class="tds-box tds-box-danger"><strong>Log not accessible with this key.</strong> ${logBlockedReason || 'Blocked.'} Rotational/debt mode needs each trainer\u2019s own log to count real training events \u2014 without it, any \u201cowed training\u201d number would be fabricated, so this stays empty rather than showing something misleading.</div>`;
-      }
-      html += `<div class="tds-box tds-box-neutral">Once log access + the training log-type ID are confirmed, this view becomes: expected trainings since joining (from <code>days_in_company</code>, EXACT) minus actual trainings received (from the log, EXACT, deduplicated by log ID) = training debt per employee, sorted highest-debt-first. The full algorithm is already designed \u2014 it\u2019s wired up as soon as the data source is verified live.</div>`;
+      html += `<div class="tds-box tds-box-neutral" id="tds-training-loading">
+        Reading Torn training history and calculating fair-share debt…
+      </div>`;
+      el.innerHTML = html;
+      bindTrainingModeButtons(panel);
+      await renderRotationalDebt(panel, employees, results);
+      return;
     }
 
     el.innerHTML = html;
+    bindTrainingModeButtons(panel);
+  }
+
+  function bindTrainingModeButtons(panel) {
+    const el = panel.querySelector('[data-tabpanel="training"]');
+    if (!el) return;
 
     el.querySelectorAll('[data-trainmode]').forEach((seg) => {
       seg.addEventListener('click', () => {
         state.trainingMode = seg.dataset.trainmode;
-        renderTrainingTab(panel);
+        el.querySelectorAll('[data-trainmode]').forEach((button) => {
+          button.classList.toggle('tds-segment-active', button === seg);
+        });
+        renderTrainingTab(panel).catch((err) => {
+          console.error('[TDS] Training tab render failed:', err);
+        });
       });
     });
   }
+
+  async function renderRotationalDebt(panel, employees, results) {
+    const el = panel.querySelector('[data-tabpanel="training"]');
+    if (!el || state.trainingMode !== 'rotational') return;
+
+    let sources;
+    try {
+      sources = await fetchTrainingHistorySources(results);
+    } catch (err) {
+      el.innerHTML += `<div class="tds-box tds-box-danger"><strong>Training history failed:</strong> ${escapeHtml(String(err.reason || err.message || err))}</div>`;
+      return;
+    }
+
+    const newsParsed = collectTrainingEvents(sources.newsRaw, employees);
+    const logParsed = collectTrainingEvents(sources.logRaw, employees);
+
+    // Prefer the union but deduplicate mirrored news/log records.
+    const events = mergeTrainingEventSources(newsParsed.events, logParsed.events);
+
+    const allSourceEntries = [
+      ...newsParsed.sourceEntries,
+      ...logParsed.sourceEntries,
+    ];
+    const coverageStart = allSourceEntries.length
+      ? Math.min(...allSourceEntries.map((entry) => Number(entry.timestamp)).filter(Number.isFinite))
+      : null;
+
+    const loading = el.querySelector('#tds-training-loading');
+    if (loading) loading.remove();
+
+    if (!events.length) {
+      let detail = '';
+      if (newsParsed.sourceEntries.length || logParsed.sourceEntries.length) {
+        detail = `Torn history was readable (${formatNumber(newsParsed.sourceEntries.length + logParsed.sourceEntries.length)} entries inspected), but no employee-training events were recognised.`;
+      } else {
+        detail = 'No readable company-news or user-log history was returned.';
+      }
+
+      el.insertAdjacentHTML('beforeend', `
+        <div class="tds-box tds-box-warn">
+          <strong>No training events matched yet.</strong> ${escapeHtml(detail)}
+          The parser deliberately refuses to invent train counts. If you have recently trained an employee, send me the Training tab after that action and we can map Torn’s exact live event wording/fields.
+        </div>
+        <div class="tds-card">
+          <div class="tds-row"><span class="tds-row-label">Company-news entries inspected</span><span class="tds-row-value">${formatNumber(newsParsed.sourceEntries.length)}</span></div>
+          <div class="tds-row"><span class="tds-row-label">User-log entries inspected</span><span class="tds-row-value">${formatNumber(logParsed.sourceEntries.length)}</span></div>
+        </div>
+      `);
+      return;
+    }
+
+    const debt = calculateRotationalDebt(employees, events, coverageStart);
+    const next = debt.rows.find((row) => row.eligibleWeight > 0) || null;
+
+    let html = `
+      <div class="tds-box tds-box-info">
+        <strong>Rotational / Debt is live.</strong>
+        It found <strong>${formatNumber(events.reduce((sum, event) => sum + event.quantity, 0))}</strong> train(s) across
+        ${formatTrainingCoverage(coverageStart)} of returned history.
+        Fair share is weighted by how long each current employee was eligible during that same history window.
+      </div>`;
+
+    if (next) {
+      html += `
+        <div class="tds-box ${next.debt > 0.05 ? 'tds-box-warn' : 'tds-box-info'}">
+          <strong>Train next:</strong> ${escapeHtml(String(next.employee.name))}
+          ${next.debt > 0.05 ? ` — approximately <strong>${next.debt.toFixed(2)}</strong> train(s) behind their fair share.` : ' — the rotation is currently close to balanced.'}
+        </div>`;
+    }
+
+    html += `
+      <div class="tds-card">
+        <div class="tds-row"><span class="tds-row-label">Training events recognised</span><span class="tds-row-value">${formatNumber(events.length)}</span></div>
+        <div class="tds-row"><span class="tds-row-label">Trains represented</span><span class="tds-row-value">${formatNumber(debt.totalObserved)}</span></div>
+        <div class="tds-row"><span class="tds-row-label">History coverage</span><span class="tds-row-value">${escapeHtml(formatTrainingCoverage(coverageStart))}</span></div>
+        <div class="tds-row"><span class="tds-row-label">Company-news entries inspected</span><span class="tds-row-value">${formatNumber(newsParsed.sourceEntries.length)}</span></div>
+        <div class="tds-row"><span class="tds-row-label">User-log entries inspected</span><span class="tds-row-value">${formatNumber(logParsed.sourceEntries.length)}</span></div>
+      </div>
+
+      <div class="tds-section-label">Rotational queue</div>
+      <div style="overflow-x:auto;">
+        <table class="tds-table tds-training-debt-table">
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>Employee</th>
+              <th>Position</th>
+              <th>Eligible Days*</th>
+              <th>Received</th>
+              <th>Fair Share</th>
+              <th>Debt</th>
+              <th>Last 7d</th>
+              <th>Last 30d</th>
+              <th>Last Train</th>
+            </tr>
+          </thead>
+          <tbody>`;
+
+    debt.rows.forEach((row, index) => {
+      const debtClass = row.debt > 0.05
+        ? 'tds-v-bad'
+        : row.debt < -0.05
+          ? 'tds-v-good'
+          : '';
+
+      const debtText = `${row.debt > 0 ? '+' : ''}${row.debt.toFixed(2)}`;
+      const lastTrain = row.lastTrain ? formatTimestampRelative(row.lastTrain) : 'None in history';
+
+      html += `
+        <tr>
+          <td>${index + 1}</td>
+          <td><strong>${index === 0 ? '▶ ' : ''}${escapeHtml(String(row.employee.name))}</strong></td>
+          <td>${escapeHtml(String(row.employee.position || '—'))}</td>
+          <td>${row.eligibleWeight.toFixed(1)}</td>
+          <td>${formatNumber(row.actual)}</td>
+          <td>${row.expected.toFixed(2)}</td>
+          <td class="${debtClass}"><strong>${debtText}</strong></td>
+          <td>${formatNumber(row.trains7)}</td>
+          <td>${formatNumber(row.trains30)}</td>
+          <td>${escapeHtml(lastTrain)}</td>
+        </tr>`;
+    });
+
+    html += `
+          </tbody>
+        </table>
+      </div>
+
+      <div class="tds-box tds-box-neutral" style="margin-top:10px;">
+        <strong>How debt is calculated:</strong> actual trains observed in Torn history are distributed as a fair-share target across current employees, weighted by eligible time in the same returned history window. Employees are treated as training-eligible after their first 3 days. <strong>Debt = Fair Share − Received.</strong>
+        Positive/red means owed trains; negative/green means ahead of the rotation.
+        <br><br>
+        *Eligible Days is limited to the history Torn actually returned — this is not presented as an all-time figure unless the returned history genuinely covers the employee’s full tenure.
+      </div>`;
+
+    el.insertAdjacentHTML('beforeend', html);
+  }
+
 
   // =======================================================================
   // COMPARE TAB
@@ -3525,7 +3919,7 @@
       renderDiagnosticsTab(panel, results);
       await renderFinanceTab(panel);
       await renderStockTab(panel);
-      renderTrainingTab(panel);
+      renderTrainingTab(panel).catch((err) => console.error('[TDS] Training render failed:', err));
       renderBenchmarkTab(panel);
       renderOptimizeTab(panel);
       startFooterTicker(panel);
@@ -3576,7 +3970,7 @@
       renderDiagnosticsTab(panel, results);
       await renderFinanceTab(panel);
       await renderStockTab(panel);
-      renderTrainingTab(panel);
+      renderTrainingTab(panel).catch((err) => console.error('[TDS] Training render failed:', err));
       renderBenchmarkTab(panel);
       renderOptimizeTab(panel);
       startFooterTicker(panel);
