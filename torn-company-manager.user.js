@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Company Management Suite
 // @namespace    torn-company-management-suite
-// @version      1.1.9
+// @version      1.1.10
 // @description  Local-only company management dashboard for Torn directors, embedded in the Jobs page. No company data ever leaves your browser; only your Torn User ID is checked against a public license list.
 // @author       DooBiiE
 // @match        https://www.torn.com/*
@@ -65,7 +65,7 @@
   // TornPDA does not always expose the legacy GM_info object that desktop
   // userscript managers provide. Try both common metadata APIs, then use the
   // release version as a PDA-safe fallback so the UI never shows vunknown.
-  const TDS_VERSION_FALLBACK = '1.1.9';
+  const TDS_VERSION_FALLBACK = '1.1.10';
   const TDS_VERSION =
     (typeof GM_info !== 'undefined' && GM_info?.script?.version) ||
     (typeof GM !== 'undefined' && GM?.info?.script?.version) ||
@@ -923,47 +923,85 @@
     html += `<div class="tds-box ${boxClass}"><strong>${escapeHtml(verdict.headline)}</strong><br>${escapeHtml(verdict.detail)}</div>`;
 
     const profile = findRaw(results, 'company', 'profile');
+    const detailed = findRaw(results, 'company', 'detailed');
     const employeesRaw = findRaw(results, 'company', 'employees');
     const employees = extractEmployeesEntries(employeesRaw);
 
-    // company/profile has changed shape across Torn API versions and can be
-    // returned either flat or wrapped inside objects such as { company: {...} }.
-    // Read the requested fields recursively instead of only printing primitive
-    // top-level properties (which made the Company card appear empty on wrapped
-    // responses).
+    // Show every usable scalar value returned by company/profile, rather than
+    // maintaining a small hard-coded list. This means new fields Torn adds to
+    // the profile automatically appear here too. Employee objects/collections
+    // are excluded because the Employees section below renders them properly.
     if (profile) {
-      const companyName = findValueDeep(profile, ['name', 'company_name']);
-      const companyAge = findValueDeep(profile, ['days_old', 'age', 'company_age']);
-      const popularity = findValueDeep(profile, ['popularity']);
-      const efficiency = findValueDeep(profile, ['efficiency']);
-      const environment = findValueDeep(profile, ['environment', 'environment_rating']);
-      const capacity = findValueDeep(profile, [
+      const profileRows = collectDisplayFields(profile, {
+        skipObjectKeys: ['employees', 'employee', 'positions']
+      });
+
+      const capacity = numericValue(findValueDeep(profile, [
         'employees_capacity', 'employee_capacity', 'max_employees',
         'maximum_employees', 'capacity'
-      ]);
-
+      ]));
       const employeeCount = employees.length || numericValue(findValueDeep(profile, [
         'employees_hired', 'employee_count', 'employees_count', 'num_employees'
       ]));
 
       html += '<div class="tds-section-label">Company</div><div class="tds-card">';
-      html += companyOverviewRow('Name', companyName);
-      html += companyOverviewRow('Age', companyAge, (v) => {
-        const n = numericValue(v);
-        return n !== null ? `${formatNumber(n)} days` : displayValue(v);
-      });
-      html += companyOverviewRow('Popularity', popularity);
-      html += companyOverviewRow('Efficiency', efficiency);
-      html += companyOverviewRow('Environment', environment);
-      html += companyOverviewRow('Employees', employeeCount, (v) => {
-        const current = numericValue(v);
-        const max = numericValue(capacity);
-        if (current !== null && max !== null) return `${formatNumber(current)} / ${formatNumber(max)}`;
-        if (current !== null) return formatNumber(current);
-        if (max !== null) return `— / ${formatNumber(max)}`;
-        return '—';
-      });
+
+      // Put the most useful/common company fields first, then append every
+      // other scalar field returned by Torn that has not already been shown.
+      const preferred = [
+        ['name', 'Name'], ['company_name', 'Name'], ['type', 'Type'], ['company_type', 'Type'],
+        ['director', 'Director'], ['days_old', 'Company Age'], ['age', 'Company Age'],
+        ['popularity', 'Popularity'], ['efficiency', 'Efficiency'], ['environment', 'Environment'],
+        ['rating', 'Rating'], ['trains_available', 'Trains Available'], ['trains', 'Trains'],
+        ['daily_income', 'Daily Income'], ['daily_customers', 'Daily Customers'],
+        ['weekly_income', 'Weekly Income'], ['weekly_customers', 'Weekly Customers'],
+        ['company_bank', 'Company Bank']
+      ];
+      const shown = new Set();
+
+      for (const [key, label] of preferred) {
+        const row = profileRows.find((r) => normalizeFieldName(r.key) === normalizeFieldName(key));
+        if (!row || shown.has(row.path)) continue;
+        html += companyOverviewRow(label, row.value, formatCompanyValue);
+        shown.add(row.path);
+      }
+
+      // Always show roster size in the familiar current / capacity form when
+      // either side is known, even if Torn exposes those values under different
+      // field names.
+      if (employeeCount !== null || capacity !== null) {
+        html += companyOverviewRow('Employees', employeeCount, () => {
+          if (employeeCount !== null && capacity !== null) return `${formatNumber(employeeCount)} / ${formatNumber(capacity)}`;
+          if (employeeCount !== null) return formatNumber(employeeCount);
+          return `— / ${formatNumber(capacity)}`;
+        });
+      }
+
+      for (const row of profileRows) {
+        if (shown.has(row.path)) continue;
+        const nk = normalizeFieldName(row.key);
+        // These are already represented by the combined Employees row.
+        if (/^(employeeshired|employeecount|employeescount|numemployees|employeescapacity|employeecapacity|maxemployees|maximumemployees|capacity)$/.test(nk)) continue;
+        html += companyOverviewRow(row.label, row.value, formatCompanyValue);
+        shown.add(row.path);
+      }
       html += '</div>';
+    }
+
+    // company/detailed is director-only. If the key can access it, include all
+    // scalar fields here as part of Overview as requested. If Torn blocks it,
+    // the existing access notice at the top already explains why.
+    if (detailed) {
+      const detailedRows = collectDisplayFields(detailed, {
+        skipObjectKeys: ['employees', 'employee', 'positions']
+      });
+      if (detailedRows.length) {
+        html += '<div class="tds-section-label">Company Details</div><div class="tds-card">';
+        for (const row of detailedRows) {
+          html += companyOverviewRow(row.label, row.value, formatCompanyValue);
+        }
+        html += '</div>';
+      }
     }
 
     html += '<div class="tds-section-label">Employees</div>';
@@ -982,15 +1020,14 @@
           ? emp.status
           : null;
 
-        const statusText = status?.description || status?.state || lastAction?.status || '—';
-        const location = status?.description?.match(/^Traveling from Torn to (.+)$/i)?.[1]
-          || status?.location
-          || '—';
+        // Torn exposes two different concepts here:
+        //   last_action.status -> Online / Idle / Offline presence
+        //   status.state       -> player state such as Okay / Hospital / Traveling
+        //   status.description -> human-readable detail for that state
+        const onlineStatus = lastAction?.status || '—';
+        const playerState = status?.state || '—';
+        const stateDetail = status?.description || '—';
 
-        // <details>/<summary> gives free, accessible, keyboard-operable
-        // collapse behaviour with no extra JS or state tracking needed —
-        // the name/position/status row is always visible; everything below
-        // it only renders open when the director clicks to expand it.
         html += `
           <details class="tds-employee-row">
             <summary class="tds-employee-summary">
@@ -1000,7 +1037,7 @@
                   <div class="tds-employee-meta">${escapeHtml(String(employee.position || 'Employee'))}</div>
                 </div>
                 <div style="display:flex; align-items:center; gap:8px;">
-                  <span class="tds-badge tds-badge-neutral">${escapeHtml(String(statusText))}</span>
+                  <span class="tds-badge tds-badge-neutral">${escapeHtml(String(onlineStatus))}</span>
                   <span class="tds-employee-chevron">\u25b8</span>
                 </div>
               </div>
@@ -1024,9 +1061,9 @@
 
               ${status || lastAction ? `
                 <div class="tds-section-label tds-employee-subheading" style="margin-top:10px;">Status</div>
-                <div class="tds-row"><span class="tds-row-label">Status</span><span class="tds-row-value">${escapeHtml(String(statusText))}</span></div>
-                <div class="tds-row"><span class="tds-row-label">State</span><span class="tds-row-value">${escapeHtml(String(status?.state || '—'))}</span></div>
-                <div class="tds-row"><span class="tds-row-label">Location</span><span class="tds-row-value">${escapeHtml(String(location))}</span></div>
+                <div class="tds-row"><span class="tds-row-label">Online Status</span><span class="tds-row-value">${escapeHtml(String(onlineStatus))}</span></div>
+                <div class="tds-row"><span class="tds-row-label">State</span><span class="tds-row-value">${escapeHtml(String(playerState))}</span></div>
+                <div class="tds-row"><span class="tds-row-label">Detail</span><span class="tds-row-value">${escapeHtml(String(stateDetail))}</span></div>
                 <div class="tds-row"><span class="tds-row-label">Last action</span><span class="tds-row-value">${escapeHtml(String(lastAction?.relative || formatTimestampRelative(lastAction?.timestamp)))}</span></div>
               ` : ''}
             </div>
@@ -1334,6 +1371,60 @@
 
   function companyOverviewRow(label, value, formatter = displayValue) {
     return `<div class="tds-row"><span class="tds-row-label">${escapeHtml(label)}</span><span class="tds-row-value">${escapeHtml(formatter(value))}</span></div>`;
+  }
+
+  function humanizeFieldName(name) {
+    return String(name || '')
+      .replace(/[_-]+/g, ' ')
+      .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+      .replace(/\b\w/g, (c) => c.toUpperCase());
+  }
+
+  function collectDisplayFields(raw, options = {}) {
+    if (!raw || typeof raw !== 'object') return [];
+    const skip = new Set((options.skipObjectKeys || []).map(normalizeFieldName));
+    const rows = [];
+    const seen = new WeakSet();
+
+    function walk(value, pathParts = [], depth = 0) {
+      if (!value || typeof value !== 'object' || seen.has(value) || depth > 5) return;
+      seen.add(value);
+
+      for (const [key, child] of Object.entries(value)) {
+        const nextPath = [...pathParts, key];
+        const path = nextPath.join('.');
+        if (child && typeof child === 'object' && !Array.isArray(child)) {
+          if (skip.has(normalizeFieldName(key))) continue;
+          walk(child, nextPath, depth + 1);
+          continue;
+        }
+        if (Array.isArray(child)) {
+          if (skip.has(normalizeFieldName(key))) continue;
+          if (child.every((v) => v === null || ['string', 'number', 'boolean'].includes(typeof v))) {
+            rows.push({ key, path, label: humanizeFieldName(key), value: child.join(', ') });
+          }
+          continue;
+        }
+        if (child === undefined || child === null || child === '') continue;
+        rows.push({ key, path, label: humanizeFieldName(key), value: child });
+      }
+    }
+
+    // Common Torn API wrapper objects should not make labels read like
+    // "Company > Name"; recurse into them directly when they are the only
+    // meaningful container.
+    const keys = Object.keys(raw);
+    const wrapperKey = keys.find((k) => /^(company|profile|detailed|details)$/i.test(k) && raw[k] && typeof raw[k] === 'object' && !Array.isArray(raw[k]));
+    if (wrapperKey && keys.length <= 3) walk(raw[wrapperKey]);
+    else walk(raw);
+    return rows;
+  }
+
+  function formatCompanyValue(value) {
+    if (value === undefined || value === null || value === '') return '—';
+    if (typeof value === 'boolean') return value ? 'Yes' : 'No';
+    if (typeof value === 'number') return formatNumber(value);
+    return String(value);
   }
 
   function findNestedObject(obj, keyPattern) {
