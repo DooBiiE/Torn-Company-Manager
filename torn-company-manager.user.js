@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Company Management Suite
 // @namespace    torn-company-management-suite
-// @version      1.3.0
+// @version      1.3.1
 // @description  Local-only company management dashboard for Torn directors, embedded in the Jobs page. No company data ever leaves your browser; only your Torn User ID is checked against a public license list.
 // @author       DooBiiE
 // @match        https://www.torn.com/*
@@ -67,7 +67,7 @@
   // TornPDA does not always expose the legacy GM_info object that desktop
   // userscript managers provide. Try both common metadata APIs, then use the
   // release version as a PDA-safe fallback so the UI never shows vunknown.
-  const TDS_VERSION_FALLBACK = '1.3.0';
+  const TDS_VERSION_FALLBACK = '1.3.1';
   const TDS_VERSION =
     (typeof GM_info !== 'undefined' && GM_info?.script?.version) ||
     (typeof GM !== 'undefined' && GM?.info?.script?.version) ||
@@ -2545,7 +2545,7 @@
 
   function getOwnCompanyCompareInfo(profile, results) {
     if (!profile || typeof profile !== 'object') {
-      return { id: null, typeId: null, typeName: null, rating: null };
+      return { id: null, name: null, typeId: null, typeName: null, rating: null };
     }
 
     const candidates = [profile];
@@ -2556,6 +2556,7 @@
     }
 
     let id = null;
+    let name = null;
     let typeId = null;
     let typeName = null;
     let rating = null;
@@ -2563,6 +2564,13 @@
     for (const obj of candidates) {
       if (id === null) {
         id = numericValue(obj.id ?? obj.company_id ?? obj.companyId);
+      }
+
+      if (!name) {
+        const nameValue = obj.name ?? obj.company_name ?? obj.companyName;
+        if (nameValue !== null && nameValue !== undefined && String(nameValue).trim()) {
+          name = String(nameValue).trim();
+        }
       }
 
       if (rating === null) {
@@ -2589,7 +2597,14 @@
       typeName = resolveCompanyTypeName(findRaw(results, 'torn', 'companies'), typeId);
     }
 
-    return { id, typeId, typeName, rating };
+    if (!name) {
+      const deepName = findValueDeep(profile, ['name', 'company_name', 'companyName']);
+      if (deepName !== null && deepName !== undefined && String(deepName).trim()) {
+        name = String(deepName).trim();
+      }
+    }
+
+    return { id, name, typeId, typeName, rating };
   }
 
   function buildCompareFilters(typeId, tier, ownRating) {
@@ -3022,6 +3037,26 @@
     return value >= baseline ? 'tds-v-good' : 'tds-v-bad';
   }
 
+  function normalizeCompanyNameForMatch(value) {
+    return String(value || '')
+      .trim()
+      .toLowerCase()
+      .replace(/\s+/g, ' ');
+  }
+
+  function isOwnCompareCompany(row, own) {
+    if (!row || !own) return false;
+
+    if (own.id !== null && row.id !== null &&
+        String(row.id) === String(own.id)) {
+      return true;
+    }
+
+    const ownName = normalizeCompanyNameForMatch(own.name);
+    const rowName = normalizeCompanyNameForMatch(row.name);
+    return Boolean(ownName && rowName && ownName === rowName);
+  }
+
   async function renderBenchmarkResults(panel, data, own, tier) {
     const el = panel.querySelector('[data-tabpanel="benchmark"] #tds-bench-results');
     if (!el) return;
@@ -3100,12 +3135,38 @@
       return (b[metric] ?? -1) - (a[metric] ?? -1);
     });
 
-    const ownIndex = own.id !== null
-      ? sorted.findIndex((row) =>
-          row.id !== null && String(row.id) === String(own.id)
-        )
-      : -1;
-    const ownRow = ownIndex >= 0 ? sorted[ownIndex] : null;
+    const ownIndex = sorted.findIndex((row) => isOwnCompareCompany(row, own));
+    let ownRow = ownIndex >= 0 ? sorted[ownIndex] : null;
+
+    // If company/search does not include our own row, still build "Your Company"
+    // from the already-loaded company profile/detailed response. This makes the
+    // summary visible even when Torn's search result set omits the current company.
+    if (!ownRow) {
+      const currentResults = state.lastResults;
+      const ownProfile = currentResults ? findRaw(currentResults, 'company', 'profile') : null;
+      const ownDetailed = currentResults ? findRaw(currentResults, 'company', 'detailed') : null;
+      const ownCombined = { ...(ownProfile || {}), ...(ownDetailed || {}) };
+
+      ownRow = {
+        id: own.id,
+        name: own.name,
+        rating: own.rating,
+        dailyIncome: numericValue(findValueDeep(ownCombined, ['daily_income', 'dailyIncome'])),
+        weeklyIncome: numericValue(findValueDeep(ownCombined, ['weekly_income', 'weeklyIncome'])),
+        dailyCustomers: numericValue(findValueDeep(ownCombined, ['daily_customers', 'dailyCustomers'])),
+        weeklyCustomers: numericValue(findValueDeep(ownCombined, ['weekly_customers', 'weeklyCustomers'])),
+        employees: null,
+        raw: ownCombined,
+      };
+
+      const hasAnyOwnValue =
+        ownRow.dailyIncome !== null ||
+        ownRow.weeklyIncome !== null ||
+        ownRow.dailyCustomers !== null ||
+        ownRow.weeklyCustomers !== null;
+
+      if (!hasAnyOwnValue) ownRow = null;
+    }
 
     const weeklyIncomeValues = usableRows.map((r) => r.weeklyIncome);
     const dailyIncomeValues = usableRows.map((r) => r.dailyIncome);
@@ -3166,20 +3227,16 @@
     const medianWeeklyRpc = medianNumeric(weeklyRpcRows.map((x) => x.value));
     const avgDailyRpc = averageNumeric(dailyRpcRows.map((x) => x.value));
 
-    const ownWeeklyRpcIndex = own.id !== null
-      ? weeklyRpcRows.findIndex((x) =>
-          x.row.id !== null && String(x.row.id) === String(own.id)
-        )
-      : -1;
+    const ownWeeklyRpcIndex = weeklyRpcRows.findIndex((x) =>
+      isOwnCompareCompany(x.row, own)
+    );
 
     const weeklyCustomerRankRows = usableRows
       .filter((r) => typeof r.weeklyCustomers === 'number')
       .sort((a, b) => b.weeklyCustomers - a.weeklyCustomers);
-    const ownWeeklyCustomerIndex = own.id !== null
-      ? weeklyCustomerRankRows.findIndex((r) =>
-          r.id !== null && String(r.id) === String(own.id)
-        )
-      : -1;
+    const ownWeeklyCustomerIndex = weeklyCustomerRankRows.findIndex((r) =>
+      isOwnCompareCompany(r, own)
+    );
 
     let html = `<div class="tds-card">`;
     html += `<div class="tds-row"><span class="tds-row-label">Company type</span><span class="tds-row-value">${escapeHtml(String(own.typeName || own.typeId))}${own.typeName ? ` (${escapeHtml(String(own.typeId))})` : ''}</span></div>`;
@@ -3194,6 +3251,7 @@
 
     if (ownRow) {
       html += `<div class="tds-section-label">Your company</div><div class="tds-card">`;
+      html += `<div class="tds-row"><span class="tds-row-label">Company</span><span class="tds-row-value">${escapeHtml(String(own.name || ownRow.name || 'Your company'))}</span></div>`;
 
       if (ownWeeklyIncome !== null) {
         html += `<div class="tds-row"><span class="tds-row-label">Weekly income</span><span class="tds-row-value ${compareValueClass(ownWeeklyIncome, avgWeeklyIncome)}">${formatMoney(ownWeeklyIncome)}</span></div>`;
@@ -3237,8 +3295,16 @@
     }
 
     if (ownRow && metric && typeof ownMetricValue === 'number') {
+      // If Torn omitted our company from the search list, determine the rank
+      // position from our own metric value so Targets can still be calculated.
+      const effectiveOwnIndex = ownIndex >= 0
+        ? ownIndex
+        : sorted.findIndex((row) => typeof row[metric] === 'number' && row[metric] <= ownMetricValue);
+
+      const resolvedOwnIndex = effectiveOwnIndex >= 0 ? effectiveOwnIndex : sorted.length;
+
       const targetRows = [
-        { label: 'Next position', index: ownIndex > 0 ? ownIndex - 1 : null },
+        { label: 'Next position', index: resolvedOwnIndex > 0 ? resolvedOwnIndex - 1 : null },
         { label: 'Top 10', index: sorted.length >= 10 ? 9 : null },
         { label: 'Top 5', index: sorted.length >= 5 ? 4 : null },
         { label: '#1', index: sorted.length >= 1 ? 0 : null },
@@ -3252,7 +3318,7 @@
         }
 
         // If we're already above a target rank, report it as achieved.
-        if (ownIndex >= 0 && ownIndex <= target.index) {
+        if (resolvedOwnIndex <= target.index) {
           html += `<div class="tds-row"><span class="tds-row-label">${target.label}</span><span class="tds-row-value tds-v-good">Achieved</span></div>`;
           continue;
         }
