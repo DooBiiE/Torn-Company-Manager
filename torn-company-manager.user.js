@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Company Management Suite
 // @namespace    torn-company-management-suite
-// @version      1.0.0
+// @version      1.1.0
 // @description  Local-only company management dashboard for Torn directors, embedded in the Jobs page. No company data ever leaves your browser; only your Torn User ID is checked against a public license list.
 // @author       DooBiiE
 // @match        https://www.torn.com/*
@@ -352,96 +352,105 @@
          purpose and are not part of either system. */
       #tds-panel {
         width: 100%; box-sizing: border-box; margin: 14px 0 18px;
-        background: var(--tds-bg, #0b0d12); color: var(--tds-fg, #d7dae0);
-        border: 1px solid var(--tds-border, #1c202a);
+        background: var(--tds-bg, #2b2b2b); color: var(--tds-fg, #d8d8d8);
+        border: 1px solid var(--tds-border, #1a1a1a);
         border-radius: 10px; overflow: hidden; font: 13px/1.45 -apple-system, 'Segoe UI', sans-serif;
         box-shadow: 0 4px 18px rgba(0,0,0,.22);
         position: relative; z-index: 20;
       }
       #tds-header {
         display: flex; align-items: center; justify-content: space-between; gap: 12px;
-        padding: 12px 14px; background: var(--tds-bg-alt, #0d1017); border-bottom: 1px solid var(--tds-border, #1c202a);
+        padding: 12px 14px; background: var(--tds-bg-alt, #383838); border-bottom: 1px solid var(--tds-border, #1a1a1a);
       }
       #tds-header .tds-brand { display: flex; align-items: baseline; gap: 7px; min-width: 0; flex-wrap: wrap; }
       #tds-header .tds-brand-dot { color: var(--tds-accent, #3ddc84); font-size: 13px; }
       #tds-header .tds-brand-name {
         color: var(--tds-accent, #3ddc84); font-weight: 800; font-size: 13px; letter-spacing: .04em;
       }
-      #tds-header .tds-brand-version { color: var(--tds-text-faintest, #4a5062); font-size: 10.5px; }
-      #tds-header .tds-brand-subtitle { color: var(--tds-text-subtle, #687080); font-size: 10.5px; margin-left: 4px; }
+      #tds-header .tds-brand-version { color: var(--tds-text-faintest, #888888); font-size: 10.5px; }
+      #tds-header .tds-brand-subtitle { color: var(--tds-text-subtle, #969696); font-size: 10.5px; margin-left: 4px; }
       #tds-header-icons { display: flex; gap: 6px; flex-shrink: 0; }
       #tds-header-icons button {
         min-width: 30px; height: 28px; display: flex; align-items: center; justify-content: center;
-        background: transparent; color: var(--tds-text-icon, #8b93a1); border: 1px solid var(--tds-border-strong, #232838); border-radius: 6px;
+        background: transparent; color: var(--tds-text-icon, #aaaaaa); border: 1px solid var(--tds-border-strong, #4a4a4a); border-radius: 6px;
         cursor: pointer; font-size: 12px; padding: 0 8px;
       }
-      #tds-header-icons button:hover { background: var(--tds-bg-hover, #161a22); color: var(--tds-fg, #d7dae0); }
+      #tds-header-icons button:hover { background: var(--tds-bg-hover, #404040); color: var(--tds-fg, #d8d8d8); }
 
       #tds-tabs {
         display: flex; flex-wrap: wrap; gap: 2px; padding: 9px 12px 0;
-        border-bottom: 1px solid var(--tds-border, #1c202a); background: var(--tds-bg, #0b0d12);
+        border-bottom: 1px solid var(--tds-border, #1a1a1a); background: var(--tds-bg, #2b2b2b);
       }
       .tds-tab {
-        background: transparent; border: none; color: var(--tds-text-dim, #5c6373); font: 700 10.5px/1 -apple-system, sans-serif;
+        background: transparent; border: none; color: var(--tds-text-dim, #999999); font: 700 10.5px/1 -apple-system, sans-serif;
         letter-spacing: .05em; padding: 0 5px 10px; margin-right: 12px; cursor: pointer;
         border-bottom: 2px solid transparent;
       }
-      .tds-tab:hover { color: var(--tds-text-mid, #9aa0a6); }
+      .tds-tab:hover { color: var(--tds-text-mid, #b5b5b5); }
       .tds-tab.tds-tab-active { color: var(--tds-accent, #3ddc84); border-bottom-color: var(--tds-accent, #3ddc84); }
-      .tds-tab.tds-tab-locked { color: var(--tds-text-disabled, #3a3f4a); cursor: default; }
-      .tds-tab.tds-tab-locked:hover { color: var(--tds-text-disabled, #3a3f4a); }
+      .tds-tab.tds-tab-locked { color: var(--tds-text-disabled, #666666); cursor: default; }
+      .tds-tab.tds-tab-locked:hover { color: var(--tds-text-disabled, #666666); }
 
       #tds-body { padding: 14px; box-sizing: border-box; }
       .tds-tabpanel[hidden] { display: none; }
       .tds-section-label {
-        font: 700 10.5px/1 -apple-system, sans-serif; letter-spacing: .08em; color: var(--tds-text-faint, #565d6d);
+        font: 700 10.5px/1 -apple-system, sans-serif; letter-spacing: .08em; color: var(--tds-text-faint, #9a9a9a);
         text-transform: uppercase; margin: 16px 0 8px;
       }
       .tds-section-label:first-child { margin-top: 0; }
-      .tds-card { background: var(--tds-bg-card, #10131a); border: 1px solid var(--tds-border, #1c202a); border-radius: 8px; padding: 12px 14px; margin-bottom: 10px; }
-      .tds-card-title { color: var(--tds-text-icon, #8b93a1); font-size: 11.5px; margin-bottom: 6px; }
+      .tds-card { background: var(--tds-bg-card, #323232); border: 1px solid var(--tds-border, #1a1a1a); border-radius: 8px; padding: 12px 14px; margin-bottom: 10px; }
+      .tds-card-title { color: var(--tds-text-icon, #aaaaaa); font-size: 11.5px; margin-bottom: 6px; }
       .tds-row { display: flex; justify-content: space-between; align-items: center; padding: 3px 0; gap: 10px; }
-      .tds-row-label { color: var(--tds-text-mid, #9aa0a6); }
-      .tds-row-value { font-weight: 700; color: var(--tds-text-strong, #e6e8ec); }
+      .tds-row-label { color: var(--tds-text-mid, #b5b5b5); }
+      .tds-row-value { font-weight: 700; color: var(--tds-text-strong, #f0f0f0); }
       .tds-v-good { color: #3ddc84 !important; }
       .tds-v-bad { color: #ff5c5c !important; }
       .tds-v-warn { color: #f5a623 !important; }
-      .tds-v-dim { color: var(--tds-text-dim, #5c6373) !important; font-weight: 400 !important; }
+      .tds-v-dim { color: var(--tds-text-dim, #999999) !important; font-weight: 400 !important; }
       .tds-box { border-radius: 7px; padding: 10px 12px; margin-bottom: 10px; font-size: 12px; line-height: 1.5; }
       .tds-box-info { background: rgba(61,220,132,.07); border: 1px solid rgba(61,220,132,.28); color: #a9e8c1; }
       .tds-box-warn { background: rgba(245,166,35,.09); border: 1px solid rgba(245,166,35,.3); color: #f0c584; }
       .tds-box-danger { background: rgba(255,92,92,.08); border: 1px solid rgba(255,92,92,.3); color: #ffb3b3; }
-      .tds-box-neutral { background: var(--tds-bg-card, #10131a); border: 1px solid var(--tds-border, #1c202a); color: var(--tds-text-mid, #9aa0a6); }
+      .tds-box-neutral { background: var(--tds-bg-card, #323232); border: 1px solid var(--tds-border, #1a1a1a); color: var(--tds-text-mid, #b5b5b5); }
       .tds-box strong { color: inherit; }
       .tds-badge { display: inline-flex; align-items: center; font: 700 10px/1 -apple-system, sans-serif; padding: 3px 7px; border-radius: 5px; white-space: nowrap; letter-spacing: .02em; }
       .tds-badge-ok { background: rgba(61,220,132,.14); color: #3ddc84; border: 1px solid rgba(61,220,132,.3); }
       .tds-badge-blocked { background: rgba(255,92,92,.12); color: #ff8b8b; border: 1px solid rgba(255,92,92,.28); }
-      .tds-badge-neutral { background: var(--tds-bg-hover, #191d26); color: var(--tds-text-icon, #8b93a1); border: 1px solid var(--tds-border-strong, #232838); }
-      .tds-employee-row { padding: 9px 0; border-bottom: 1px solid var(--tds-border-soft, #161922); }
+      .tds-badge-neutral { background: var(--tds-bg-hover, #404040); color: var(--tds-text-icon, #aaaaaa); border: 1px solid var(--tds-border-strong, #4a4a4a); }
+      .tds-employee-row { padding: 9px 0; border-bottom: 1px solid var(--tds-border-soft, #242424); }
       .tds-employee-row:last-child { border-bottom: none; }
+      .tds-employee-row > summary { cursor: pointer; list-style: none; }
+      .tds-employee-row > summary::-webkit-details-marker { display: none; }
+      .tds-employee-row > summary::marker { content: ''; }
+      .tds-employee-chevron {
+        display: inline-block; font-size: 10px; color: var(--tds-text-dim, #999999);
+        transition: transform .15s ease; transform: rotate(0deg);
+      }
+      .tds-employee-row[open] .tds-employee-chevron { transform: rotate(90deg); }
+      .tds-employee-row[open] > summary { margin-bottom: 2px; }
       .tds-employee-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; }
-      .tds-employee-name { font-weight: 700; color: var(--tds-text-strong, #e6e8ec); font-size: 13px; }
-      .tds-employee-meta { color: var(--tds-text-dim, #5c6373); font-size: 11px; margin-top: 1px; }
-      .tds-diag-row { display: flex; justify-content: space-between; align-items: flex-start; padding: 8px 0; border-bottom: 1px solid var(--tds-border-soft, #161922); gap: 10px; }
+      .tds-employee-name { font-weight: 700; color: var(--tds-text-strong, #f0f0f0); font-size: 13px; }
+      .tds-employee-meta { color: var(--tds-text-dim, #999999); font-size: 11px; margin-top: 1px; }
+      .tds-diag-row { display: flex; justify-content: space-between; align-items: flex-start; padding: 8px 0; border-bottom: 1px solid var(--tds-border-soft, #242424); gap: 10px; }
       .tds-diag-row:last-child { border-bottom: none; }
-      .tds-diag-label { color: var(--tds-text-mid2, #c7ccd1); font-size: 12px; }
-      .tds-diag-reason { color: var(--tds-text-dim, #5c6373); font-size: 11px; margin-top: 2px; }
+      .tds-diag-label { color: var(--tds-text-mid2, #cfcfcf); font-size: 12px; }
+      .tds-diag-reason { color: var(--tds-text-dim, #999999); font-size: 11px; margin-top: 2px; }
       .tds-btn { background: var(--tds-accent, #3ddc84); color: #06110a; border: none; border-radius: 6px; padding: 8px 12px; font: 700 12px/1 -apple-system, sans-serif; cursor: pointer; letter-spacing: .02em; }
       .tds-btn:hover { filter: brightness(1.08); }
-      .tds-btn-ghost { background: transparent; color: var(--tds-text-mid, #9aa0a6); border: 1px solid var(--tds-border-strong, #232838); border-radius: 6px; padding: 8px 12px; font: 600 12px/1 -apple-system, sans-serif; cursor: pointer; }
-      .tds-btn-ghost:hover { background: var(--tds-bg-hover, #161a22); color: var(--tds-fg, #d7dae0); }
-      .tds-input { width: 100%; background: var(--tds-bg, #0b0d12); color: var(--tds-text-strong, #e6e8ec); border: 1px solid var(--tds-border-strong, #232838); border-radius: 6px; padding: 8px 9px; box-sizing: border-box; font: 12.5px monospace; }
+      .tds-btn-ghost { background: transparent; color: var(--tds-text-mid, #b5b5b5); border: 1px solid var(--tds-border-strong, #4a4a4a); border-radius: 6px; padding: 8px 12px; font: 600 12px/1 -apple-system, sans-serif; cursor: pointer; }
+      .tds-btn-ghost:hover { background: var(--tds-bg-hover, #404040); color: var(--tds-fg, #d8d8d8); }
+      .tds-input { width: 100%; background: var(--tds-bg, #2b2b2b); color: var(--tds-text-strong, #f0f0f0); border: 1px solid var(--tds-border-strong, #4a4a4a); border-radius: 6px; padding: 8px 9px; box-sizing: border-box; font: 12.5px monospace; }
       .tds-input:focus { outline: none; border-color: var(--tds-accent, #3ddc84); }
       .tds-swatches { display: flex; gap: 8px; margin-top: 8px; }
       .tds-swatch { width: 26px; height: 26px; border-radius: 50%; cursor: pointer; border: 2px solid transparent; }
       .tds-swatch.tds-swatch-active { border-color: var(--tds-fg, #fff); }
       .tds-segmented { display: flex; gap: 4px; margin-bottom: 10px; flex-wrap: wrap; }
-      .tds-segment { flex: 1; min-width: 90px; text-align: center; background: var(--tds-bg-card, #10131a); color: var(--tds-text-icon, #8b93a1); border: 1px solid var(--tds-border-strong, #232838); border-radius: 6px; padding: 8px 6px; font: 700 10.5px/1 -apple-system, sans-serif; letter-spacing: .03em; cursor: pointer; }
-      .tds-segment:hover { background: var(--tds-bg-hover, #161a22); }
+      .tds-segment { flex: 1; min-width: 90px; text-align: center; background: var(--tds-bg-card, #323232); color: var(--tds-text-icon, #aaaaaa); border: 1px solid var(--tds-border-strong, #4a4a4a); border-radius: 6px; padding: 8px 6px; font: 700 10.5px/1 -apple-system, sans-serif; letter-spacing: .03em; cursor: pointer; }
+      .tds-segment:hover { background: var(--tds-bg-hover, #404040); }
       .tds-segment.tds-segment-active { background: var(--tds-accent-dim, rgba(61,220,132,.14)); color: var(--tds-accent, #3ddc84); border-color: var(--tds-accent, #3ddc84); }
       .tds-table { width: 100%; border-collapse: collapse; font-size: 12px; }
-      .tds-table th { text-align: left; color: var(--tds-text-faint, #565d6d); font-size: 10px; letter-spacing: .05em; text-transform: uppercase; padding: 4px 6px; border-bottom: 1px solid var(--tds-border, #1c202a); }
-      .tds-table td { padding: 5px 6px; border-bottom: 1px solid var(--tds-border-soft, #161922); color: var(--tds-fg, #d7dae0); }
+      .tds-table th { text-align: left; color: var(--tds-text-faint, #9a9a9a); font-size: 10px; letter-spacing: .05em; text-transform: uppercase; padding: 4px 6px; border-bottom: 1px solid var(--tds-border, #1a1a1a); }
+      .tds-table td { padding: 5px 6px; border-bottom: 1px solid var(--tds-border-soft, #242424); color: var(--tds-fg, #d8d8d8); }
       .tds-table tr:last-child td { border-bottom: none; }
       .tds-table td.tds-num { text-align: right; font-variant-numeric: tabular-nums; }
       .tds-spark { display: flex; align-items: flex-end; gap: 4px; height: 46px; margin: 6px 0; }
@@ -449,8 +458,8 @@
       .tds-spark-bar { width: 100%; border-radius: 2px 2px 0 0; min-height: 2px; }
       .tds-spark-bar.tds-bar-pos { background: var(--tds-accent, #3ddc84); }
       .tds-spark-bar.tds-bar-neg { background: #ff5c5c; }
-      .tds-spark-label { font-size: 9px; color: var(--tds-text-faintest, #4a5062); }
-      #tds-footer { display: flex; justify-content: space-between; align-items: center; padding: 8px 12px; border-top: 1px solid var(--tds-border, #1c202a); background: var(--tds-bg-alt, #0d1017); font-size: 10.5px; color: var(--tds-text-faintest, #4a5062); }
+      .tds-spark-label { font-size: 9px; color: var(--tds-text-faintest, #888888); }
+      #tds-footer { display: flex; justify-content: space-between; align-items: center; padding: 8px 12px; border-top: 1px solid var(--tds-border, #1a1a1a); background: var(--tds-bg-alt, #383838); font-size: 10.5px; color: var(--tds-text-faintest, #888888); }
       #tds-footer .tds-footer-status { color: var(--tds-accent, #3ddc84); }
       #tds-mount-error { margin: 14px 0; }
 
@@ -527,10 +536,10 @@
           g: fallback.g * 0.6 + bg.g * 0.4,
           b: fallback.b * 0.6 + bg.b * 0.4,
         });
-        root.style.setProperty('--tds-bg', nudge({ r: 11, g: 13, b: 18 }));
-        root.style.setProperty('--tds-bg-alt', nudge({ r: 13, g: 16, b: 23 }));
-        root.style.setProperty('--tds-bg-card', nudge({ r: 16, g: 19, b: 26 }));
-        root.style.setProperty('--tds-bg-hover', nudge({ r: 22, g: 26, b: 34 }));
+        root.style.setProperty('--tds-bg', nudge({ r: 43, g: 43, b: 43 }));
+        root.style.setProperty('--tds-bg-alt', nudge({ r: 56, g: 56, b: 56 }));
+        root.style.setProperty('--tds-bg-card', nudge({ r: 50, g: 50, b: 50 }));
+        root.style.setProperty('--tds-bg-hover', nudge({ r: 64, g: 64, b: 64 }));
       } else {
         // Light Torn skin: derive a full light palette FROM the sampled
         // background rather than forcing the dark defaults onto a light
@@ -696,10 +705,13 @@
       <div class="tds-section-label">API Key</div>
       <div class="tds-box tds-box-neutral">Stored only in this browser (Tampermonkey local storage). Never sent anywhere except api.torn.com.</div>
       <div class="tds-box tds-box-warn">
-        <strong>Required access level:</strong> Full Access (or a Custom key covering
+        <strong>Recommended access level:</strong> Full Access, or a Custom key covering
         <code>company: profile, employees, detailed, stock, applications</code> and
-        <code>user: basic, workstats, log</code>). A Public or Minimal key will show
-        BLOCKED on most tabs \u2014 check the Diagnostics tab for exactly what your key can reach.
+        <code>user: basic, workstats, log</code>. <strong>Limited Access may also work</strong> \u2014
+        Torn's preset access levels don't map 1:1 to what's visible to you in-game, so which selections a
+        Limited key actually reaches can only be known by testing it. Check the Diagnostics tab after saving
+        your key: it shows ACCESSIBLE/BLOCKED for every selection this suite uses, which is the real answer
+        for your specific key, not a guess from here.
       </div>
       <input class="tds-input" id="tds-keyinput" type="text" placeholder="Paste API key here" />
       <div style="margin-top:8px; display:flex; gap:8px;">
@@ -863,15 +875,24 @@
           || status?.location
           || '—';
 
+        // <details>/<summary> gives free, accessible, keyboard-operable
+        // collapse behaviour with no extra JS or state tracking needed —
+        // the name/position/status row is always visible; everything below
+        // it only renders open when the director clicks to expand it.
         html += `
-          <div class="tds-employee-row">
-            <div class="tds-employee-top">
-              <div>
-                <div class="tds-employee-name">${escapeHtml(String(employee.name))}</div>
-                <div class="tds-employee-meta">${escapeHtml(String(employee.position || 'Employee'))}</div>
+          <details class="tds-employee-row">
+            <summary class="tds-employee-summary">
+              <div class="tds-employee-top">
+                <div>
+                  <div class="tds-employee-name">${escapeHtml(String(employee.name))}</div>
+                  <div class="tds-employee-meta">${escapeHtml(String(employee.position || 'Employee'))}</div>
+                </div>
+                <div style="display:flex; align-items:center; gap:8px;">
+                  <span class="tds-badge tds-badge-neutral">${escapeHtml(String(statusText))}</span>
+                  <span class="tds-employee-chevron">\u25b8</span>
+                </div>
               </div>
-              <span class="tds-badge tds-badge-neutral">${escapeHtml(String(statusText))}</span>
-            </div>
+            </summary>
 
             <div class="tds-card" style="margin:8px 0 0;">
               <div class="tds-row"><span class="tds-row-label">Days employed</span><span class="tds-row-value">${formatNumber(emp.days_in_company)}</span></div>
@@ -897,7 +918,7 @@
                 <div class="tds-row"><span class="tds-row-label">Last action</span><span class="tds-row-value">${escapeHtml(String(lastAction?.relative || formatTimestampRelative(lastAction?.timestamp)))}</span></div>
               ` : ''}
             </div>
-          </div>`;
+          </details>`;
       });
 
       if (employees.length > 15) {
@@ -1237,27 +1258,43 @@
     }
 
     const profile = findRaw(results, 'company', 'profile');
+    const detailed = findRaw(results, 'company', 'detailed');
     const employeesRaw = findRaw(results, 'company', 'employees');
     const blockedProfile = findBlockedReason(results, 'company', 'profile');
+    const blockedDetailed = findBlockedReason(results, 'company', 'detailed');
 
     let html = '';
 
-    if (!profile) {
+    if (!profile && !detailed) {
       html += `<div class="tds-box tds-box-danger"><strong>Company profile unavailable.</strong> ${blockedProfile || 'No data returned.'} Finance needs at least this to show anything.</div>`;
       el.innerHTML = html;
       return;
     }
 
-    // Dynamically locate income-shaped fields rather than assuming exact
-    // names — tags each as EXACT since it's a live field from this response.
-    const incomeFields = Object.entries(profile).filter(([k, v]) => typeof v === 'number' && /profit|income/i.test(k));
+    // Income-shaped fields can live on EITHER company/profile or
+    // company/detailed depending on your key's access level and how Torn
+    // has split that data — searching only one was the bug that made Gross
+    // show "unavailable" even when the field existed on the other response.
+    // Merging is safe: a field name collision would mean the same field
+    // appearing in both, not conflicting values.
+    const combined = { ...(profile || {}), ...(detailed || {}) };
+    const incomeFields = Object.entries(combined).filter(([k, v]) => typeof v === 'number' && /profit|income/i.test(k));
     const dailyField = incomeFields.find(([k]) => /daily/i.test(k));
     const weeklyField = incomeFields.find(([k]) => /weekly/i.test(k));
 
     const employees = extractEmployeesEntries(employeesRaw);
     const wageFields = employees.map((e) => findWageField(e.raw)).filter(Boolean);
-    const totalSalary = wageFields.length > 0 ? wageFields.reduce((sum, w) => sum + w.value, 0) : null;
-    const salaryFieldName = wageFields[0]?.key;
+    let totalSalary = wageFields.length > 0 ? wageFields.reduce((sum, w) => sum + w.value, 0) : null;
+    let salaryFieldName = wageFields[0]?.key;
+    // Fallback: some responses may only expose an aggregate wage/salary
+    // figure at the company level rather than per employee.
+    if (totalSalary === null) {
+      const aggregateWage = Object.entries(combined).find(([k, v]) => typeof v === 'number' && /wage|salar/i.test(k));
+      if (aggregateWage) {
+        totalSalary = aggregateWage[1];
+        salaryFieldName = aggregateWage[0];
+      }
+    }
 
     const todayGross = dailyField ? dailyField[1] : null;
     const todayNet = todayGross !== null && totalSalary !== null ? todayGross - totalSalary : null;
@@ -1265,20 +1302,48 @@
     // --- Today snapshot card ---
     html += '<div class="tds-section-label">Today</div><div class="tds-card">';
     html += `<div class="tds-row"><span class="tds-row-label">Gross${dailyField ? ` (${dailyField[0]})` : ''}</span><span class="tds-row-value">${todayGross !== null ? formatMoney(todayGross) : '<span class="tds-v-dim">unavailable</span>'}</span></div>`;
-    html += `<div class="tds-row"><span class="tds-row-label">Salaries${salaryFieldName ? ` (sum of ${salaryFieldName})` : ''}</span><span class="tds-row-value tds-v-bad">${totalSalary !== null ? '-' + formatMoney(totalSalary) : '<span class="tds-v-dim">no wage field in this key\u2019s response</span>'}</span></div>`;
+    html += `<div class="tds-row"><span class="tds-row-label">Salaries${salaryFieldName ? ` (${salaryFieldName})` : ''}</span><span class="tds-row-value tds-v-bad">${totalSalary !== null ? '-' + formatMoney(totalSalary) : '<span class="tds-v-dim">no wage field in this key\u2019s response</span>'}</span></div>`;
     html += `<div class="tds-row"><span class="tds-row-label">Net (DERIVED)</span><span class="tds-row-value ${todayNet !== null ? (todayNet >= 0 ? 'tds-v-good' : 'tds-v-bad') : ''}">${todayNet !== null ? formatMoney(todayNet) : '<span class="tds-v-dim">needs gross + salary above</span>'}</span></div>`;
     if (weeklyField) {
       html += `<div class="tds-row"><span class="tds-row-label">Weekly (${weeklyField[0]})</span><span class="tds-row-value">${formatMoney(weeklyField[1])}</span></div>`;
     }
     html += '</div>';
     if (todayGross === null) {
-      html += `<div class="tds-box tds-box-warn">No field on <em>company/profile</em> looked like a profit/income number. Field names actually present: ${Object.keys(profile).join(', ')}. If one of these is the real income field under a name I didn\u2019t recognize, tell me the name and I\u2019ll wire it in directly instead of guessing.</div>`;
+      html += `<div class="tds-box tds-box-warn">No field on <em>company/profile</em> or <em>company/detailed</em> looked like a profit/income number. Fields actually present \u2014 profile: ${profile ? Object.keys(profile).join(', ') : (blockedProfile || 'blocked')}; detailed: ${detailed ? Object.keys(detailed).join(', ') : (blockedDetailed || 'blocked')}. If one of these is the real income field under a name I didn\u2019t recognize, tell me the name and I\u2019ll wire it in directly instead of guessing.</div>`;
+    }
+
+    // --- Company health, if company/detailed is accessible with this key ---
+    if (detailed) {
+      const bankField = Object.entries(detailed).find(([k, v]) => typeof v === 'number' && /bank/i.test(k));
+      const popField = Object.entries(detailed).find(([k, v]) => typeof v === 'number' && /popular/i.test(k));
+      const effField = Object.entries(detailed).find(([k, v]) => typeof v === 'number' && /efficien/i.test(k));
+      const envField = Object.entries(detailed).find(([k, v]) => typeof v === 'number' && /environ/i.test(k));
+      if (bankField || popField || effField || envField) {
+        html += '<div class="tds-section-label">Company Health</div><div class="tds-card">';
+        if (bankField) html += `<div class="tds-row"><span class="tds-row-label">Company bank</span><span class="tds-row-value">${formatMoney(bankField[1])}</span></div>`;
+        if (popField) html += `<div class="tds-row"><span class="tds-row-label">Popularity</span><span class="tds-row-value">${popField[1]}%</span></div>`;
+        if (effField) html += `<div class="tds-row"><span class="tds-row-label">Efficiency</span><span class="tds-row-value">${effField[1]}%</span></div>`;
+        if (envField) html += `<div class="tds-row"><span class="tds-row-label">Environment</span><span class="tds-row-value">${envField[1]}%</span></div>`;
+        html += '</div>';
+      }
     }
 
     // --- Historical comparison from local snapshots ---
+    // Snapshots store profile and detailed under separate keys (matching how
+    // they were fetched), so merge them per-snapshot the same way as above —
+    // otherwise a snapshot taken when only "detailed" held the income field
+    // would silently be treated as having no income data at all.
+    function snapshotIncomeFields(snap) {
+      return { ...(snap.company_profile || {}), ...(snap.company_detailed || {}) };
+    }
+    function findDailyIncome(snap) {
+      const merged = snapshotIncomeFields(snap);
+      return Object.entries(merged).find(([k, v]) => typeof v === 'number' && /daily/i.test(k) && /profit|income/i.test(k));
+    }
+
     const allSnapshots = await getSnapshotsSorted();
-    const withProfile = allSnapshots.filter((s) => s.company_profile);
-    const daily = collapseToDaily(withProfile);
+    const withIncomeData = allSnapshots.filter((s) => s.company_profile || s.company_detailed);
+    const daily = collapseToDaily(withIncomeData);
 
     html += '<div class="tds-section-label">Today vs Yesterday <span class="tds-v-dim" style="font-weight:400;">(HISTORICAL \u2014 from local snapshots only)</span></div>';
     if (daily.length < 2) {
@@ -1286,8 +1351,8 @@
     } else {
       const todaySnap = daily[daily.length - 1];
       const ySnap = daily[daily.length - 2];
-      const gField = Object.entries(todaySnap.company_profile).find(([k, v]) => typeof v === 'number' && /daily.*profit|daily.*income/i.test(k));
-      const yField = gField ? [gField[0], ySnap.company_profile[gField[0]]] : null;
+      const gField = findDailyIncome(todaySnap);
+      const yField = gField ? [gField[0], snapshotIncomeFields(ySnap)[gField[0]]] : null;
       html += '<div class="tds-card">';
       if (gField && yField && typeof yField[1] === 'number') {
         const change = gField[1] - yField[1];
@@ -1303,14 +1368,14 @@
       // Sparkline of last up to 7 local daily snapshots
       const recent = daily.slice(-7);
       const values = recent.map((s) => {
-        const f = Object.entries(s.company_profile).find(([k, v]) => typeof v === 'number' && /daily.*profit|daily.*income/i.test(k));
+        const f = findDailyIncome(s);
         return f ? f[1] : null;
       }).filter((v) => v !== null);
       if (values.length >= 2) {
         const maxAbs = Math.max(...values.map((v) => Math.abs(v)), 1);
         html += `<div class="tds-section-label">Last ${values.length} days <span class="tds-v-dim" style="font-weight:400;">(local snapshots)</span></div><div class="tds-card"><div class="tds-spark">`;
         recent.forEach((s) => {
-          const f = Object.entries(s.company_profile).find(([k, v]) => typeof v === 'number' && /daily.*profit|daily.*income/i.test(k));
+          const f = findDailyIncome(s);
           const v = f ? f[1] : 0;
           const h = Math.max(2, Math.round((Math.abs(v) / maxAbs) * 40));
           const cls = v >= 0 ? 'tds-bar-pos' : 'tds-bar-neg';
