@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Company Management Suite
 // @namespace    torn-company-management-suite
-// @version      1.3.23
+// @version      1.3.24
 // @description  Local-only company management dashboard for Torn directors, embedded in the Jobs page. No company data ever leaves your browser; only your Torn User ID is checked against a public license list.
 // @author       DooBiiE
 // @match        https://www.torn.com/*
@@ -67,7 +67,7 @@
   // TornPDA does not always expose the legacy GM_info object that desktop
   // userscript managers provide. Try both common metadata APIs, then use the
   // release version as a PDA-safe fallback so the UI never shows vunknown.
-  const TDS_VERSION_FALLBACK = '1.3.23';
+  const TDS_VERSION_FALLBACK = '1.3.24';
   const TDS_VERSION =
     (typeof GM_info !== 'undefined' && GM_info?.script?.version) ||
     (typeof GM !== 'undefined' && GM?.info?.script?.version) ||
@@ -3253,6 +3253,8 @@
   // COMPARE TAB
   // =======================================================================
   const BENCHMARK_CACHE_TTL_MS = 4 * 60 * 60 * 1000;
+  const BENCHMARK_PAGE_SIZE = 100;
+  const BENCHMARK_MAX_PAGES = 10;
 
   function getOwnCompanyCompareInfo(profile, results) {
     if (!profile || typeof profile !== 'object') {
@@ -3337,25 +3339,59 @@
     return filters.join(',');
   }
 
-  async function fetchBenchmarkCompanies(typeId, offset = 0, tier = 'all', ownRating = null) {
-    // Keep the known-good type endpoint for ALL RATINGS.
+  async function fetchBenchmarkCompaniesPage(typeId, offset = 0, tier = 'all', ownRating = null) {
     if (tier === 'all') {
       return ApiClient.callV2(`company/${encodeURIComponent(typeId)}/companies`, {
-        limit: 100,
+        limit: BENCHMARK_PAGE_SIZE,
         offset,
         striptags: 'true',
       });
     }
 
-    // For explicit rating bands, ask Torn to filter server-side. This avoids
-    // trying to derive 4★/3–5★ results from the type endpoint when that
-    // response is effectively returning only top-rated companies.
     return ApiClient.callV2('company/search', {
       filters: buildBenchmarkSearchFilters(typeId, tier, ownRating),
-      limit: 100,
+      limit: BENCHMARK_PAGE_SIZE,
       offset,
       striptags: 'true',
     });
+  }
+
+  function mergeBenchmarkPageData(pages) {
+    const allRows = [];
+    let firstData = null;
+
+    for (const data of pages) {
+      if (!firstData) firstData = data;
+      const rows = extractCompareCompanies(data);
+      allRows.push(...rows);
+    }
+
+    // Keep a simple common shape the existing renderer already understands.
+    return {
+      companies: allRows,
+      _tdsPagination: {
+        pagesFetched: pages.length,
+        rowsFetched: allRows.length,
+      },
+      _tdsFirstResponse: firstData,
+    };
+  }
+
+  async function fetchBenchmarkCompanies(typeId, tier = 'all', ownRating = null) {
+    const pages = [];
+
+    for (let page = 0; page < BENCHMARK_MAX_PAGES; page += 1) {
+      const offset = page * BENCHMARK_PAGE_SIZE;
+      const data = await fetchBenchmarkCompaniesPage(typeId, offset, tier, ownRating);
+      pages.push(data);
+
+      const rows = extractCompareCompanies(data);
+
+      // Fewer than the requested page size means Torn has no next full page.
+      if (rows.length < BENCHMARK_PAGE_SIZE) break;
+    }
+
+    return mergeBenchmarkPageData(pages);
   }
 
   function extractCompareCompanies(data) {
@@ -3503,10 +3539,13 @@
       return;
     }
 
-    if (resultsEl) resultsEl.innerHTML = `<div class="tds-box tds-box-neutral">Fetching ${escapeHtml(String(own.typeName || `company type ${own.typeId}`))} companies…</div>`;
+    if (resultsEl) resultsEl.innerHTML = `<div class="tds-box tds-box-neutral">
+      Fetching ${escapeHtml(String(own.typeName || `company type ${own.typeId}`))} comparison pages…
+      This uses Torn's read-only API and may take a few seconds when several pages are available.
+    </div>`;
 
     try {
-      const data = await fetchBenchmarkCompanies(own.typeId, 0, tier, own.rating);
+      const data = await fetchBenchmarkCompanies(own.typeId, tier, own.rating);
       state.benchmark.cache[cacheKey] = { timestamp: Date.now(), data };
       await renderBenchmarkResults(panel, data, own);
     } catch (err) {
@@ -3906,6 +3945,8 @@
             ? '8–10★'
             : 'All Ratings';
 
+    const pagination = data?._tdsPagination || null;
+
     let html = `<div class="tds-box tds-box-neutral">
       ${tier === 'all'
         ? 'Source: company type list.'
@@ -3913,6 +3954,9 @@
     </div><div class="tds-card">`;
     html += `<div class="tds-row"><span class="tds-row-label">Selected rating</span><span class="tds-row-value">${escapeHtml(tierLabel)}</span></div>`;
     html += `<div class="tds-row"><span class="tds-row-label">Companies returned</span><span class="tds-row-value">${formatNumber(sorted.length)}</span></div>`;
+    if (pagination) {
+      html += `<div class="tds-row"><span class="tds-row-label">API pages fetched</span><span class="tds-row-value">${formatNumber(pagination.pagesFetched)}</span></div>`;
+    }
     if (ownRow && metric) {
       const topRankInfo = metric === 'weeklyIncome'
         ? resolvedWeeklyIncomeRank
@@ -4117,7 +4161,19 @@
     html += `</tbody></table></div>`;
 
     if (sorted.length > 25) {
-      html += `<div class="tds-box tds-box-neutral" style="margin-top:10px;">Showing 25 companies in this table. Summary statistics use all ${formatNumber(sorted.length)} companies returned.</div>`;
+      html += `<div class="tds-box tds-box-neutral" style="margin-top:10px;">
+        Showing <strong>25 companies</strong> in the table for readability.
+        Rankings, averages, medians and targets use all <strong>${formatNumber(sorted.length)}</strong> companies fetched across
+        <strong>${formatNumber(pagination?.pagesFetched || 1)}</strong> API page(s).
+      </div>`;
+    }
+
+    if (pagination?.pagesFetched >= BENCHMARK_MAX_PAGES) {
+      html += `<div class="tds-box tds-box-warn" style="margin-top:10px;">
+        Compare reached the safety cap of <strong>${BENCHMARK_MAX_PAGES}</strong> API pages
+        (${formatNumber(BENCHMARK_MAX_PAGES * BENCHMARK_PAGE_SIZE)} possible rows).
+        Results are still valid for the companies fetched, but additional matches may exist beyond this cap.
+      </div>`;
     }
 
     el.innerHTML = html;
