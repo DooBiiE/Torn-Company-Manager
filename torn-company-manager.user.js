@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Company Management Suite
 // @namespace    torn-company-management-suite
-// @version      1.2.6
+// @version      1.3.15
 // @description  Local-only company management dashboard for Torn directors, embedded in the Jobs page. No company data ever leaves your browser; only your Torn User ID is checked against a public license list.
 // @author       DooBiiE
 // @match        https://www.torn.com/*
@@ -67,7 +67,7 @@
   // TornPDA does not always expose the legacy GM_info object that desktop
   // userscript managers provide. Try both common metadata APIs, then use the
   // release version as a PDA-safe fallback so the UI never shows vunknown.
-  const TDS_VERSION_FALLBACK = '1.2.6';
+  const TDS_VERSION_FALLBACK = '1.3.15';
   const TDS_VERSION =
     (typeof GM_info !== 'undefined' && GM_info?.script?.version) ||
     (typeof GM !== 'undefined' && GM?.info?.script?.version) ||
@@ -107,7 +107,7 @@
   // key creation and must then paste the generated key into this script.
   const CUSTOM_KEY_TITLE = 'Torn Company Management Suite';
   const CUSTOM_KEY_SELECTIONS = {
-    company: ['profile', 'employees', 'detailed', 'stock', 'news', 'applications', 'companies'],
+    company: ['profile', 'employees', 'detailed', 'stock', 'news', 'applications', 'companies', 'search', 'snapshot'],
     user: ['basic', 'workstats', 'log'],
     torn: ['companies'],
   };
@@ -254,7 +254,63 @@
       return result;
     }
 
-    return { call, callV2 };
+    function rawCallV2Text(path, extraParams = {}) {
+      const key = GM_getValue(STORAGE_KEY_APIKEY, '');
+      if (!key) return Promise.reject({ blocked: true, reason: 'No API key configured yet.' });
+
+      const params = new URLSearchParams({ ...extraParams });
+      const cleanPath = String(path || '').replace(/^\/+/, '');
+      const query = params.toString();
+      const url = `${API_BASE}/v2/${cleanPath}${query ? `?${query}` : ''}`;
+
+      return new Promise((resolve, reject) => {
+        GM_xmlhttpRequest({
+          method: 'GET',
+          url,
+          headers: {
+            Authorization: `ApiKey ${key}`,
+            Accept: 'text/csv, text/plain, */*',
+          },
+          timeout: 20000,
+          onload: (res) => {
+            const body = String(res.responseText || '');
+            // Snapshot errors may still arrive as JSON even though success is CSV.
+            const trimmed = body.trim();
+            if (trimmed.startsWith('{')) {
+              try {
+                const json = JSON.parse(trimmed);
+                if (json.error) {
+                  reject({
+                    blocked: true,
+                    code: json.error.code,
+                    reason: json.error.error || json.error.message || 'Torn API error',
+                  });
+                  return;
+                }
+              } catch (_) {}
+            }
+            resolve(body);
+          },
+          onerror: () => reject({ blocked: true, reason: 'Network error contacting api.torn.com' }),
+          ontimeout: () => reject({ blocked: true, reason: 'Request to api.torn.com timed out' }),
+        });
+      });
+    }
+
+    function callV2Text(path, extraParams = {}) {
+      const run = () => {
+        const wait = Math.max(0, MIN_CALL_INTERVAL_MS - (Date.now() - lastCallAt));
+        return new Promise((resolve) => setTimeout(resolve, wait)).then(() => {
+          lastCallAt = Date.now();
+          return rawCallV2Text(path, extraParams);
+        });
+      };
+      const result = queue.then(run, run);
+      queue = result.then(() => {}, () => {});
+      return result;
+    }
+
+    return { call, callV2, callV2Text };
   })();
 
   // ---------------------------------------------------------------------
@@ -557,6 +613,34 @@
         padding-bottom: 8px;
       }
       .tds-optimize-table tbody tr:last-child td { border-bottom: none; }
+      .tds-compare-table th,
+      .tds-compare-table td {
+        text-align: center !important;
+        vertical-align: middle;
+      }
+      .tds-compare-table td.tds-num { text-align: center !important; }
+      .tds-training-debt-table th,
+      .tds-training-debt-table td {
+        text-align: center !important;
+        vertical-align: middle;
+      }
+      .tds-training-debt-table tbody tr td {
+        border-bottom: 1px solid var(--tds-border-strong, #4a4a4a);
+        padding-top: 8px;
+        padding-bottom: 8px;
+      }
+      .tds-training-debt-table tbody tr:last-child td { border-bottom: none; }
+      .tds-stock-table th,
+      .tds-stock-table td {
+        text-align: center !important;
+        vertical-align: middle;
+      }
+      .tds-stock-table tbody tr td {
+        border-bottom: 1px solid var(--tds-border-strong, #4a4a4a);
+        padding-top: 8px;
+        padding-bottom: 8px;
+      }
+      .tds-stock-table tbody tr:last-child td { border-bottom: none; }
       .tds-spark { display: flex; align-items: flex-end; gap: 4px; height: 46px; margin: 6px 0; }
       .tds-spark-col { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 3px; }
       .tds-spark-bar { width: 100%; border-radius: 2px 2px 0 0; min-height: 2px; }
@@ -686,7 +770,7 @@
     lastRunAt: null,
     diagnosticRunning: false,
     panel: null,
-    benchmark: { tier: 'same', cache: {} }, // cache keyed by categoryId -> { timestamp, data }
+    benchmark: { tier: 'same', cache: {}, snapshot: null }, // cache keyed by categoryId -> { timestamp, data }
     stock: { loading: false, newsCache: null, newsCacheAt: 0 },
   };
 
@@ -779,7 +863,7 @@
     renderOverviewTab(panel, null, null);
     renderFinanceTab(panel);
     renderStockTab(panel);
-    renderTrainingTab(panel);
+    renderTrainingTab(panel).catch((err) => console.error('[TDS] Training render failed:', err));
     renderBenchmarkTab(panel);
     renderOptimizeTab(panel);
     switchTab(panel, 'overview');
@@ -825,7 +909,7 @@
         <strong>Create the API key for this program.</strong><br>
         This opens Torn's official custom-key generator with the permissions used by
         <strong>Torn Company Management Suite</strong> already selected:
-        <strong>Company: Profile, Employees, Detailed, Stock, News, Applications, Companies</strong>;
+        <strong>Company: Profile, Employees, Detailed, Stock, News, Applications, Companies, Search, Snapshot</strong>;
         <strong>User: Basic, Workstats, Log</strong>;
         <strong>Torn: Companies</strong>.<br><br>
         Torn will handle the actual key creation. Review the selections on Torn's page,
@@ -1958,15 +2042,31 @@
       const name = pickText(value, ['name', 'item_name', 'stock_name', 'product_name']);
       const id = pickText(value, ['id', 'item_id', 'stock_id', 'product_id']) || (path.length ? path[path.length - 1] : null);
       const current = pickNumeric(value, ['amount', 'quantity', 'qty', 'stock', 'in_stock', 'instock', 'available', 'inventory']);
-      const price = pickNumeric(value, ['price', 'selling_price', 'sell_price', 'rrp']);
+      const setPrice = pickNumeric(value, ['price', 'selling_price', 'sell_price', 'price_each', 'priceeach']);
+      const costEach = pickNumeric(value, ['cost', 'cost_each', 'costeach', 'unit_cost', 'buy_price']);
+      const rrp = pickNumeric(value, ['rrp', 'recommended_retail_price', 'retail_price']);
+      const soldTotal = pickNumeric(value, ['sold_total', 'soldtotal', 'total_sold', 'units_sold_total']);
+      const soldDaily = pickNumeric(value, ['sold_daily', 'solddaily', 'daily_sold', 'sold_day', 'sold_today', 'daily_sales', 'sales_day']);
       const sold24 = pickNumeric(value, ['sold_24h', 'sold24h', 'sold_day', 'sold_today', 'daily_sold', 'daily_sales', 'sales_day']);
       const sold7 = pickNumeric(value, ['sold_7d', 'sold7d', 'sold_week', 'weekly_sold', 'weekly_sales', 'sales_week']);
 
-      if (!name || (current === null && sold24 === null && sold7 === null)) continue;
+      if (!name || (current === null && sold24 === null && sold7 === null && soldDaily === null && setPrice === null)) continue;
       const key = `${id || ''}|${name}`.toLowerCase();
       if (seenKeys.has(key)) continue;
       seenKeys.add(key);
-      candidates.push({ id, name, current, price, sold24, sold7, raw: value });
+      candidates.push({
+        id,
+        name,
+        current,
+        setPrice,
+        costEach,
+        rrp,
+        soldTotal,
+        soldDaily,
+        sold24,
+        sold7,
+        raw: value
+      });
     }
 
     return candidates.sort((a, b) => a.name.localeCompare(b.name));
@@ -2026,7 +2126,33 @@
       const n = normalizeFieldName(item.name);
       return n === normalizedNewsName || n.includes(normalizedNewsName) || normalizedNewsName.includes(n);
     });
-    return { timestamp: entry.timestamp, quantity: qty, name: match?.name || itemName, id: match?.id || null };
+    let salePrice = pickNumeric(raw, [
+      'price', 'sale_price', 'sold_price', 'price_each', 'unit_price', 'selling_price'
+    ]);
+
+    if (salePrice === null) {
+      const pricePatterns = [
+        /(?:for|at)\s*\$\s*([\d,]+(?:\.\d+)?)(?:\s+each)?\b/i,
+        /\$\s*([\d,]+(?:\.\d+)?)\s*(?:each|per\s+item|per\s+unit)\b/i,
+      ];
+      for (const re of pricePatterns) {
+        const m = text.match(re);
+        if (!m) continue;
+        const parsed = Number(String(m[1]).replace(/,/g, ''));
+        if (Number.isFinite(parsed)) {
+          salePrice = parsed;
+          break;
+        }
+      }
+    }
+
+    return {
+      timestamp: entry.timestamp,
+      quantity: qty,
+      name: match?.name || itemName,
+      id: match?.id || null,
+      price: salePrice
+    };
   }
 
   function aggregateSales(newsRaw, stockItems) {
@@ -2042,9 +2168,30 @@
       if (!sale) continue;
       parsedEvents += 1;
       const key = String(sale.id || normalizeFieldName(sale.name));
-      const row = totals.get(key) || { name: sale.name, sold24: 0, sold7: 0 };
+      const row = totals.get(key) || {
+        name: sale.name,
+        sold24: 0,
+        sold7: 0,
+        lastSoldPrice: null,
+        lastSoldAt: null,
+        pricedUnits24: 0,
+        pricedRevenue24: 0
+      };
+
       if (sale.timestamp >= weekAgo) row.sold7 += sale.quantity;
       if (sale.timestamp >= dayAgo) row.sold24 += sale.quantity;
+
+      if (sale.price !== null && sale.price !== undefined) {
+        if (!row.lastSoldAt || sale.timestamp > row.lastSoldAt) {
+          row.lastSoldAt = sale.timestamp;
+          row.lastSoldPrice = sale.price;
+        }
+        if (sale.timestamp >= dayAgo) {
+          row.pricedUnits24 += sale.quantity;
+          row.pricedRevenue24 += sale.quantity * sale.price;
+        }
+      }
+
       totals.set(key, row);
     }
 
@@ -2069,6 +2216,116 @@
     return data;
   }
 
+  function stockDaysRemaining(current, dailyRate) {
+    if (current === null || typeof current !== 'number') return null;
+    if (!dailyRate || dailyRate <= 0) return null;
+    return current / dailyRate;
+  }
+
+  function stockGrossMargin(setPrice, costEach) {
+    if (setPrice === null || costEach === null) return null;
+    return setPrice - costEach;
+  }
+
+  function stockMarginPercent(setPrice, costEach) {
+    if (setPrice === null || costEach === null || costEach <= 0) return null;
+    return ((setPrice - costEach) / costEach) * 100;
+  }
+
+  function pricingRecommendation(item, sold24, sold7, lastSoldPrice) {
+    const setPrice = item.setPrice;
+    const rrp = item.rrp;
+    const current = item.current;
+    const day = sold24 !== null ? Math.max(0, Number(sold24) || 0) : null;
+    const week = sold7 !== null ? Math.max(0, Number(sold7) || 0) : null;
+    const weeklyDailyAverage = week !== null ? week / 7 : null;
+    const dailyRate = day !== null ? day : (item.soldDaily !== null ? item.soldDaily : weeklyDailyAverage);
+    const daysLeft = stockDaysRemaining(current, dailyRate);
+
+    if (setPrice === null) {
+      return {
+        action: 'No price data',
+        className: '',
+        suggested: null,
+        reason: 'Torn did not return the currently configured selling price.'
+      };
+    }
+
+    const trend =
+      day !== null && weeklyDailyAverage !== null && weeklyDailyAverage > 0
+        ? ((day - weeklyDailyAverage) / weeklyDailyAverage) * 100
+        : null;
+
+    let score = 0;
+    const reasons = [];
+
+    // Strong recent demand and plenty of cover suggests there is room to test
+    // a small increase. Weak demand with lots of inventory suggests the reverse.
+    if (trend !== null) {
+      if (trend >= 15) {
+        score += 2;
+        reasons.push(`24h sales are ${trend.toFixed(0)}% above the 7-day daily average`);
+      } else if (trend <= -15) {
+        score -= 2;
+        reasons.push(`24h sales are ${Math.abs(trend).toFixed(0)}% below the 7-day daily average`);
+      } else {
+        reasons.push('24h sales are close to the 7-day daily average');
+      }
+    }
+
+    if (daysLeft !== null) {
+      if (daysLeft >= 14) {
+        score += 1;
+        reasons.push(`${daysLeft.toFixed(1)} days of stock remain`);
+      } else if (daysLeft <= 4) {
+        score -= 1;
+        reasons.push(`only ${daysLeft.toFixed(1)} days of stock remain`);
+      }
+    }
+
+    if (rrp !== null) {
+      if (setPrice < rrp * 0.85) {
+        score += 1;
+        reasons.push(`set price is well below RRP (${formatCurrency(rrp)})`);
+      } else if (setPrice > rrp * 1.20) {
+        score -= 1;
+        reasons.push(`set price is well above RRP (${formatCurrency(rrp)})`);
+      }
+    }
+
+    if (lastSoldPrice !== null) {
+      if (lastSoldPrice >= setPrice) {
+        reasons.push(`latest observed sale cleared at ${formatCurrency(lastSoldPrice)}`);
+      } else {
+        score -= 1;
+        reasons.push(`latest observed sale price (${formatCurrency(lastSoldPrice)}) is below the set price`);
+      }
+    }
+
+    let action = 'Hold';
+    let suggested = setPrice;
+    let className = '';
+
+    if (score >= 2) {
+      action = 'Consider raising';
+      suggested = setPrice + 1;
+      className = 'tds-v-good';
+    } else if (score <= -2) {
+      action = 'Consider lowering';
+      suggested = Math.max(item.costEach !== null ? item.costEach : 0, setPrice - 1);
+      className = 'tds-v-bad';
+    }
+
+    return {
+      action,
+      suggested,
+      className,
+      daysLeft,
+      trend,
+      reason: reasons.length ? reasons.join('; ') : 'Not enough recent sales evidence to justify changing the price.'
+    };
+  }
+
   function restockRecommendation(current, sold24, sold7) {
     if (sold24 === null && sold7 === null) return null;
     const day = Math.max(0, Number(sold24) || 0);
@@ -2088,6 +2345,7 @@
     const el = panel.querySelector('[data-tabpanel="stock"]');
     if (!el) return;
     const results = state.lastResults;
+
     if (!results) {
       el.innerHTML = `<div class="tds-box tds-box-neutral">Run Diagnostics once so Stock Management can read your company stock.</div>`;
       return;
@@ -2095,6 +2353,7 @@
 
     const stockRaw = findRaw(results, 'company', 'stock');
     const blocked = findBlockedReason(results, 'company', 'stock');
+
     if (!stockRaw) {
       el.innerHTML = `<div class="tds-box tds-box-danger"><strong>Company stock unavailable.</strong> ${escapeHtml(blocked || 'No company/stock data was returned.')}</div>`;
       return;
@@ -2102,11 +2361,8 @@
 
     const items = extractStockItems(stockRaw);
 
-    // Avoid an extra live news call during startup/diagnostic hydration. The
-    // current stock data is already available; sales history is fetched lazily
-    // when the user opens this tab.
     if (el.hidden && !refresh) {
-      el.innerHTML = `<div class="tds-box tds-box-neutral">Stock data is ready. Open this tab to load the last 24 hours / 7 days of sales history and calculate restock targets.</div>`;
+      el.innerHTML = `<div class="tds-box tds-box-neutral">Stock data is ready. Open this tab to load recent sales history, restock targets, margins and read-only pricing recommendations.</div>`;
       return;
     }
 
@@ -2115,9 +2371,11 @@
       return;
     }
 
-    el.innerHTML = `<div class="tds-box tds-box-neutral">Loading recent sales history…</div>`;
+    el.innerHTML = `<div class="tds-box tds-box-neutral">Loading recent sales and pricing history…</div>`;
+
     let sales = { totals: new Map(), parsedEvents: 0, newsEntries: 0, oldestTimestamp: null };
     let newsError = null;
+
     try {
       if (refresh) {
         state.stock.newsCache = null;
@@ -2132,42 +2390,128 @@
 
     let html = `
       <div class="tds-box tds-box-info">
-        <strong>Restock recommendation:</strong> target = 120% of the higher of <em>last 7 days sold</em> or <em>last 24 hours × 7</em>. This gives roughly one week of fast-moving stock plus a 20% buffer. The target and restock quantity are <strong>DERIVED</strong>, not values returned by Torn.
+        <strong>Read-only pricing assistant:</strong> this tab does <strong>not</strong> submit prices or interact with Torn's Pricing form.
+        It only analyses data Torn returns and suggests <strong>Hold / Consider raising / Consider lowering</strong>.
+        Suggested prices are advisory and deliberately move only <strong>$1 at a time</strong>.
+      </div>
+      <div class="tds-box tds-box-info">
+        <strong>Restock recommendation:</strong> target = 120% of the higher of <em>last 7 days sold</em> or <em>last 24 hours × 7</em>.
+        This gives roughly one week of fast-moving stock plus a 20% buffer. Targets are <strong>DERIVED</strong>.
       </div>`;
 
     if (newsError) {
-      html += `<div class="tds-box tds-box-warn"><strong>Item-level sales history unavailable.</strong> ${escapeHtml(newsError.reason || 'company/news could not be read with this key')}. Current stock is still shown. Add <code>company: news</code> to the Custom key and rerun Diagnostics to enable the 24h / 7d columns.</div>`;
+      html += `<div class="tds-box tds-box-warn"><strong>Item-level sales history unavailable.</strong> ${escapeHtml(newsError.reason || 'company/news could not be read with this key')}. Current stock/pricing fields returned directly by Torn are still shown.</div>`;
     } else if (!sales.parsedEvents) {
-      html += `<div class="tds-box tds-box-warn">Company news was accessible (${formatNumber(sales.newsEntries)} entries inspected), but no item-sale events were recognised. If Torn exposes the sold counts directly inside <code>company/stock</code>, those values are used below; otherwise the sales columns remain unavailable rather than being estimated from stock movement.</div>`;
+      html += `<div class="tds-box tds-box-warn">Company news was accessible (${formatNumber(sales.newsEntries)} entries inspected), but no item-sale events were recognised. Direct <code>company/stock</code> sales fields are still used where available; Last Sold Price stays unavailable rather than being guessed.</div>`;
     } else {
       const coverage = sales.oldestTimestamp ? formatTimestampRelative(sales.oldestTimestamp * 1000) : 'unknown';
-      html += `<div class="tds-box tds-box-neutral">Parsed ${formatNumber(sales.parsedEvents)} stock-sale event(s) from company news. Oldest returned news: ${escapeHtml(coverage)}. If Torn only returns part of the week, the 7-day figure is naturally partial.</div>`;
+      html += `<div class="tds-box tds-box-neutral">Parsed ${formatNumber(sales.parsedEvents)} stock-sale event(s) from company news. Oldest returned news: ${escapeHtml(coverage)}.</div>`;
     }
 
-    html += `<div style="overflow-x:auto;"><table class="tds-table">
-      <thead><tr><th>Item</th><th style="text-align:right;">In Stock</th><th style="text-align:right;">Sold 24h</th><th style="text-align:right;">Sold 7d</th><th style="text-align:right;">Target Stock</th><th style="text-align:right;">Restock</th></tr></thead><tbody>`;
+    html += `<div style="overflow-x:auto;">
+      <table class="tds-table tds-stock-table">
+        <thead>
+          <tr>
+            <th>Product</th>
+            <th>Cost</th>
+            <th>RRP</th>
+            <th>Set Price</th>
+            <th>Last Sold</th>
+            <th>In Stock</th>
+            <th>Sold Daily</th>
+            <th>Sold 24h</th>
+            <th>Sold 7d</th>
+            <th>Days Left</th>
+            <th>Margin / Unit</th>
+            <th>Est. Daily Gross</th>
+            <th>Target Stock</th>
+            <th>Restock</th>
+            <th>Pricing</th>
+            <th>Suggested</th>
+          </tr>
+        </thead>
+        <tbody>`;
 
     for (const item of items) {
       const keyById = String(item.id || '');
       const keyByName = normalizeFieldName(item.name);
       const fromNews = sales.totals.get(keyById) || sales.totals.get(keyByName);
-      const sold24 = item.sold24 !== null ? item.sold24 : (fromNews ? fromNews.sold24 : null);
-      const sold7 = item.sold7 !== null ? item.sold7 : (fromNews ? fromNews.sold7 : null);
+
+      const sold24 = item.sold24 !== null
+        ? item.sold24
+        : (fromNews ? fromNews.sold24 : (item.soldDaily !== null ? item.soldDaily : null));
+
+      const sold7 = item.sold7 !== null
+        ? item.sold7
+        : (fromNews ? fromNews.sold7 : null);
+
+      const soldDaily = item.soldDaily !== null
+        ? item.soldDaily
+        : (sold24 !== null ? sold24 : (sold7 !== null ? sold7 / 7 : null));
+
+      const lastSoldPrice = fromNews?.lastSoldPrice ?? null;
+      const averageSoldPrice24 =
+        fromNews && fromNews.pricedUnits24 > 0
+          ? fromNews.pricedRevenue24 / fromNews.pricedUnits24
+          : null;
+
       const rec = restockRecommendation(item.current, sold24, sold7);
-      const restockText = rec ? (rec.restock === null ? '—' : formatNumber(rec.restock)) : '—';
+      const priceRec = pricingRecommendation(item, sold24, sold7, lastSoldPrice);
+
+      const margin = stockGrossMargin(item.setPrice, item.costEach);
+      const marginPct = stockMarginPercent(item.setPrice, item.costEach);
+      const daysLeft = stockDaysRemaining(item.current, soldDaily);
+      const estDailyGross =
+        margin !== null && soldDaily !== null
+          ? margin * soldDaily
+          : null;
+
+      const restockText = rec
+        ? (rec.restock === null ? '—' : formatNumber(rec.restock))
+        : '—';
+
+      const lastPriceHtml = lastSoldPrice !== null
+        ? `${formatCurrency(lastSoldPrice)}${averageSoldPrice24 !== null ? `<div class="tds-v-dim">24h avg ${formatCurrency(averageSoldPrice24)}</div>` : ''}`
+        : '—';
+
       html += `<tr>
-        <td><strong>${escapeHtml(item.name)}</strong>${item.price !== null ? `<div class="tds-v-dim">Price: ${escapeHtml(formatCurrency(item.price))}</div>` : ''}</td>
-        <td class="tds-num">${item.current === null ? '—' : formatNumber(item.current)}</td>
-        <td class="tds-num">${sold24 === null ? '—' : formatNumber(sold24)}</td>
-        <td class="tds-num">${sold7 === null ? '—' : formatNumber(sold7)}</td>
-        <td class="tds-num">${rec ? formatNumber(rec.target) : '—'}</td>
-        <td class="tds-num"><strong>${restockText}</strong></td>
+        <td><strong>${escapeHtml(item.name)}</strong>${item.soldTotal !== null ? `<div class="tds-v-dim">Lifetime sold: ${formatNumber(item.soldTotal)}</div>` : ''}</td>
+        <td>${item.costEach === null ? '—' : formatCurrency(item.costEach)}</td>
+        <td>${item.rrp === null ? '—' : formatCurrency(item.rrp)}</td>
+        <td><strong>${item.setPrice === null ? '—' : formatCurrency(item.setPrice)}</strong></td>
+        <td>${lastPriceHtml}</td>
+        <td>${item.current === null ? '—' : formatNumber(item.current)}</td>
+        <td>${soldDaily === null ? '—' : formatNumber(Math.round(soldDaily))}</td>
+        <td>${sold24 === null ? '—' : formatNumber(Math.round(sold24))}</td>
+        <td>${sold7 === null ? '—' : formatNumber(Math.round(sold7))}</td>
+        <td>${daysLeft === null ? '—' : `${daysLeft.toFixed(1)}d`}</td>
+        <td>${margin === null ? '—' : `${formatCurrency(margin)}${marginPct !== null ? `<div class="tds-v-dim">${marginPct.toFixed(0)}%</div>` : ''}`}</td>
+        <td>${estDailyGross === null ? '—' : formatCurrency(estDailyGross)}</td>
+        <td>${rec ? formatNumber(rec.target) : '—'}</td>
+        <td><strong>${restockText}</strong></td>
+        <td class="${priceRec.className}">
+          <strong>${escapeHtml(priceRec.action)}</strong>
+          <div class="tds-v-dim" style="max-width:240px;white-space:normal;">${escapeHtml(priceRec.reason)}</div>
+        </td>
+        <td class="${priceRec.className}"><strong>${priceRec.suggested === null ? '—' : formatCurrency(priceRec.suggested)}</strong></td>
       </tr>`;
     }
-    html += `</tbody></table></div><div style="margin-top:10px;"><button class="tds-btn-ghost" id="tds-stock-refresh">Refresh sales</button></div>`;
+
+    html += `</tbody></table></div>
+      <div class="tds-box tds-box-neutral" style="margin-top:10px;">
+        <strong>Pricing recommendation rules:</strong> recent 24h sales are compared with the 7-day daily average, stock cover is considered, RRP is used when Torn supplies it, and an observed Last Sold Price is used when it can be parsed reliably.
+        A recommendation only moves one dollar from the configured price so the tool stays conservative.
+      </div>
+      <div style="margin-top:10px;">
+        <button class="tds-btn-ghost" id="tds-stock-refresh">Refresh sales</button>
+      </div>`;
+
     el.innerHTML = html;
-    el.querySelector('#tds-stock-refresh')?.addEventListener('click', () => renderStockTab(panel, { refresh: true }));
+    el.querySelector('#tds-stock-refresh')?.addEventListener('click', () =>
+      renderStockTab(panel, { refresh: true })
+    );
   }
+
 
   // =======================================================================
   // OPTIMIZE TAB — position requirement fit, not a fabricated EE formula
@@ -2403,51 +2747,286 @@
     el.innerHTML = html;
   }
 
+  // -----------------------------------------------------------------------
+  // TRAINING / ROTATIONAL DEBT HELPERS
+  // -----------------------------------------------------------------------
+  function normalizePersonName(value) {
+    return String(value || '')
+      .toLowerCase()
+      .replace(/<[^>]*>/g, '')
+      .replace(/[^a-z0-9]+/g, ' ')
+      .trim()
+      .replace(/\s+/g, ' ');
+  }
+
+  function parseTrainingEvent(entry, employees) {
+    if (!entry) return null;
+
+    const raw = entry.raw || {};
+    const text = String(entry.text || '');
+    if (!/\btrain(?:ed|ing|s)?\b/i.test(text)) return null;
+
+    // Structured recipient fields are preferred. Avoid a plain `user_id`
+    // first because some log shapes use it for the director/trainer.
+    const structuredId = pickNumeric(raw, [
+      'employee_id', 'target_id', 'recipient_id', 'trained_id',
+      'employee', 'target', 'recipient'
+    ]);
+
+    const structuredName = pickText(raw, [
+      'employee_name', 'target_name', 'recipient_name', 'trained_name',
+      'employee', 'target', 'recipient'
+    ]);
+
+    let employee = null;
+
+    if (structuredId !== null) {
+      employee = employees.find((e) => String(e.id) === String(structuredId)) || null;
+    }
+
+    if (!employee && structuredName) {
+      const wanted = normalizePersonName(structuredName);
+      employee = employees.find((e) => normalizePersonName(e.name) === wanted) || null;
+    }
+
+    // Most Torn company-news/log messages include the recipient's visible
+    // name. Match longest names first so one employee's name does not become
+    // a substring match inside another employee's name.
+    if (!employee) {
+      const normalizedText = normalizePersonName(text);
+      const byLength = [...employees].sort((a, b) => String(b.name).length - String(a.name).length);
+      employee = byLength.find((e) => {
+        const n = normalizePersonName(e.name);
+        return n && (` ${normalizedText} `).includes(` ${n} `);
+      }) || null;
+    }
+
+    if (!employee) return null;
+
+    let quantity = pickNumeric(raw, [
+      'quantity', 'qty', 'count', 'trains', 'train_count', 'amount'
+    ]);
+
+    if (quantity === null) {
+      const patterns = [
+        /(\d[\d,]*)\s+trains?\b/i,
+        /\btrains?\s*[x×:]?\s*(\d[\d,]*)\b/i,
+        /\btrained\b.*?\b(\d[\d,]*)\s+times?\b/i,
+      ];
+      for (const pattern of patterns) {
+        const m = text.match(pattern);
+        if (!m) continue;
+        quantity = Number(String(m[1]).replace(/,/g, ''));
+        break;
+      }
+    }
+
+    // A normal Torn "trained employee" event represents one train unless an
+    // explicit quantity is present.
+    if (quantity === null) quantity = 1;
+    if (!Number.isFinite(quantity) || quantity <= 0) return null;
+
+    return {
+      eventId: String(entry.id || ''),
+      timestamp: Number(entry.timestamp),
+      employeeId: String(employee.id),
+      employeeName: employee.name,
+      quantity,
+      text,
+    };
+  }
+
+  function collectTrainingEvents(raw, employees) {
+    const sourceEntries = flattenNewsEntries(raw);
+    const events = [];
+    const seen = new Set();
+
+    for (const entry of sourceEntries) {
+      const parsed = parseTrainingEvent(entry, employees);
+      if (!parsed) continue;
+
+      const key = parsed.eventId
+        ? `id:${parsed.eventId}`
+        : `${parsed.timestamp}|${parsed.employeeId}|${parsed.quantity}`;
+
+      if (seen.has(key)) continue;
+      seen.add(key);
+      events.push(parsed);
+    }
+
+    events.sort((a, b) => b.timestamp - a.timestamp);
+    return { sourceEntries, events };
+  }
+
+  function mergeTrainingEventSources(primary, secondary) {
+    const rows = [...(primary || []), ...(secondary || [])]
+      .sort((a, b) => b.timestamp - a.timestamp);
+
+    const merged = [];
+    for (const event of rows) {
+      // The same train can appear in both company/news and user/log with
+      // different event IDs. Treat matching employee/quantity within a
+      // two-second window as the same action.
+      const duplicate = merged.some((existing) =>
+        existing.employeeId === event.employeeId &&
+        existing.quantity === event.quantity &&
+        Math.abs(existing.timestamp - event.timestamp) <= 2
+      );
+      if (!duplicate) merged.push(event);
+    }
+    return merged;
+  }
+
+  function formatTrainingCoverage(timestamp) {
+    if (!timestamp) return 'Unknown';
+    const ms = Number(timestamp) * 1000;
+    const days = Math.max(0, Math.floor((Date.now() - ms) / 86400000));
+    if (days < 1) return 'Less than 1 day';
+    return `${formatNumber(days)} day${days === 1 ? '' : 's'}`;
+  }
+
+  function calculateRotationalDebt(employees, events, coverageStart) {
+    const now = Math.floor(Date.now() / 1000);
+    const THREE_DAYS = 3 * 86400;
+
+    const actualByEmployee = new Map();
+    const lastTrainByEmployee = new Map();
+    const trains7ByEmployee = new Map();
+    const trains30ByEmployee = new Map();
+    const sevenAgo = now - 7 * 86400;
+    const thirtyAgo = now - 30 * 86400;
+
+    for (const event of events) {
+      const id = String(event.employeeId);
+      actualByEmployee.set(id, (actualByEmployee.get(id) || 0) + event.quantity);
+
+      const prev = lastTrainByEmployee.get(id);
+      if (!prev || event.timestamp > prev) lastTrainByEmployee.set(id, event.timestamp);
+
+      if (event.timestamp >= sevenAgo) {
+        trains7ByEmployee.set(id, (trains7ByEmployee.get(id) || 0) + event.quantity);
+      }
+      if (event.timestamp >= thirtyAgo) {
+        trains30ByEmployee.set(id, (trains30ByEmployee.get(id) || 0) + event.quantity);
+      }
+    }
+
+    const rows = employees.map((employee) => {
+      const days = numericValue(employee.raw?.days_in_company) ?? 0;
+      const joinedAt = now - Math.max(0, days) * 86400;
+      const eligibleAt = joinedAt + THREE_DAYS;
+      const fairStart = Math.max(coverageStart || now, eligibleAt);
+      const eligibleSeconds = Math.max(0, now - fairStart);
+      const eligibleWeight = eligibleSeconds / 86400;
+
+      return {
+        employee,
+        eligibleWeight,
+        actual: actualByEmployee.get(String(employee.id)) || 0,
+        lastTrain: lastTrainByEmployee.get(String(employee.id)) || null,
+        trains7: trains7ByEmployee.get(String(employee.id)) || 0,
+        trains30: trains30ByEmployee.get(String(employee.id)) || 0,
+      };
+    });
+
+    const totalObserved = rows.reduce((sum, row) => sum + row.actual, 0);
+    const totalWeight = rows.reduce((sum, row) => sum + row.eligibleWeight, 0);
+
+    for (const row of rows) {
+      row.expected = totalWeight > 0
+        ? totalObserved * (row.eligibleWeight / totalWeight)
+        : 0;
+      row.debt = row.expected - row.actual;
+    }
+
+    rows.sort((a, b) =>
+      b.debt - a.debt ||
+      (a.lastTrain || 0) - (b.lastTrain || 0) ||
+      String(a.employee.name).localeCompare(String(b.employee.name))
+    );
+
+    return { rows, totalObserved, totalWeight };
+  }
+
+  async function fetchTrainingHistorySources(results) {
+    const diagnosticNews = findRaw(results, 'company', 'news');
+    const diagnosticLog = findRaw(results, 'user', 'log');
+
+    let newsRaw = diagnosticNews;
+    let logRaw = diagnosticLog;
+    let newsError = null;
+    let logError = null;
+
+    if (!newsRaw) {
+      try {
+        // Reuse the already rate-limited/cached company news helper. It asks
+        // Torn for a recent history window and gracefully falls back when
+        // from/to are not accepted by a particular API shape.
+        newsRaw = await fetchCompanyNewsForStock();
+      } catch (err) {
+        newsError = err;
+      }
+    }
+
+    // `user/log` remains a fallback/second source because directors' personal
+    // logs can contain the same training actions. Do not make an extra request
+    // here if Diagnostics did not already return it.
+    if (!logRaw) {
+      logError = findBlockedReason(results, 'user', 'log');
+    }
+
+    return { newsRaw, logRaw, newsError, logError };
+  }
+
   // =======================================================================
   // TRAINING TAB
   // =======================================================================
-  function renderTrainingTab(panel) {
+  async function renderTrainingTab(panel) {
     const el = panel.querySelector('[data-tabpanel="training"]');
     const results = state.lastResults;
     if (!results) {
-      el.innerHTML = `<div class="tds-box tds-box-neutral">Run the diagnostic first \u2014 Training reads the employee roster and, where accessible, your event log.</div>`;
+      el.innerHTML = `<div class="tds-box tds-box-neutral">Run Diagnostics first — Training reads the employee roster and training-history sources.</div>`;
       return;
     }
 
     const employeesRaw = findRaw(results, 'company', 'employees');
     const employees = extractEmployeesEntries(employeesRaw);
     const profile = findRaw(results, 'company', 'profile');
-    const logRaw = findRaw(results, 'user', 'log');
-    const logBlockedReason = findBlockedReason(results, 'user', 'log');
     const mode = state.trainingMode || 'priority';
 
-    let html = '';
-    html += `
+    let html = `
       <div class="tds-segmented">
         <div class="tds-segment ${mode === 'priority' ? 'tds-segment-active' : ''}" data-trainmode="priority">PRIORITY</div>
         <div class="tds-segment ${mode === 'rotational' ? 'tds-segment-active' : ''}" data-trainmode="rotational">ROTATIONAL / DEBT</div>
       </div>`;
 
     if (employees.length === 0) {
-      html += `<div class="tds-box tds-box-danger">Employee roster unavailable, so there\u2019s nothing to build a queue from.</div>`;
+      html += `<div class="tds-box tds-box-danger">Employee roster unavailable, so there’s nothing to build a training queue from.</div>`;
       el.innerHTML = html;
       return;
     }
 
-    const ratingField = profile && Object.entries(profile).find(([k, v]) => typeof v === 'number' && /rating/i.test(k));
-    html += `<div class="tds-box tds-box-neutral">Daily train budget is commonly understood to equal your company\u2019s star rating${ratingField ? ` (rating: ${ratingField[1]}\u2605, so \u2248${ratingField[1]}/day)` : ''}, with unused trains banking up to a cap \u2014 this is a <strong>community-documented mechanic, not an official Torn publication</strong>, so treat the exact cap as ESTIMATED.</div>`;
+    const ratingValue = numericValue(findValueDeep(profile, ['rating', 'star_rating', 'stars']));
+    html += `<div class="tds-box tds-box-neutral">
+      ${ratingValue !== null ? `Current company rating: <strong>${escapeHtml(String(ratingValue))}★</strong>. ` : ''}
+      Rotational debt below is based on <strong>observed trains actually given</strong>, not an assumed star-rating budget. This keeps the queue fair if ratings, staffing, saved trains or training-role bonuses changed during the period.
+    </div>`;
 
     if (mode === 'priority') {
-      html += `<div class="tds-box tds-box-info">Sorted by <strong>current effectiveness, lowest first</strong> \u2014 a defensible proxy for \u201cneeds training most,\u201d used because Torn does not publish the exact EE numbers that mark each tier boundary. I won\u2019t invent \u201cN trains to next tier\u201d numbers without a verified threshold table. If you have one you trust (e.g. from the reference tool), share it and I\u2019ll wire in the real \u201ctrains to next tier\u201d calculation.</div>`;
+      html += `<div class="tds-box tds-box-info">
+        Sorted by <strong>current effectiveness, lowest first</strong>. This mode answers “who currently needs EE help most?”; Rotational / Debt answers “who has received less than their fair share of actual trains?”
+      </div>`;
+
       const withEE = employees.map((e) => ({ ...e, ee: findEffectivenessField(e.raw) }));
       withEE.sort((a, b) => (a.ee?.value ?? Infinity) - (b.ee?.value ?? Infinity));
+
       html += '<div class="tds-section-label">Priority queue</div><div class="tds-card">';
       withEE.forEach((e, i) => {
         html += `
           <div class="tds-employee-row">
             <div class="tds-employee-top">
               <div>
-                <div class="tds-employee-name">${i === 0 ? '\u25b6 ' : ''}${escapeHtml(String(e.name))}</div>
+                <div class="tds-employee-name">${i === 0 ? '▶ ' : ''}${escapeHtml(String(e.name))}</div>
                 <div class="tds-employee-meta">${escapeHtml(String(e.position))}</div>
               </div>
               <div class="tds-row-value">${e.ee ? e.ee.value : '<span class="tds-v-dim">no EE field</span>'}</div>
@@ -2456,25 +3035,173 @@
       });
       html += '</div>';
     } else {
-      html += `<div class="tds-section-label">Training log access</div>`;
-      if (logRaw) {
-        const sampleCount = Array.isArray(logRaw) ? logRaw.length : (logRaw.log ? Object.keys(logRaw.log).length : Object.keys(logRaw).length);
-        html += `<div class="tds-box tds-box-info"><strong>Log selection is accessible</strong> \u2014 fields returned: ${Object.keys(logRaw).join(', ')}${sampleCount ? `, ~${sampleCount} entries in this response` : ''}. This is <em>your own</em> event log, not the whole company\u2019s. The specific log type ID for \u201ctrained an employee\u201d still needs to be identified from real entries before debt numbers can be trusted \u2014 not implemented yet rather than guessed.</div>`;
-      } else {
-        html += `<div class="tds-box tds-box-danger"><strong>Log not accessible with this key.</strong> ${logBlockedReason || 'Blocked.'} Rotational/debt mode needs each trainer\u2019s own log to count real training events \u2014 without it, any \u201cowed training\u201d number would be fabricated, so this stays empty rather than showing something misleading.</div>`;
-      }
-      html += `<div class="tds-box tds-box-neutral">Once log access + the training log-type ID are confirmed, this view becomes: expected trainings since joining (from <code>days_in_company</code>, EXACT) minus actual trainings received (from the log, EXACT, deduplicated by log ID) = training debt per employee, sorted highest-debt-first. The full algorithm is already designed \u2014 it\u2019s wired up as soon as the data source is verified live.</div>`;
+      html += `<div class="tds-box tds-box-neutral" id="tds-training-loading">
+        Reading Torn training history and calculating fair-share debt…
+      </div>`;
+      el.innerHTML = html;
+      bindTrainingModeButtons(panel);
+      await renderRotationalDebt(panel, employees, results);
+      return;
     }
 
     el.innerHTML = html;
+    bindTrainingModeButtons(panel);
+  }
+
+  function bindTrainingModeButtons(panel) {
+    const el = panel.querySelector('[data-tabpanel="training"]');
+    if (!el) return;
 
     el.querySelectorAll('[data-trainmode]').forEach((seg) => {
       seg.addEventListener('click', () => {
         state.trainingMode = seg.dataset.trainmode;
-        renderTrainingTab(panel);
+        el.querySelectorAll('[data-trainmode]').forEach((button) => {
+          button.classList.toggle('tds-segment-active', button === seg);
+        });
+        renderTrainingTab(panel).catch((err) => {
+          console.error('[TDS] Training tab render failed:', err);
+        });
       });
     });
   }
+
+  async function renderRotationalDebt(panel, employees, results) {
+    const el = panel.querySelector('[data-tabpanel="training"]');
+    if (!el || state.trainingMode !== 'rotational') return;
+
+    let sources;
+    try {
+      sources = await fetchTrainingHistorySources(results);
+    } catch (err) {
+      el.innerHTML += `<div class="tds-box tds-box-danger"><strong>Training history failed:</strong> ${escapeHtml(String(err.reason || err.message || err))}</div>`;
+      return;
+    }
+
+    const newsParsed = collectTrainingEvents(sources.newsRaw, employees);
+    const logParsed = collectTrainingEvents(sources.logRaw, employees);
+
+    // Prefer the union but deduplicate mirrored news/log records.
+    const events = mergeTrainingEventSources(newsParsed.events, logParsed.events);
+
+    const allSourceEntries = [
+      ...newsParsed.sourceEntries,
+      ...logParsed.sourceEntries,
+    ];
+    const coverageStart = allSourceEntries.length
+      ? Math.min(...allSourceEntries.map((entry) => Number(entry.timestamp)).filter(Number.isFinite))
+      : null;
+
+    const loading = el.querySelector('#tds-training-loading');
+    if (loading) loading.remove();
+
+    if (!events.length) {
+      let detail = '';
+      if (newsParsed.sourceEntries.length || logParsed.sourceEntries.length) {
+        detail = `Torn history was readable (${formatNumber(newsParsed.sourceEntries.length + logParsed.sourceEntries.length)} entries inspected), but no employee-training events were recognised.`;
+      } else {
+        detail = 'No readable company-news or user-log history was returned.';
+      }
+
+      el.insertAdjacentHTML('beforeend', `
+        <div class="tds-box tds-box-warn">
+          <strong>No training events matched yet.</strong> ${escapeHtml(detail)}
+          The parser deliberately refuses to invent train counts. If you have recently trained an employee, send me the Training tab after that action and we can map Torn’s exact live event wording/fields.
+        </div>
+        <div class="tds-card">
+          <div class="tds-row"><span class="tds-row-label">Company-news entries inspected</span><span class="tds-row-value">${formatNumber(newsParsed.sourceEntries.length)}</span></div>
+          <div class="tds-row"><span class="tds-row-label">User-log entries inspected</span><span class="tds-row-value">${formatNumber(logParsed.sourceEntries.length)}</span></div>
+        </div>
+      `);
+      return;
+    }
+
+    const debt = calculateRotationalDebt(employees, events, coverageStart);
+    const next = debt.rows.find((row) => row.eligibleWeight > 0) || null;
+
+    let html = `
+      <div class="tds-box tds-box-info">
+        <strong>Rotational / Debt is live.</strong>
+        It found <strong>${formatNumber(events.reduce((sum, event) => sum + event.quantity, 0))}</strong> train(s) across
+        ${formatTrainingCoverage(coverageStart)} of returned history.
+        Fair share is weighted by how long each current employee was eligible during that same history window.
+      </div>`;
+
+    if (next) {
+      html += `
+        <div class="tds-box ${next.debt > 0.05 ? 'tds-box-warn' : 'tds-box-info'}">
+          <strong>Train next:</strong> ${escapeHtml(String(next.employee.name))}
+          ${next.debt > 0.05 ? ` — approximately <strong>${next.debt.toFixed(2)}</strong> train(s) behind their fair share.` : ' — the rotation is currently close to balanced.'}
+        </div>`;
+    }
+
+    html += `
+      <div class="tds-card">
+        <div class="tds-row"><span class="tds-row-label">Training events recognised</span><span class="tds-row-value">${formatNumber(events.length)}</span></div>
+        <div class="tds-row"><span class="tds-row-label">Trains represented</span><span class="tds-row-value">${formatNumber(debt.totalObserved)}</span></div>
+        <div class="tds-row"><span class="tds-row-label">History coverage</span><span class="tds-row-value">${escapeHtml(formatTrainingCoverage(coverageStart))}</span></div>
+        <div class="tds-row"><span class="tds-row-label">Company-news entries inspected</span><span class="tds-row-value">${formatNumber(newsParsed.sourceEntries.length)}</span></div>
+        <div class="tds-row"><span class="tds-row-label">User-log entries inspected</span><span class="tds-row-value">${formatNumber(logParsed.sourceEntries.length)}</span></div>
+      </div>
+
+      <div class="tds-section-label">Rotational queue</div>
+      <div style="overflow-x:auto;">
+        <table class="tds-table tds-training-debt-table">
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>Employee</th>
+              <th>Position</th>
+              <th>Eligible Days*</th>
+              <th>Received</th>
+              <th>Fair Share</th>
+              <th>Debt</th>
+              <th>Last 7d</th>
+              <th>Last 30d</th>
+              <th>Last Train</th>
+            </tr>
+          </thead>
+          <tbody>`;
+
+    debt.rows.forEach((row, index) => {
+      const debtClass = row.debt > 0.05
+        ? 'tds-v-bad'
+        : row.debt < -0.05
+          ? 'tds-v-good'
+          : '';
+
+      const debtText = `${row.debt > 0 ? '+' : ''}${row.debt.toFixed(2)}`;
+      const lastTrain = row.lastTrain ? formatTimestampRelative(row.lastTrain) : 'None in history';
+
+      html += `
+        <tr>
+          <td>${index + 1}</td>
+          <td><strong>${index === 0 ? '▶ ' : ''}${escapeHtml(String(row.employee.name))}</strong></td>
+          <td>${escapeHtml(String(row.employee.position || '—'))}</td>
+          <td>${row.eligibleWeight.toFixed(1)}</td>
+          <td>${formatNumber(row.actual)}</td>
+          <td>${row.expected.toFixed(2)}</td>
+          <td class="${debtClass}"><strong>${debtText}</strong></td>
+          <td>${formatNumber(row.trains7)}</td>
+          <td>${formatNumber(row.trains30)}</td>
+          <td>${escapeHtml(lastTrain)}</td>
+        </tr>`;
+    });
+
+    html += `
+          </tbody>
+        </table>
+      </div>
+
+      <div class="tds-box tds-box-neutral" style="margin-top:10px;">
+        <strong>How debt is calculated:</strong> actual trains observed in Torn history are distributed as a fair-share target across current employees, weighted by eligible time in the same returned history window. Employees are treated as training-eligible after their first 3 days. <strong>Debt = Fair Share − Received.</strong>
+        Positive/red means owed trains; negative/green means ahead of the rotation.
+        <br><br>
+        *Eligible Days is limited to the history Torn actually returned — this is not presented as an all-time figure unless the returned history genuinely covers the employee’s full tenure.
+      </div>`;
+
+    el.insertAdjacentHTML('beforeend', html);
+  }
+
 
   // =======================================================================
   // COMPARE TAB
@@ -2604,7 +3331,7 @@
 
     let html = `
       <div class="tds-box tds-box-neutral">
-        Compare uses Torn API v2's dedicated <code>/company/{typeId}/companies</code> endpoint.
+        Compare is temporarily using the <strong>v1.2.6 PDA-known-good</strong> <code>/company/{typeId}/companies</code> implementation.
         It automatically detects your company type and compares you only with companies of that same type.
         This is public/global-cached company data and does not require you to be the director.
       </div>
@@ -2879,7 +3606,7 @@
       renderDiagnosticsTab(panel, results);
       await renderFinanceTab(panel);
       await renderStockTab(panel);
-      renderTrainingTab(panel);
+      renderTrainingTab(panel).catch((err) => console.error('[TDS] Training render failed:', err));
       renderBenchmarkTab(panel);
       renderOptimizeTab(panel);
       startFooterTicker(panel);
@@ -2930,7 +3657,7 @@
       renderDiagnosticsTab(panel, results);
       await renderFinanceTab(panel);
       await renderStockTab(panel);
-      renderTrainingTab(panel);
+      renderTrainingTab(panel).catch((err) => console.error('[TDS] Training render failed:', err));
       renderBenchmarkTab(panel);
       renderOptimizeTab(panel);
       startFooterTicker(panel);
