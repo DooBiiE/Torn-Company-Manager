@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Company Management Suite
 // @namespace    torn-company-management-suite
-// @version      1.3.36
+// @version      1.3.39
 // @description  Local-only company management dashboard for Torn directors, embedded in the Jobs page. No company data ever leaves your browser; only your Torn User ID is checked against a public license list.
 // @author       DooBiiE
 // @match        https://www.torn.com/*
@@ -67,7 +67,7 @@
   // TornPDA does not always expose the legacy GM_info object that desktop
   // userscript managers provide. Try both common metadata APIs, then use the
   // release version as a PDA-safe fallback so the UI never shows vunknown.
-  const TDS_VERSION_FALLBACK = '1.3.36';
+  const TDS_VERSION_FALLBACK = '1.3.39';
   const TDS_VERSION =
     (typeof GM_info !== 'undefined' && GM_info?.script?.version) ||
     (typeof GM !== 'undefined' && GM?.info?.script?.version) ||
@@ -76,6 +76,10 @@
   const STORAGE_KEY_LAST_RUN_AT = 'tds_last_run_at';
   const STORAGE_KEY_THEME = 'tds_theme';
   const STORAGE_KEY_LICENSE_CACHE = 'tds_license_cache';
+  const STORAGE_KEY_HISTORY_BACKFILL_DAY = 'tds_history_backfill_day';
+  const STORAGE_KEY_HISTORY_BACKFILL_RESULT = 'tds_history_backfill_result';
+  const STORAGE_KEY_LAST_RESULTS = 'tds_last_results_cache';
+  const STORAGE_KEY_LAST_VERDICT = 'tds_last_verdict_cache';
   const MIN_CALL_INTERVAL_MS = 800; // ~75 req/min ceiling, well under Torn's 100/min cap
   const DB_NAME = 'torn_director_system';
   const DB_VERSION = 2;
@@ -834,6 +838,70 @@
       .tds-history-low {
         font-weight: 700;
         box-shadow: inset 0 0 0 1px rgba(230,90,90,0.35);
+      }
+      .tds-income-chart {
+        display: flex;
+        align-items: flex-end;
+        gap: 10px;
+        min-height: 190px;
+        padding: 16px 12px 10px;
+        overflow-x: auto;
+        border: 1px solid var(--tds-border, #444);
+        border-radius: 6px;
+        background: rgba(255,255,255,0.02);
+      }
+      .tds-income-chart-item {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: flex-end;
+        min-width: 82px;
+        height: 160px;
+      }
+      .tds-income-chart-value {
+        font-size: 10px;
+        font-weight: 700;
+        margin-bottom: 4px;
+        text-align: center;
+        white-space: nowrap;
+      }
+      .tds-income-chart-bar-wrap {
+        height: 110px;
+        width: 34px;
+        display: flex;
+        align-items: flex-end;
+        justify-content: center;
+      }
+      .tds-income-chart-bar {
+        width: 28px;
+        min-height: 6px;
+        border-radius: 4px 4px 0 0;
+        background: currentColor;
+        opacity: .8;
+      }
+      .tds-income-chart-date {
+        margin-top: 5px;
+        font-size: 10px;
+        opacity: .72;
+        white-space: nowrap;
+      }
+      .tds-income-chart-source {
+        font-size: 9px;
+        opacity: .55;
+        white-space: nowrap;
+      }
+      .tds-history-progress {
+        margin-top: 8px;
+        height: 8px;
+        overflow: hidden;
+        border-radius: 999px;
+        background: rgba(255,255,255,0.08);
+      }
+      .tds-history-progress-bar {
+        height: 100%;
+        width: 0%;
+        background: currentColor;
+        transition: width .15s linear;
       }
       .tds-spark { display: flex; align-items: flex-end; gap: 4px; height: 46px; margin: 6px 0; }
       .tds-spark-col { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 3px; }
@@ -2631,21 +2699,51 @@
         const values = recentIncomeDays.map(
           (row) => row.observed.dailyIncome
         );
-        const maxAbs = Math.max(...values.map((value) => Math.abs(value)), 1);
+        const minValue = Math.min(...values);
+        const maxValue = Math.max(...values);
+        const range = Math.max(1, maxValue - minValue);
 
-        html += `<div class="tds-section-label">Last ${values.length} comparable days <span class="tds-v-dim" style="font-weight:400;">(Performance History)</span></div><div class="tds-card"><div class="tds-spark">`;
+        html += `<div class="tds-section-label">Last ${values.length} comparable days <span class="tds-v-dim" style="font-weight:400;">(Performance History)</span></div>`;
+
+        html += `<div class="tds-income-chart">`;
 
         recentIncomeDays.forEach((row) => {
           const value = row.observed.dailyIncome;
+
+          // Use a minimum visible height while scaling the rest of the bars
+          // across the recent range so close daily values remain readable.
+          const normalized =
+            maxValue === minValue
+              ? 0.75
+              : 0.20 + ((value - minValue) / range) * 0.80;
+
           const height = Math.max(
-            4,
-            Math.round((Math.abs(value) / maxAbs) * 38)
+            12,
+            Math.round(normalized * 105)
           );
 
-          html += `<div class="tds-spark-bar ${value >= 0 ? 'tds-spark-pos' : 'tds-spark-neg'}" style="height:${height}px" title="${escapeHtml(formatPerformanceDate(row.timestamp))}: ${escapeHtml(formatMoney(value))}"></div>`;
+          const cls =
+            value === maxValue && maxValue !== minValue
+              ? 'tds-v-good'
+              : value === minValue && maxValue !== minValue
+                ? 'tds-v-bad'
+                : '';
+
+          html += `<div class="tds-income-chart-item ${cls}">
+            <div class="tds-income-chart-value">${escapeHtml(formatMoney(value))}</div>
+            <div class="tds-income-chart-bar-wrap">
+              <div class="tds-income-chart-bar" style="height:${height}px;" title="${escapeHtml(formatPerformanceDate(row.timestamp))}: ${escapeHtml(formatMoney(value))}"></div>
+            </div>
+            <div class="tds-income-chart-date">${escapeHtml(formatPerformanceDate(row.timestamp))}</div>
+            <div class="tds-income-chart-source">${row.source === 'torn_snapshot' ? 'Torn Snapshot' : 'Local'}</div>
+          </div>`;
         });
 
-        html += '</div></div>';
+        html += `</div>
+          <div class="tds-box tds-box-neutral" style="margin-top:8px;">
+            <strong>Chart scale:</strong> bars are scaled across the visible recent range so small day-to-day differences remain readable.
+            Green marks the highest value in this window; red marks the lowest.
+          </div>`;
       }
     }
 
@@ -2807,6 +2905,10 @@
       <div style="margin-top:10px;">
         <button class="tds-btn-ghost" id="tds-history-backfill">Backfill available Torn history</button>
         <span id="tds-history-backfill-status" class="tds-v-dim" style="margin-left:8px;"></span>
+        <div class="tds-history-progress" id="tds-history-backfill-progress" hidden>
+          <div class="tds-history-progress-bar" id="tds-history-backfill-progress-bar"></div>
+        </div>
+        <div id="tds-history-backfill-detail" class="tds-v-dim" style="margin-top:5px;"></div>
       </div>`;
 
       const customerCorrelation = pearsonCorrelation(
@@ -2840,8 +2942,31 @@
 
     const backfillButton = el.querySelector('#tds-history-backfill');
     const backfillStatus = el.querySelector('#tds-history-backfill-status');
+    const backfillProgress = el.querySelector('#tds-history-backfill-progress');
+    const backfillProgressBar = el.querySelector('#tds-history-backfill-progress-bar');
+    const backfillDetail = el.querySelector('#tds-history-backfill-detail');
 
     if (backfillButton) {
+      const todayKey = isoDayKey(Date.now());
+      const lastBackfillDay = tdsGetValue(STORAGE_KEY_HISTORY_BACKFILL_DAY, '');
+      const lastBackfillResult = tdsGetValue(STORAGE_KEY_HISTORY_BACKFILL_RESULT, null);
+
+      if (lastBackfillDay === todayKey) {
+        backfillButton.disabled = true;
+        backfillButton.textContent = 'Backfill checked today';
+
+        if (backfillStatus) {
+          backfillStatus.textContent = 'Already checked today.';
+        }
+
+        if (backfillDetail && lastBackfillResult) {
+          backfillDetail.textContent =
+            `Last result: ${formatNumber(lastBackfillResult.saved || 0)} day(s) saved/updated · ` +
+            `${formatNumber(lastBackfillResult.unavailable || 0)} unavailable. ` +
+            `It will be available to check again tomorrow.`;
+        }
+      }
+
       backfillButton.addEventListener('click', async () => {
         const currentResults = state.lastResults;
         const own = extractOwnCompanyInfo(currentResults);
@@ -2852,33 +2977,87 @@
         }
 
         backfillButton.disabled = true;
+        backfillButton.textContent = 'Backfilling…';
+
+        if (backfillProgress) backfillProgress.hidden = false;
+        if (backfillProgressBar) backfillProgressBar.style.width = '0%';
+        if (backfillStatus) backfillStatus.textContent = 'Starting historical backfill…';
+        if (backfillDetail) {
+          backfillDetail.textContent =
+            'This performs read-only Torn API requests. No company actions are submitted.';
+        }
 
         try {
           const result = await backfillCompanyPerformanceHistory(
             own.id,
             (progress) => {
-              if (!backfillStatus) return;
-              backfillStatus.textContent =
-                `Fetching ${progress.complete}/${progress.total}${progress.day ? ` · ${progress.day}` : ''}…`;
+              const pct = progress.total
+                ? Math.min(100, Math.round((progress.complete / progress.total) * 100))
+                : 0;
+
+              if (backfillProgressBar) {
+                backfillProgressBar.style.width = `${pct}%`;
+              }
+
+              if (backfillStatus) {
+                backfillStatus.textContent =
+                  `Fetching ${progress.complete}/${progress.total}${progress.day ? ` · ${progress.day}` : ''}`;
+              }
+
+              if (backfillDetail) {
+                backfillDetail.textContent =
+                  `Progress: ${pct}% · Historical Snapshot data is saved locally as compact daily records.`;
+              }
             }
           );
 
-          if (backfillStatus) {
-            backfillStatus.textContent =
-              `Saved ${result.saved} historical day(s); ${result.unavailable} unavailable.`;
+          tdsSetValue(STORAGE_KEY_HISTORY_BACKFILL_DAY, isoDayKey(Date.now()));
+          tdsSetValue(STORAGE_KEY_HISTORY_BACKFILL_RESULT, {
+            saved: result.saved,
+            unavailable: result.unavailable,
+            requested: result.requested,
+            completedAt: Date.now(),
+          });
+
+          if (backfillProgressBar) {
+            backfillProgressBar.style.width = '100%';
           }
 
-          await renderFinanceTab(panel);
+          if (backfillStatus) {
+            backfillStatus.textContent = 'Backfill complete.';
+          }
+
+          if (backfillDetail) {
+            backfillDetail.textContent =
+              `${formatNumber(result.saved)} historical day(s) saved/updated · ` +
+              `${formatNumber(result.unavailable)} unavailable out of ${formatNumber(result.requested)} checked.`;
+          }
+
+          backfillButton.textContent = 'Backfill checked today';
+
+          // Give the user a moment to see the completion state, then refresh
+          // Company Financials so the new historical rows/chart appear.
+          setTimeout(() => {
+            renderFinanceTab(panel).catch((err) =>
+              console.warn('[TDS] Finance refresh after backfill failed:', err)
+            );
+          }, 900);
         } catch (err) {
           if (backfillStatus) {
-            backfillStatus.textContent =
-              `Backfill failed: ${String(err?.reason || err?.message || err)}`;
+            backfillStatus.textContent = 'Backfill failed.';
           }
-        } finally {
+
+          if (backfillDetail) {
+            backfillDetail.textContent =
+              String(err?.reason || err?.message || err);
+          }
+
           backfillButton.disabled = false;
+          backfillButton.textContent = 'Backfill available Torn history';
         }
       });
     }
+
   }
 
   // =======================================================================
@@ -6214,26 +6393,48 @@
 
   async function loadPersistedDiagnostic(panel) {
     try {
-      const latest = await LocalDB.getLatest('diagnostics');
-      if (!latest?.results?.length) return false;
+      let latest = null;
+      try {
+        latest = await LocalDB.getLatest('diagnostics');
+      } catch (err) {
+        console.warn('[TDS] IndexedDB diagnostic restore failed; trying fallback cache:', err);
+      }
 
-      const results = latest.results;
-      const verdict = classifyAccess(results);
+      let results = latest?.results;
+      let timestamp = Number(latest?.timestamp) || 0;
+
+      if (!Array.isArray(results) || !results.length) {
+        const cached = GM_getValue(STORAGE_KEY_LAST_RESULTS, null);
+        if (Array.isArray(cached) && cached.length) {
+          results = cached;
+          timestamp = Number(GM_getValue(STORAGE_KEY_LAST_RUN_AT, 0)) || Date.now();
+        }
+      }
+
+      if (!Array.isArray(results) || !results.length) return false;
+
+      const verdict = GM_getValue(STORAGE_KEY_LAST_VERDICT, null) || classifyAccess(results);
+
       state.lastResults = results;
       state.lastVerdict = verdict;
-      state.lastRunAt = Number(latest.timestamp) || Number(GM_getValue(STORAGE_KEY_LAST_RUN_AT, 0)) || null;
+      state.lastRunAt = timestamp || Number(GM_getValue(STORAGE_KEY_LAST_RUN_AT, 0)) || null;
 
       if (state.lastRunAt) GM_setValue(STORAGE_KEY_LAST_RUN_AT, state.lastRunAt);
 
       renderOverviewTab(panel, results, verdict);
       renderDiagnosticsTab(panel, results);
-      await renderFinanceTab(panel);
-      await renderStockTab(panel);
+
+      try { await renderFinanceTab(panel); } catch (err) { console.warn('[TDS] Finance restore failed:', err); }
+      try { await renderStockTab(panel); } catch (err) { console.warn('[TDS] Stock restore failed:', err); }
+
       renderTrainingTab(panel).catch((err) => console.error('[TDS] Training render failed:', err));
-      renderBenchmarkTab(panel);
-      renderOptimizeTab(panel);
+
+      try { renderBenchmarkTab(panel); } catch (err) { console.warn('[TDS] Compare restore failed:', err); }
+      try { renderOptimizeTab(panel); } catch (err) { console.warn('[TDS] Effectiveness restore failed:', err); }
+
       startFooterTicker(panel);
-      await checkLicense(panel);
+
+      checkLicense(panel).catch((err) => console.warn('[TDS] License restore check failed:', err));
       return true;
     } catch (err) {
       console.warn('[TDS] Could not load persisted diagnostics:', err);
@@ -6244,49 +6445,76 @@
   async function runFullDiagnostic(panel, { force = false } = {}) {
     if (state.diagnosticRunning) return;
 
-    if (force) {
-      GM_deleteValue(STORAGE_KEY_LAST_RUN_AT);
-      try {
-        // Remove only the diagnostic capability records. Historical snapshots
-        // remain intact so the Finance trend is not destroyed by a rerun.
-        await LocalDB.clear('diagnostics');
-      } catch (err) {
-        console.warn('[TDS] Could not clear previous diagnostic state:', err);
-      }
-    }
-
     const apiKey = GM_getValue(STORAGE_KEY_APIKEY, '');
     if (!apiKey) {
-      panel.querySelector('#tds-footer-status').textContent = 'Last run: Never';
+      const footer = panel.querySelector('#tds-footer-status');
+      if (footer) footer.textContent = 'Last run: Never';
       switchTab(panel, 'settings');
       return;
     }
 
     state.diagnosticRunning = true;
-    panel.querySelector('#tds-footer-status').textContent = 'Running diagnostic\u2026';
+    const footer = panel.querySelector('#tds-footer-status');
+    if (footer) footer.textContent = 'Running diagnostic…';
 
     try {
       const results = await runDiagnostic();
       const verdict = classifyAccess(results);
-      await takeSnapshotFromDiagnostic(results);
+      const completedAt = Date.now();
+
+      try {
+        await takeSnapshotFromDiagnostic(results);
+      } catch (err) {
+        console.warn('[TDS] Snapshot save failed, continuing with diagnostic data:', err);
+      }
+
+      try {
+        await LocalDB.put('diagnostics', {
+          timestamp: completedAt,
+          results,
+          verdict,
+        });
+      } catch (err) {
+        console.warn('[TDS] IndexedDB diagnostic save failed; fallback cache will be used:', err);
+      }
+
+      GM_setValue(STORAGE_KEY_LAST_RESULTS, results);
+      GM_setValue(STORAGE_KEY_LAST_VERDICT, verdict);
+      GM_setValue(STORAGE_KEY_LAST_RUN_AT, completedAt);
 
       state.lastResults = results;
       state.lastVerdict = verdict;
-      state.lastRunAt = Date.now();
+      state.lastRunAt = completedAt;
 
-      GM_setValue(STORAGE_KEY_LAST_RUN_AT, state.lastRunAt);
+      state.diagnosticRunning = false;
+      startFooterTicker(panel);
 
       renderOverviewTab(panel, results, verdict);
       renderDiagnosticsTab(panel, results);
-      await renderFinanceTab(panel);
-      await renderStockTab(panel);
+
+      try { await renderFinanceTab(panel); } catch (err) { console.error('[TDS] Finance render after diagnostic failed:', err); }
+      try { await renderStockTab(panel); } catch (err) { console.error('[TDS] Stock render after diagnostic failed:', err); }
+
       renderTrainingTab(panel).catch((err) => console.error('[TDS] Training render failed:', err));
-      renderBenchmarkTab(panel);
-      renderOptimizeTab(panel);
-      startFooterTicker(panel);
-      await checkLicense(panel, { force });
+
+      try { renderBenchmarkTab(panel); } catch (err) { console.error('[TDS] Compare render after diagnostic failed:', err); }
+      try { renderOptimizeTab(panel); } catch (err) { console.error('[TDS] Effectiveness render after diagnostic failed:', err); }
+
+      checkLicense(panel, { force }).catch((err) => console.warn('[TDS] License check after diagnostic failed:', err));
+    } catch (err) {
+      console.error('[TDS] Diagnostic failed:', err);
+
+      const restored = await loadPersistedDiagnostic(panel).catch(() => false);
+      if (!restored) {
+        state.lastRunAt = Number(GM_getValue(STORAGE_KEY_LAST_RUN_AT, 0)) || state.lastRunAt || null;
+        updateFooter(panel);
+      }
+
+      throw err;
     } finally {
       state.diagnosticRunning = false;
+      if (state.lastRunAt) startFooterTicker(panel);
+      else updateFooter(panel);
     }
   }
 
