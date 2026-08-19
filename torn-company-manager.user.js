@@ -3,7 +3,7 @@
 // @namespace    torn-company-management-suite
 // @version      1.1.7
 // @description  Local-only company management dashboard for Torn directors, embedded in the Jobs page. No company data ever leaves your browser; only your Torn User ID is checked against a public license list.
-// @author       DooBiiE
+// @author       you
 // @match        https://www.torn.com/*
 // @grant        GM_xmlhttpRequest
 // @grant        GM_setValue
@@ -752,8 +752,6 @@
         </ul>
       </div>
       <div class="tds-box tds-box-neutral">
-        Pick <strong>Limited Access</strong> for everything except training history, or <strong>Full
-        Access</strong> if you also want the Training tab's Rotational/debt mode.<br>
         Company financials/stock/applications only return real data if you're the company's director.
       </div>
       <div class="tds-box tds-box-neutral">
