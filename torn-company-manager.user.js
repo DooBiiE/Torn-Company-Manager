@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Company Management Suite
 // @namespace    torn-company-management-suite
-// @version      1.2.2
+// @version      1.2.3
 // @description  Local-only company management dashboard for Torn directors, embedded in the Jobs page. No company data ever leaves your browser; only your Torn User ID is checked against a public license list.
 // @author       DooBiiE
 // @match        https://www.torn.com/*
@@ -67,7 +67,7 @@
   // TornPDA does not always expose the legacy GM_info object that desktop
   // userscript managers provide. Try both common metadata APIs, then use the
   // release version as a PDA-safe fallback so the UI never shows vunknown.
-  const TDS_VERSION_FALLBACK = '1.2.2';
+  const TDS_VERSION_FALLBACK = '1.2.3';
   const TDS_VERSION =
     (typeof GM_info !== 'undefined' && GM_info?.script?.version) ||
     (typeof GM !== 'undefined' && GM?.info?.script?.version) ||
@@ -498,6 +498,12 @@
       .tds-optimize-table th,
       .tds-optimize-table td { text-align: center !important; vertical-align: middle; }
       .tds-optimize-table td.tds-num { text-align: center !important; }
+      .tds-optimize-table tbody tr td {
+        border-bottom: 1px solid var(--tds-border-strong, #4a4a4a);
+        padding-top: 8px;
+        padding-bottom: 8px;
+      }
+      .tds-optimize-table tbody tr:last-child td { border-bottom: none; }
       .tds-spark { display: flex; align-items: flex-end; gap: 4px; height: 46px; margin: 6px 0; }
       .tds-spark-col { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 3px; }
       .tds-spark-bar { width: 100%; border-radius: 2px 2px 0 0; min-height: 2px; }
@@ -680,7 +686,7 @@
         <button class="tds-tab" data-tab="stock">STOCK</button>
         <button class="tds-tab" data-tab="training">TRAINING</button>
         <button class="tds-tab" data-tab="benchmark">COMPARE</button>
-        <button class="tds-tab" data-tab="optimize">OPTIMIZE</button>
+        <button class="tds-tab" data-tab="optimize">EMPLOYEE EFFECTIVENESS</button>
         <button class="tds-tab" data-tab="settings">SETTINGS</button>
         <button class="tds-tab" data-tab="diagnostics">DIAGNOSTICS</button>
       </div>
@@ -2251,7 +2257,7 @@
     const typeId = numericValue(findValueDeep(profile, ['company_type', 'type_id', 'type']));
     const positions = extractPositionRequirements(reference, typeId);
 
-    let html = `<div class="tds-box tds-box-info"><strong>How Optimize works:</strong> Current EE is Torn's real employee effectiveness. For each available position, Optimize calculates the Working Stats component using Torn's published work-stat efficiency formula, then carries across the employee's current non-position EE adjustment (Total EE minus Working Stats). The resulting <strong>Estimated EE</strong> is a prediction for comparison, not a live Torn value.</div>`;
+    let html = `<div class="tds-box tds-box-info"><strong>How Employee Effectiveness works:</strong> Current EE is Torn's real employee effectiveness. For each available position, Optimize calculates the Working Stats component using Torn's published work-stat efficiency formula, then carries across the employee's current non-position EE adjustment (Total EE minus Working Stats). The resulting <strong>Estimated EE</strong> is a prediction for comparison, not a live Torn value.</div>`;
 
     if (!employees.length) {
       el.innerHTML = html + `<div class="tds-box tds-box-danger">No employee data is available.</div>`;
