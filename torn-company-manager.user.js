@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Company Management Suite
 // @namespace    torn-company-management-suite
-// @version      1.1.5
+// @version      1.1.6
 // @description  Local-only company management dashboard for Torn directors, embedded in the Jobs page. No company data ever leaves your browser; only your Torn User ID is checked against a public license list.
 // @author       you
 // @match        https://www.torn.com/*
@@ -1336,16 +1336,37 @@
       return;
     }
 
-    // Income-shaped fields can live on EITHER company/profile or
-    // company/detailed depending on your key's access level and how Torn
-    // has split that data — searching only one was the bug that made Gross
-    // show "unavailable" even when the field existed on the other response.
-    // Merging is safe: a field name collision would mean the same field
-    // appearing in both, not conflicting values.
+    // Torn refactored the company API in 2026. The current company/profile
+    // response can contain the former detailed data, and income fields are
+    // normally named daily_income / weekly_income. Search recursively so the
+    // Finance tab works with both legacy and wrapped response shapes.
     const combined = { ...(profile || {}), ...(detailed || {}) };
-    const incomeFields = Object.entries(combined).filter(([k, v]) => typeof v === 'number' && /profit|income/i.test(k));
-    const dailyField = incomeFields.find(([k]) => /daily/i.test(k));
-    const weeklyField = incomeFields.find(([k]) => /weekly/i.test(k));
+
+    function findNumericFieldDeep(obj, preferredNames, fallbackPattern) {
+      const preferred = new Set(preferredNames.map((name) => name.toLowerCase()));
+      const seen = new WeakSet();
+      let fallback = null;
+      function walk(value, path = '') {
+        if (!value || typeof value !== 'object' || seen.has(value)) return null;
+        seen.add(value);
+        for (const [key, child] of Object.entries(value)) {
+          const currentPath = path ? `${path}.${key}` : key;
+          if (typeof child === 'number' && Number.isFinite(child)) {
+            const lower = key.toLowerCase();
+            if (preferred.has(lower)) return { key, value: child, path: currentPath };
+            if (!fallback && fallbackPattern.test(key)) fallback = { key, value: child, path: currentPath };
+          } else if (child && typeof child === 'object') {
+            const found = walk(child, currentPath);
+            if (found && preferred.has(found.key.toLowerCase())) return found;
+          }
+        }
+        return null;
+      }
+      return walk(obj) || fallback;
+    }
+
+    const dailyField = findNumericFieldDeep(combined, ['daily_income', 'daily_profit'], /daily[_ ]?(income|profit)/i);
+    const weeklyField = findNumericFieldDeep(combined, ['weekly_income', 'weekly_profit'], /weekly[_ ]?(income|profit)/i);
 
     const employees = extractEmployeesEntries(employeesRaw);
     const wageFields = employees.map((e) => findWageField(e.raw)).filter(Boolean);
@@ -1361,20 +1382,20 @@
       }
     }
 
-    const todayGross = dailyField ? dailyField[1] : null;
+    const todayGross = dailyField ? dailyField.value : null;
     const todayNet = todayGross !== null && totalSalary !== null ? todayGross - totalSalary : null;
 
     // --- Today snapshot card ---
     html += '<div class="tds-section-label">Today</div><div class="tds-card">';
-    html += `<div class="tds-row"><span class="tds-row-label">Gross${dailyField ? ` (${dailyField[0]})` : ''}</span><span class="tds-row-value">${todayGross !== null ? formatMoney(todayGross) : '<span class="tds-v-dim">unavailable</span>'}</span></div>`;
+    html += `<div class="tds-row"><span class="tds-row-label">Gross${dailyField ? ` (${dailyField.path})` : ''}</span><span class="tds-row-value">${todayGross !== null ? formatMoney(todayGross) : '<span class="tds-v-dim">unavailable</span>'}</span></div>`;
     html += `<div class="tds-row"><span class="tds-row-label">Salaries${salaryFieldName ? ` (${salaryFieldName})` : ''}</span><span class="tds-row-value tds-v-bad">${totalSalary !== null ? '-' + formatMoney(totalSalary) : '<span class="tds-v-dim">no wage field in this key\u2019s response</span>'}</span></div>`;
     html += `<div class="tds-row"><span class="tds-row-label">Net (DERIVED)</span><span class="tds-row-value ${todayNet !== null ? (todayNet >= 0 ? 'tds-v-good' : 'tds-v-bad') : ''}">${todayNet !== null ? formatMoney(todayNet) : '<span class="tds-v-dim">needs gross + salary above</span>'}</span></div>`;
     if (weeklyField) {
-      html += `<div class="tds-row"><span class="tds-row-label">Weekly (${weeklyField[0]})</span><span class="tds-row-value">${formatMoney(weeklyField[1])}</span></div>`;
+      html += `<div class="tds-row"><span class="tds-row-label">Weekly (${weeklyField.path})</span><span class="tds-row-value">${formatMoney(weeklyField.value)}</span></div>`;
     }
     html += '</div>';
     if (todayGross === null) {
-      html += `<div class="tds-box tds-box-warn">No field on <em>company/profile</em> or <em>company/detailed</em> looked like a profit/income number. Fields actually present \u2014 profile: ${profile ? Object.keys(profile).join(', ') : (blockedProfile || 'blocked')}; detailed: ${detailed ? Object.keys(detailed).join(', ') : (blockedDetailed || 'blocked')}. If one of these is the real income field under a name I didn\u2019t recognize, tell me the name and I\u2019ll wire it in directly instead of guessing.</div>`;
+      html += `<div class="tds-box tds-box-warn">No numeric daily_income/daily_profit field was found in the company profile or detailed response. Fields actually present — profile: ${profile ? Object.keys(profile).join(', ') : (blockedProfile || 'blocked')}; detailed: ${detailed ? Object.keys(detailed).join(', ') : (blockedDetailed || 'blocked')}.</div>`;
     }
 
     // --- Company health, if company/detailed is accessible with this key ---
