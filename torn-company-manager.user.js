@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Company Management Suite
 // @namespace    torn-company-management-suite
-// @version      1.2.9
+// @version      1.3.0
 // @description  Local-only company management dashboard for Torn directors, embedded in the Jobs page. No company data ever leaves your browser; only your Torn User ID is checked against a public license list.
 // @author       DooBiiE
 // @match        https://www.torn.com/*
@@ -67,7 +67,7 @@
   // TornPDA does not always expose the legacy GM_info object that desktop
   // userscript managers provide. Try both common metadata APIs, then use the
   // release version as a PDA-safe fallback so the UI never shows vunknown.
-  const TDS_VERSION_FALLBACK = '1.2.9';
+  const TDS_VERSION_FALLBACK = '1.3.0';
   const TDS_VERSION =
     (typeof GM_info !== 'undefined' && GM_info?.script?.version) ||
     (typeof GM !== 'undefined' && GM?.info?.script?.version) ||
@@ -3017,6 +3017,11 @@
     return income / customers;
   }
 
+  function compareValueClass(value, baseline) {
+    if (typeof value !== 'number' || typeof baseline !== 'number') return '';
+    return value >= baseline ? 'tds-v-good' : 'tds-v-bad';
+  }
+
   async function renderBenchmarkResults(panel, data, own, tier) {
     const el = panel.querySelector('[data-tabpanel="benchmark"] #tds-bench-results');
     if (!el) return;
@@ -3187,6 +3192,85 @@
 
     html += `</div>`;
 
+    if (ownRow) {
+      html += `<div class="tds-section-label">Your company</div><div class="tds-card">`;
+
+      if (ownWeeklyIncome !== null) {
+        html += `<div class="tds-row"><span class="tds-row-label">Weekly income</span><span class="tds-row-value ${compareValueClass(ownWeeklyIncome, avgWeeklyIncome)}">${formatMoney(ownWeeklyIncome)}</span></div>`;
+        html += `<div class="tds-row"><span class="tds-row-label">vs weekly average</span><span class="tds-row-value ${compareValueClass(ownWeeklyIncome, avgWeeklyIncome)}">${formatSignedPercent(percentageDifference(ownWeeklyIncome, avgWeeklyIncome))}</span></div>`;
+        html += `<div class="tds-row"><span class="tds-row-label">vs weekly median</span><span class="tds-row-value ${compareValueClass(ownWeeklyIncome, medianWeeklyIncome)}">${formatSignedPercent(percentageDifference(ownWeeklyIncome, medianWeeklyIncome))}</span></div>`;
+      }
+
+      if (ownDailyIncome !== null) {
+        html += `<div class="tds-row"><span class="tds-row-label">Daily income</span><span class="tds-row-value ${compareValueClass(ownDailyIncome, avgDailyIncome)}">${formatMoney(ownDailyIncome)}</span></div>`;
+        html += `<div class="tds-row"><span class="tds-row-label">vs daily average</span><span class="tds-row-value ${compareValueClass(ownDailyIncome, avgDailyIncome)}">${formatSignedPercent(percentageDifference(ownDailyIncome, avgDailyIncome))}</span></div>`;
+      }
+
+      if (ownWeeklyCustomers !== null) {
+        html += `<div class="tds-row"><span class="tds-row-label">Weekly customers</span><span class="tds-row-value ${compareValueClass(ownWeeklyCustomers, avgWeeklyCustomers)}">${formatNumber(ownWeeklyCustomers)}</span></div>`;
+        html += `<div class="tds-row"><span class="tds-row-label">vs weekly-customer average</span><span class="tds-row-value ${compareValueClass(ownWeeklyCustomers, avgWeeklyCustomers)}">${formatSignedPercent(percentageDifference(ownWeeklyCustomers, avgWeeklyCustomers))}</span></div>`;
+      }
+
+      if (ownDailyCustomers !== null) {
+        html += `<div class="tds-row"><span class="tds-row-label">Daily customers</span><span class="tds-row-value ${compareValueClass(ownDailyCustomers, avgDailyCustomers)}">${formatNumber(ownDailyCustomers)}</span></div>`;
+      }
+
+      if (ownWeeklyRpc !== null) {
+        html += `<div class="tds-row"><span class="tds-row-label">Weekly revenue / customer</span><span class="tds-row-value ${compareValueClass(ownWeeklyRpc, avgWeeklyRpc)}">${formatMoney(ownWeeklyRpc)}</span></div>`;
+        html += `<div class="tds-row"><span class="tds-row-label">vs efficiency average</span><span class="tds-row-value ${compareValueClass(ownWeeklyRpc, avgWeeklyRpc)}">${formatSignedPercent(percentageDifference(ownWeeklyRpc, avgWeeklyRpc))}</span></div>`;
+      }
+
+      if (ownIndex >= 0 && metric) {
+        html += `<div class="tds-row"><span class="tds-row-label">${metricLabel} rank</span><span class="tds-row-value">#${ownIndex + 1} / ${sorted.length}</span></div>`;
+        html += `<div class="tds-row"><span class="tds-row-label">Percentile</span><span class="tds-row-value">${formatPercentile(ownIndex + 1, sorted.length)}</span></div>`;
+      }
+
+      if (ownWeeklyCustomerIndex >= 0) {
+        html += `<div class="tds-row"><span class="tds-row-label">Weekly customer rank</span><span class="tds-row-value">#${ownWeeklyCustomerIndex + 1} / ${weeklyCustomerRankRows.length}</span></div>`;
+      }
+
+      if (ownWeeklyRpcIndex >= 0) {
+        html += `<div class="tds-row"><span class="tds-row-label">Revenue / customer rank</span><span class="tds-row-value">#${ownWeeklyRpcIndex + 1} / ${weeklyRpcRows.length}</span></div>`;
+      }
+
+      html += `</div>`;
+    }
+
+    if (ownRow && metric && typeof ownMetricValue === 'number') {
+      const targetRows = [
+        { label: 'Next position', index: ownIndex > 0 ? ownIndex - 1 : null },
+        { label: 'Top 10', index: sorted.length >= 10 ? 9 : null },
+        { label: 'Top 5', index: sorted.length >= 5 ? 4 : null },
+        { label: '#1', index: sorted.length >= 1 ? 0 : null },
+      ];
+
+      html += `<div class="tds-section-label">Targets</div><div class="tds-card">`;
+
+      for (const target of targetRows) {
+        if (target.index === null || target.index < 0 || target.index >= sorted.length) {
+          continue;
+        }
+
+        // If we're already above a target rank, report it as achieved.
+        if (ownIndex >= 0 && ownIndex <= target.index) {
+          html += `<div class="tds-row"><span class="tds-row-label">${target.label}</span><span class="tds-row-value tds-v-good">Achieved</span></div>`;
+          continue;
+        }
+
+        const targetValue = sorted[target.index]?.[metric];
+        if (typeof targetValue !== 'number') continue;
+
+        // +1 avoids showing a zero gap when tied on the displayed metric.
+        const needed = Math.max(0, targetValue - ownMetricValue + 1);
+        const pctNeeded = ownMetricValue > 0 ? (needed / ownMetricValue) * 100 : null;
+
+        html += `<div class="tds-row"><span class="tds-row-label">${target.label}</span><span class="tds-row-value">${formatMoney(needed)}${pctNeeded !== null ? ` (${pctNeeded.toFixed(1)}%)` : ''}</span></div>`;
+      }
+
+      html += `<div class="tds-row"><span class="tds-row-label">Target metric</span><span class="tds-row-value">${escapeHtml(metricLabel)}</span></div>`;
+      html += `</div>`;
+    }
+
     if (hasWeeklyIncome || hasDailyIncome) {
       html += `<div class="tds-section-label">Income performance</div><div class="tds-card">`;
 
@@ -3194,8 +3278,8 @@
         html += `<div class="tds-row"><span class="tds-row-label">Average weekly income</span><span class="tds-row-value">${avgWeeklyIncome !== null ? formatMoney(avgWeeklyIncome) : '—'}</span></div>`;
         html += `<div class="tds-row"><span class="tds-row-label">Median weekly income</span><span class="tds-row-value">${medianWeeklyIncome !== null ? formatMoney(medianWeeklyIncome) : '—'}</span></div>`;
         if (ownWeeklyIncome !== null) {
-          html += `<div class="tds-row"><span class="tds-row-label">Your weekly income vs average</span><span class="tds-row-value">${formatSignedPercent(percentageDifference(ownWeeklyIncome, avgWeeklyIncome))}</span></div>`;
-          html += `<div class="tds-row"><span class="tds-row-label">Your weekly income vs median</span><span class="tds-row-value">${formatSignedPercent(percentageDifference(ownWeeklyIncome, medianWeeklyIncome))}</span></div>`;
+          html += `<div class="tds-row"><span class="tds-row-label">Your weekly income vs average</span><span class="tds-row-value ${compareValueClass(ownWeeklyIncome, avgWeeklyIncome)}">${formatSignedPercent(percentageDifference(ownWeeklyIncome, avgWeeklyIncome))}</span></div>`;
+          html += `<div class="tds-row"><span class="tds-row-label">Your weekly income vs median</span><span class="tds-row-value ${compareValueClass(ownWeeklyIncome, medianWeeklyIncome)}">${formatSignedPercent(percentageDifference(ownWeeklyIncome, medianWeeklyIncome))}</span></div>`;
           if (totalWeeklyIncome > 0) {
             html += `<div class="tds-row"><span class="tds-row-label">Share of returned weekly income</span><span class="tds-row-value">${((ownWeeklyIncome / totalWeeklyIncome) * 100).toFixed(2)}%</span></div>`;
           }
@@ -3242,7 +3326,7 @@
         html += `<div class="tds-row"><span class="tds-row-label">Median weekly revenue / customer</span><span class="tds-row-value">${medianWeeklyRpc !== null ? formatMoney(medianWeeklyRpc) : '—'}</span></div>`;
         if (ownWeeklyRpc !== null) {
           html += `<div class="tds-row"><span class="tds-row-label">Your weekly revenue / customer</span><span class="tds-row-value">${formatMoney(ownWeeklyRpc)}</span></div>`;
-          html += `<div class="tds-row"><span class="tds-row-label">Your efficiency vs average</span><span class="tds-row-value">${formatSignedPercent(percentageDifference(ownWeeklyRpc, avgWeeklyRpc))}</span></div>`;
+          html += `<div class="tds-row"><span class="tds-row-label">Your efficiency vs average</span><span class="tds-row-value ${compareValueClass(ownWeeklyRpc, avgWeeklyRpc)}">${formatSignedPercent(percentageDifference(ownWeeklyRpc, avgWeeklyRpc))}</span></div>`;
         }
         if (ownWeeklyRpcIndex >= 0) {
           html += `<div class="tds-row"><span class="tds-row-label">Revenue / customer rank</span><span class="tds-row-value">#${ownWeeklyRpcIndex + 1} / ${weeklyRpcRows.length}</span></div>`;
@@ -3252,7 +3336,7 @@
       if (hasDailyIncome && hasDailyCustomers && ownDailyRpc !== null) {
         html += `<div class="tds-row"><span class="tds-row-label">Your daily revenue / customer</span><span class="tds-row-value">${formatMoney(ownDailyRpc)}</span></div>`;
         if (avgDailyRpc !== null) {
-          html += `<div class="tds-row"><span class="tds-row-label">Daily efficiency vs average</span><span class="tds-row-value">${formatSignedPercent(percentageDifference(ownDailyRpc, avgDailyRpc))}</span></div>`;
+          html += `<div class="tds-row"><span class="tds-row-label">Daily efficiency vs average</span><span class="tds-row-value ${compareValueClass(ownDailyRpc, avgDailyRpc)}">${formatSignedPercent(percentageDifference(ownDailyRpc, avgDailyRpc))}</span></div>`;
         }
       }
 
