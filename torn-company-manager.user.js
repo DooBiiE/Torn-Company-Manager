@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Company Management Suite
 // @namespace    torn-company-management-suite
-// @version      1.3.2
+// @version      1.3.3
 // @description  Local-only company management dashboard for Torn directors, embedded in the Jobs page. No company data ever leaves your browser; only your Torn User ID is checked against a public license list.
 // @author       DooBiiE
 // @match        https://www.torn.com/*
@@ -67,7 +67,7 @@
   // TornPDA does not always expose the legacy GM_info object that desktop
   // userscript managers provide. Try both common metadata APIs, then use the
   // release version as a PDA-safe fallback so the UI never shows vunknown.
-  const TDS_VERSION_FALLBACK = '1.3.2';
+  const TDS_VERSION_FALLBACK = '1.3.3';
   const TDS_VERSION =
     (typeof GM_info !== 'undefined' && GM_info?.script?.version) ||
     (typeof GM !== 'undefined' && GM?.info?.script?.version) ||
@@ -630,6 +630,17 @@
         padding-bottom: 8px;
       }
       .tds-training-debt-table tbody tr:last-child td { border-bottom: none; }
+      .tds-stock-table th,
+      .tds-stock-table td {
+        text-align: center !important;
+        vertical-align: middle;
+      }
+      .tds-stock-table tbody tr td {
+        border-bottom: 1px solid var(--tds-border-strong, #4a4a4a);
+        padding-top: 8px;
+        padding-bottom: 8px;
+      }
+      .tds-stock-table tbody tr:last-child td { border-bottom: none; }
       .tds-spark { display: flex; align-items: flex-end; gap: 4px; height: 46px; margin: 6px 0; }
       .tds-spark-col { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 3px; }
       .tds-spark-bar { width: 100%; border-radius: 2px 2px 0 0; min-height: 2px; }
@@ -2031,15 +2042,31 @@
       const name = pickText(value, ['name', 'item_name', 'stock_name', 'product_name']);
       const id = pickText(value, ['id', 'item_id', 'stock_id', 'product_id']) || (path.length ? path[path.length - 1] : null);
       const current = pickNumeric(value, ['amount', 'quantity', 'qty', 'stock', 'in_stock', 'instock', 'available', 'inventory']);
-      const price = pickNumeric(value, ['price', 'selling_price', 'sell_price', 'rrp']);
+      const setPrice = pickNumeric(value, ['price', 'selling_price', 'sell_price', 'price_each', 'priceeach']);
+      const costEach = pickNumeric(value, ['cost', 'cost_each', 'costeach', 'unit_cost', 'buy_price']);
+      const rrp = pickNumeric(value, ['rrp', 'recommended_retail_price', 'retail_price']);
+      const soldTotal = pickNumeric(value, ['sold_total', 'soldtotal', 'total_sold', 'units_sold_total']);
+      const soldDaily = pickNumeric(value, ['sold_daily', 'solddaily', 'daily_sold', 'sold_day', 'sold_today', 'daily_sales', 'sales_day']);
       const sold24 = pickNumeric(value, ['sold_24h', 'sold24h', 'sold_day', 'sold_today', 'daily_sold', 'daily_sales', 'sales_day']);
       const sold7 = pickNumeric(value, ['sold_7d', 'sold7d', 'sold_week', 'weekly_sold', 'weekly_sales', 'sales_week']);
 
-      if (!name || (current === null && sold24 === null && sold7 === null)) continue;
+      if (!name || (current === null && sold24 === null && sold7 === null && soldDaily === null && setPrice === null)) continue;
       const key = `${id || ''}|${name}`.toLowerCase();
       if (seenKeys.has(key)) continue;
       seenKeys.add(key);
-      candidates.push({ id, name, current, price, sold24, sold7, raw: value });
+      candidates.push({
+        id,
+        name,
+        current,
+        setPrice,
+        costEach,
+        rrp,
+        soldTotal,
+        soldDaily,
+        sold24,
+        sold7,
+        raw: value
+      });
     }
 
     return candidates.sort((a, b) => a.name.localeCompare(b.name));
@@ -2099,7 +2126,33 @@
       const n = normalizeFieldName(item.name);
       return n === normalizedNewsName || n.includes(normalizedNewsName) || normalizedNewsName.includes(n);
     });
-    return { timestamp: entry.timestamp, quantity: qty, name: match?.name || itemName, id: match?.id || null };
+    let salePrice = pickNumeric(raw, [
+      'price', 'sale_price', 'sold_price', 'price_each', 'unit_price', 'selling_price'
+    ]);
+
+    if (salePrice === null) {
+      const pricePatterns = [
+        /(?:for|at)\s*\$\s*([\d,]+(?:\.\d+)?)(?:\s+each)?\b/i,
+        /\$\s*([\d,]+(?:\.\d+)?)\s*(?:each|per\s+item|per\s+unit)\b/i,
+      ];
+      for (const re of pricePatterns) {
+        const m = text.match(re);
+        if (!m) continue;
+        const parsed = Number(String(m[1]).replace(/,/g, ''));
+        if (Number.isFinite(parsed)) {
+          salePrice = parsed;
+          break;
+        }
+      }
+    }
+
+    return {
+      timestamp: entry.timestamp,
+      quantity: qty,
+      name: match?.name || itemName,
+      id: match?.id || null,
+      price: salePrice
+    };
   }
 
   function aggregateSales(newsRaw, stockItems) {
@@ -2115,9 +2168,30 @@
       if (!sale) continue;
       parsedEvents += 1;
       const key = String(sale.id || normalizeFieldName(sale.name));
-      const row = totals.get(key) || { name: sale.name, sold24: 0, sold7: 0 };
+      const row = totals.get(key) || {
+        name: sale.name,
+        sold24: 0,
+        sold7: 0,
+        lastSoldPrice: null,
+        lastSoldAt: null,
+        pricedUnits24: 0,
+        pricedRevenue24: 0
+      };
+
       if (sale.timestamp >= weekAgo) row.sold7 += sale.quantity;
       if (sale.timestamp >= dayAgo) row.sold24 += sale.quantity;
+
+      if (sale.price !== null && sale.price !== undefined) {
+        if (!row.lastSoldAt || sale.timestamp > row.lastSoldAt) {
+          row.lastSoldAt = sale.timestamp;
+          row.lastSoldPrice = sale.price;
+        }
+        if (sale.timestamp >= dayAgo) {
+          row.pricedUnits24 += sale.quantity;
+          row.pricedRevenue24 += sale.quantity * sale.price;
+        }
+      }
+
       totals.set(key, row);
     }
 
@@ -2142,6 +2216,116 @@
     return data;
   }
 
+  function stockDaysRemaining(current, dailyRate) {
+    if (current === null || typeof current !== 'number') return null;
+    if (!dailyRate || dailyRate <= 0) return null;
+    return current / dailyRate;
+  }
+
+  function stockGrossMargin(setPrice, costEach) {
+    if (setPrice === null || costEach === null) return null;
+    return setPrice - costEach;
+  }
+
+  function stockMarginPercent(setPrice, costEach) {
+    if (setPrice === null || costEach === null || costEach <= 0) return null;
+    return ((setPrice - costEach) / costEach) * 100;
+  }
+
+  function pricingRecommendation(item, sold24, sold7, lastSoldPrice) {
+    const setPrice = item.setPrice;
+    const rrp = item.rrp;
+    const current = item.current;
+    const day = sold24 !== null ? Math.max(0, Number(sold24) || 0) : null;
+    const week = sold7 !== null ? Math.max(0, Number(sold7) || 0) : null;
+    const weeklyDailyAverage = week !== null ? week / 7 : null;
+    const dailyRate = day !== null ? day : (item.soldDaily !== null ? item.soldDaily : weeklyDailyAverage);
+    const daysLeft = stockDaysRemaining(current, dailyRate);
+
+    if (setPrice === null) {
+      return {
+        action: 'No price data',
+        className: '',
+        suggested: null,
+        reason: 'Torn did not return the currently configured selling price.'
+      };
+    }
+
+    const trend =
+      day !== null && weeklyDailyAverage !== null && weeklyDailyAverage > 0
+        ? ((day - weeklyDailyAverage) / weeklyDailyAverage) * 100
+        : null;
+
+    let score = 0;
+    const reasons = [];
+
+    // Strong recent demand and plenty of cover suggests there is room to test
+    // a small increase. Weak demand with lots of inventory suggests the reverse.
+    if (trend !== null) {
+      if (trend >= 15) {
+        score += 2;
+        reasons.push(`24h sales are ${trend.toFixed(0)}% above the 7-day daily average`);
+      } else if (trend <= -15) {
+        score -= 2;
+        reasons.push(`24h sales are ${Math.abs(trend).toFixed(0)}% below the 7-day daily average`);
+      } else {
+        reasons.push('24h sales are close to the 7-day daily average');
+      }
+    }
+
+    if (daysLeft !== null) {
+      if (daysLeft >= 14) {
+        score += 1;
+        reasons.push(`${daysLeft.toFixed(1)} days of stock remain`);
+      } else if (daysLeft <= 4) {
+        score -= 1;
+        reasons.push(`only ${daysLeft.toFixed(1)} days of stock remain`);
+      }
+    }
+
+    if (rrp !== null) {
+      if (setPrice < rrp * 0.85) {
+        score += 1;
+        reasons.push(`set price is well below RRP (${formatCurrency(rrp)})`);
+      } else if (setPrice > rrp * 1.20) {
+        score -= 1;
+        reasons.push(`set price is well above RRP (${formatCurrency(rrp)})`);
+      }
+    }
+
+    if (lastSoldPrice !== null) {
+      if (lastSoldPrice >= setPrice) {
+        reasons.push(`latest observed sale cleared at ${formatCurrency(lastSoldPrice)}`);
+      } else {
+        score -= 1;
+        reasons.push(`latest observed sale price (${formatCurrency(lastSoldPrice)}) is below the set price`);
+      }
+    }
+
+    let action = 'Hold';
+    let suggested = setPrice;
+    let className = '';
+
+    if (score >= 2) {
+      action = 'Consider raising';
+      suggested = setPrice + 1;
+      className = 'tds-v-good';
+    } else if (score <= -2) {
+      action = 'Consider lowering';
+      suggested = Math.max(item.costEach !== null ? item.costEach : 0, setPrice - 1);
+      className = 'tds-v-bad';
+    }
+
+    return {
+      action,
+      suggested,
+      className,
+      daysLeft,
+      trend,
+      reason: reasons.length ? reasons.join('; ') : 'Not enough recent sales evidence to justify changing the price.'
+    };
+  }
+
   function restockRecommendation(current, sold24, sold7) {
     if (sold24 === null && sold7 === null) return null;
     const day = Math.max(0, Number(sold24) || 0);
@@ -2161,6 +2345,7 @@
     const el = panel.querySelector('[data-tabpanel="stock"]');
     if (!el) return;
     const results = state.lastResults;
+
     if (!results) {
       el.innerHTML = `<div class="tds-box tds-box-neutral">Run Diagnostics once so Stock Management can read your company stock.</div>`;
       return;
@@ -2168,6 +2353,7 @@
 
     const stockRaw = findRaw(results, 'company', 'stock');
     const blocked = findBlockedReason(results, 'company', 'stock');
+
     if (!stockRaw) {
       el.innerHTML = `<div class="tds-box tds-box-danger"><strong>Company stock unavailable.</strong> ${escapeHtml(blocked || 'No company/stock data was returned.')}</div>`;
       return;
@@ -2175,11 +2361,8 @@
 
     const items = extractStockItems(stockRaw);
 
-    // Avoid an extra live news call during startup/diagnostic hydration. The
-    // current stock data is already available; sales history is fetched lazily
-    // when the user opens this tab.
     if (el.hidden && !refresh) {
-      el.innerHTML = `<div class="tds-box tds-box-neutral">Stock data is ready. Open this tab to load the last 24 hours / 7 days of sales history and calculate restock targets.</div>`;
+      el.innerHTML = `<div class="tds-box tds-box-neutral">Stock data is ready. Open this tab to load recent sales history, restock targets, margins and read-only pricing recommendations.</div>`;
       return;
     }
 
@@ -2188,9 +2371,11 @@
       return;
     }
 
-    el.innerHTML = `<div class="tds-box tds-box-neutral">Loading recent sales history…</div>`;
+    el.innerHTML = `<div class="tds-box tds-box-neutral">Loading recent sales and pricing history…</div>`;
+
     let sales = { totals: new Map(), parsedEvents: 0, newsEntries: 0, oldestTimestamp: null };
     let newsError = null;
+
     try {
       if (refresh) {
         state.stock.newsCache = null;
@@ -2205,42 +2390,128 @@
 
     let html = `
       <div class="tds-box tds-box-info">
-        <strong>Restock recommendation:</strong> target = 120% of the higher of <em>last 7 days sold</em> or <em>last 24 hours × 7</em>. This gives roughly one week of fast-moving stock plus a 20% buffer. The target and restock quantity are <strong>DERIVED</strong>, not values returned by Torn.
+        <strong>Read-only pricing assistant:</strong> this tab does <strong>not</strong> submit prices or interact with Torn's Pricing form.
+        It only analyses data Torn returns and suggests <strong>Hold / Consider raising / Consider lowering</strong>.
+        Suggested prices are advisory and deliberately move only <strong>$1 at a time</strong>.
+      </div>
+      <div class="tds-box tds-box-info">
+        <strong>Restock recommendation:</strong> target = 120% of the higher of <em>last 7 days sold</em> or <em>last 24 hours × 7</em>.
+        This gives roughly one week of fast-moving stock plus a 20% buffer. Targets are <strong>DERIVED</strong>.
       </div>`;
 
     if (newsError) {
-      html += `<div class="tds-box tds-box-warn"><strong>Item-level sales history unavailable.</strong> ${escapeHtml(newsError.reason || 'company/news could not be read with this key')}. Current stock is still shown. Add <code>company: news</code> to the Custom key and rerun Diagnostics to enable the 24h / 7d columns.</div>`;
+      html += `<div class="tds-box tds-box-warn"><strong>Item-level sales history unavailable.</strong> ${escapeHtml(newsError.reason || 'company/news could not be read with this key')}. Current stock/pricing fields returned directly by Torn are still shown.</div>`;
     } else if (!sales.parsedEvents) {
-      html += `<div class="tds-box tds-box-warn">Company news was accessible (${formatNumber(sales.newsEntries)} entries inspected), but no item-sale events were recognised. If Torn exposes the sold counts directly inside <code>company/stock</code>, those values are used below; otherwise the sales columns remain unavailable rather than being estimated from stock movement.</div>`;
+      html += `<div class="tds-box tds-box-warn">Company news was accessible (${formatNumber(sales.newsEntries)} entries inspected), but no item-sale events were recognised. Direct <code>company/stock</code> sales fields are still used where available; Last Sold Price stays unavailable rather than being guessed.</div>`;
     } else {
       const coverage = sales.oldestTimestamp ? formatTimestampRelative(sales.oldestTimestamp * 1000) : 'unknown';
-      html += `<div class="tds-box tds-box-neutral">Parsed ${formatNumber(sales.parsedEvents)} stock-sale event(s) from company news. Oldest returned news: ${escapeHtml(coverage)}. If Torn only returns part of the week, the 7-day figure is naturally partial.</div>`;
+      html += `<div class="tds-box tds-box-neutral">Parsed ${formatNumber(sales.parsedEvents)} stock-sale event(s) from company news. Oldest returned news: ${escapeHtml(coverage)}.</div>`;
     }
 
-    html += `<div style="overflow-x:auto;"><table class="tds-table">
-      <thead><tr><th>Item</th><th style="text-align:right;">In Stock</th><th style="text-align:right;">Sold 24h</th><th style="text-align:right;">Sold 7d</th><th style="text-align:right;">Target Stock</th><th style="text-align:right;">Restock</th></tr></thead><tbody>`;
+    html += `<div style="overflow-x:auto;">
+      <table class="tds-table tds-stock-table">
+        <thead>
+          <tr>
+            <th>Product</th>
+            <th>Cost</th>
+            <th>RRP</th>
+            <th>Set Price</th>
+            <th>Last Sold</th>
+            <th>In Stock</th>
+            <th>Sold Daily</th>
+            <th>Sold 24h</th>
+            <th>Sold 7d</th>
+            <th>Days Left</th>
+            <th>Margin / Unit</th>
+            <th>Est. Daily Gross</th>
+            <th>Target Stock</th>
+            <th>Restock</th>
+            <th>Pricing</th>
+            <th>Suggested</th>
+          </tr>
+        </thead>
+        <tbody>`;
 
     for (const item of items) {
       const keyById = String(item.id || '');
       const keyByName = normalizeFieldName(item.name);
       const fromNews = sales.totals.get(keyById) || sales.totals.get(keyByName);
-      const sold24 = item.sold24 !== null ? item.sold24 : (fromNews ? fromNews.sold24 : null);
-      const sold7 = item.sold7 !== null ? item.sold7 : (fromNews ? fromNews.sold7 : null);
+
+      const sold24 = item.sold24 !== null
+        ? item.sold24
+        : (fromNews ? fromNews.sold24 : (item.soldDaily !== null ? item.soldDaily : null));
+
+      const sold7 = item.sold7 !== null
+        ? item.sold7
+        : (fromNews ? fromNews.sold7 : null);
+
+      const soldDaily = item.soldDaily !== null
+        ? item.soldDaily
+        : (sold24 !== null ? sold24 : (sold7 !== null ? sold7 / 7 : null));
+
+      const lastSoldPrice = fromNews?.lastSoldPrice ?? null;
+      const averageSoldPrice24 =
+        fromNews && fromNews.pricedUnits24 > 0
+          ? fromNews.pricedRevenue24 / fromNews.pricedUnits24
+          : null;
+
       const rec = restockRecommendation(item.current, sold24, sold7);
-      const restockText = rec ? (rec.restock === null ? '—' : formatNumber(rec.restock)) : '—';
+      const priceRec = pricingRecommendation(item, sold24, sold7, lastSoldPrice);
+
+      const margin = stockGrossMargin(item.setPrice, item.costEach);
+      const marginPct = stockMarginPercent(item.setPrice, item.costEach);
+      const daysLeft = stockDaysRemaining(item.current, soldDaily);
+      const estDailyGross =
+        margin !== null && soldDaily !== null
+          ? margin * soldDaily
+          : null;
+
+      const restockText = rec
+        ? (rec.restock === null ? '—' : formatNumber(rec.restock))
+        : '—';
+
+      const lastPriceHtml = lastSoldPrice !== null
+        ? `${formatCurrency(lastSoldPrice)}${averageSoldPrice24 !== null ? `<div class="tds-v-dim">24h avg ${formatCurrency(averageSoldPrice24)}</div>` : ''}`
+        : '—';
+
       html += `<tr>
-        <td><strong>${escapeHtml(item.name)}</strong>${item.price !== null ? `<div class="tds-v-dim">Price: ${escapeHtml(formatCurrency(item.price))}</div>` : ''}</td>
-        <td class="tds-num">${item.current === null ? '—' : formatNumber(item.current)}</td>
-        <td class="tds-num">${sold24 === null ? '—' : formatNumber(sold24)}</td>
-        <td class="tds-num">${sold7 === null ? '—' : formatNumber(sold7)}</td>
-        <td class="tds-num">${rec ? formatNumber(rec.target) : '—'}</td>
-        <td class="tds-num"><strong>${restockText}</strong></td>
+        <td><strong>${escapeHtml(item.name)}</strong>${item.soldTotal !== null ? `<div class="tds-v-dim">Lifetime sold: ${formatNumber(item.soldTotal)}</div>` : ''}</td>
+        <td>${item.costEach === null ? '—' : formatCurrency(item.costEach)}</td>
+        <td>${item.rrp === null ? '—' : formatCurrency(item.rrp)}</td>
+        <td><strong>${item.setPrice === null ? '—' : formatCurrency(item.setPrice)}</strong></td>
+        <td>${lastPriceHtml}</td>
+        <td>${item.current === null ? '—' : formatNumber(item.current)}</td>
+        <td>${soldDaily === null ? '—' : formatNumber(Math.round(soldDaily))}</td>
+        <td>${sold24 === null ? '—' : formatNumber(Math.round(sold24))}</td>
+        <td>${sold7 === null ? '—' : formatNumber(Math.round(sold7))}</td>
+        <td>${daysLeft === null ? '—' : `${daysLeft.toFixed(1)}d`}</td>
+        <td>${margin === null ? '—' : `${formatCurrency(margin)}${marginPct !== null ? `<div class="tds-v-dim">${marginPct.toFixed(0)}%</div>` : ''}`}</td>
+        <td>${estDailyGross === null ? '—' : formatCurrency(estDailyGross)}</td>
+        <td>${rec ? formatNumber(rec.target) : '—'}</td>
+        <td><strong>${restockText}</strong></td>
+        <td class="${priceRec.className}">
+          <strong>${escapeHtml(priceRec.action)}</strong>
+          <div class="tds-v-dim" style="max-width:240px;white-space:normal;">${escapeHtml(priceRec.reason)}</div>
+        </td>
+        <td class="${priceRec.className}"><strong>${priceRec.suggested === null ? '—' : formatCurrency(priceRec.suggested)}</strong></td>
       </tr>`;
     }
-    html += `</tbody></table></div><div style="margin-top:10px;"><button class="tds-btn-ghost" id="tds-stock-refresh">Refresh sales</button></div>`;
+
+    html += `</tbody></table></div>
+      <div class="tds-box tds-box-neutral" style="margin-top:10px;">
+        <strong>Pricing recommendation rules:</strong> recent 24h sales are compared with the 7-day daily average, stock cover is considered, RRP is used when Torn supplies it, and an observed Last Sold Price is used when it can be parsed reliably.
+        A recommendation only moves one dollar from the configured price so the tool stays conservative.
+      </div>
+      <div style="margin-top:10px;">
+        <button class="tds-btn-ghost" id="tds-stock-refresh">Refresh sales</button>
+      </div>`;
+
     el.innerHTML = html;
-    el.querySelector('#tds-stock-refresh')?.addEventListener('click', () => renderStockTab(panel, { refresh: true }));
+    el.querySelector('#tds-stock-refresh')?.addEventListener('click', () =>
+      renderStockTab(panel, { refresh: true })
+    );
   }
+
 
   // =======================================================================
   // OPTIMIZE TAB — position requirement fit, not a fabricated EE formula
