@@ -1,18 +1,10 @@
 // ==UserScript==
 // @name         Torn Company Management Suite
 // @namespace    torn-company-management-suite
-// @version      1.3.13
-// @updateURL    https://raw.githubusercontent.com/DooBiiE/Torn-Company-Manager/main/torn-company-manager.user.js
-// @downloadURL  https://raw.githubusercontent.com/DooBiiE/Torn-Company-Manager/main/torn-company-manager.user.js
-// @description  Local-only company management dashboard for Torn directors, embedded in the Jobs page. No company data ever leaves your browser; only your Torn User ID is checked against a public license list.
+// @version      1.3.14
+// @description  Torn Company Management Suite - TornPDA native build
 // @author       DooBiiE
 // @match        https://www.torn.com/*
-// @grant        GM_xmlhttpRequest
-// @grant        GM_setValue
-// @grant        GM_getValue
-// @grant        GM_deleteValue
-// @connect      api.torn.com
-// @connect      raw.githubusercontent.com
 // @run-at       document-end
 // ==/UserScript==
 
@@ -22,8 +14,8 @@
  * ============================================================================
  *
  * WHAT THIS DOES:
- *   1. Stores your API key ONLY in this browser (Tampermonkey local storage,
- *      via GM_setValue). It is never sent anywhere except https://api.torn.com.
+ *   1. Stores your API key ONLY in this browser (userscript local storage,
+ *      via browser storage). It is never sent anywhere except https://api.torn.com.
  *   2. Runs a live "capability diagnostic" against every selection this system
  *      uses, and records -- with the REAL error code/message Torn returns --
  *      exactly what your current key can and can't access. The Diagnostics
@@ -60,71 +52,74 @@
 (function () {
   'use strict';
 
-  var TDS_TRACE_PREFIX = '[TDS TRACE]';
-
-  function tdsTrace(stage, extra) {
-    try {
-      if (extra === undefined) console.log(TDS_TRACE_PREFIX, stage);
-      else console.log(TDS_TRACE_PREFIX, stage, extra);
-    } catch (_) {}
-  }
-
-  window.addEventListener('error', function (event) {
-    try {
-      console.error(
-        '[TDS GLOBAL ERROR]',
-        'message=', event && event.message,
-        'file=', event && event.filename,
-        'line=', event && event.lineno,
-        'column=', event && event.colno,
-        'error=', event && event.error
-      );
-    } catch (_) {}
-  }, true);
-
-  window.addEventListener('unhandledrejection', function (event) {
-    try {
-      console.error('[TDS UNHANDLED REJECTION]', event && event.reason);
-    } catch (_) {}
-  });
-
-  tdsTrace('01 script body entered');
+  console.log('[TDS] v1.3.14 PDA-native full build started');
 
   // ---------------------------------------------------------------------
   // 0. CONSTANTS
   // ---------------------------------------------------------------------
   const API_BASE = 'https://api.torn.com';
+
+  function tdsHttpRequest(details) {
+    const method = String((details && details.method) || 'GET').toUpperCase();
+    const url = details && details.url;
+    const headers = (details && details.headers) || {};
+
+    if (method === 'GET' && typeof PDA_httpGet === 'function') {
+      Promise.resolve(PDA_httpGet(url, headers))
+        .then((res) => {
+          if (details && typeof details.onload === 'function') {
+            details.onload({
+              responseText: (res && res.responseText) || '',
+              status: (res && res.status) || 200,
+              statusText: (res && res.statusText) || '',
+              responseHeaders: (res && res.responseHeaders) || '',
+            });
+          }
+        })
+        .catch((err) => {
+          if (details && typeof details.onerror === 'function') details.onerror(err);
+        });
+      return;
+    }
+
+    fetch(url, {
+      method,
+      headers,
+      body: details && (details.data || details.body),
+      credentials: 'omit',
+    })
+      .then(async (res) => {
+        const responseText = await res.text();
+        if (details && typeof details.onload === 'function') {
+          details.onload({
+            responseText,
+            status: res.status,
+            statusText: res.statusText,
+            responseHeaders: '',
+          });
+        }
+      })
+      .catch((err) => {
+        if (details && typeof details.onerror === 'function') details.onerror(err);
+      });
+  }
+
   // Read the UI version from userscript metadata when available. TornPDA may
   // not expose that metadata API, so a release fallback is provided below.
-  // TornPDA does not always expose the legacy GM_info object that desktop
+  // TornPDA does not always expose the legacy legacyInfo object that desktop
   // userscript managers provide. Try both common metadata APIs, then use the
   // release version as a PDA-safe fallback so the UI never shows vunknown.
-  const TDS_VERSION_FALLBACK = '1.3.13';
-// Update distribution uses the same GitHub-hosted .user.js for both version
-// checks and downloads. Release process: bump @version + this fallback, then
-// replace torn-company-manager.user.js on the main branch.
-
-  const TDS_VERSION =
-    (typeof GM_info !== 'undefined' && GM_info?.script?.version) ||
-    (typeof GM !== 'undefined' && GM?.info?.script?.version) ||
-    TDS_VERSION_FALLBACK;
+  const TDS_VERSION_FALLBACK = '1.3.14';
+  const TDS_VERSION = TDS_VERSION_FALLBACK;
   const STORAGE_KEY_APIKEY = 'tds_api_key';
   const STORAGE_KEY_LAST_RUN_AT = 'tds_last_run_at';
   const STORAGE_KEY_THEME = 'tds_theme';
   const STORAGE_KEY_LICENSE_CACHE = 'tds_license_cache';
 
-  // TornPDA normally supplies the underscore-style GM storage functions, but
-  // keep a localStorage fallback so a missing/changed PDA GM shim cannot stop
-  // the entire dashboard from mounting. Desktop Tampermonkey/Violentmonkey
-  // continues to use the normal GM functions.
+  // PDA-native storage: no Greasemonkey compatibility layer required.
   function tdsGetValue(key, fallback = null) {
     try {
-      if (typeof GM_getValue === 'function') return GM_getValue(key, fallback);
-    } catch (err) {
-      console.warn('[TDS] GM_getValue failed; using localStorage fallback:', err);
-    }
-    try {
-      const raw = localStorage.getItem(`tds_fallback_${key}`);
+      const raw = localStorage.getItem(`tds_native_${key}`);
       return raw === null ? fallback : JSON.parse(raw);
     } catch (_) {
       return fallback;
@@ -133,29 +128,13 @@
 
   function tdsSetValue(key, value) {
     try {
-      if (typeof GM_setValue === 'function') {
-        GM_setValue(key, value);
-        return;
-      }
-    } catch (err) {
-      console.warn('[TDS] GM_setValue failed; using localStorage fallback:', err);
-    }
-    try {
-      localStorage.setItem(`tds_fallback_${key}`, JSON.stringify(value));
+      localStorage.setItem(`tds_native_${key}`, JSON.stringify(value));
     } catch (_) {}
   }
 
   function tdsDeleteValue(key) {
     try {
-      if (typeof GM_deleteValue === 'function') {
-        GM_deleteValue(key);
-        return;
-      }
-    } catch (err) {
-      console.warn('[TDS] GM_deleteValue failed; using localStorage fallback:', err);
-    }
-    try {
-      localStorage.removeItem(`tds_fallback_${key}`);
+      localStorage.removeItem(`tds_native_${key}`);
     } catch (_) {}
   }
 
@@ -247,7 +226,7 @@
       const url = `${API_BASE}/${path}?${params.toString()}`;
 
       return new Promise((resolve, reject) => {
-        GM_xmlhttpRequest({
+        tdsHttpRequest({
           method: 'GET',
           url,
           timeout: 15000,
@@ -297,7 +276,7 @@
       const url = `${API_BASE}/v2/${cleanPath}${query ? `?${query}` : ''}`;
 
       return new Promise((resolve, reject) => {
-        GM_xmlhttpRequest({
+        tdsHttpRequest({
           method: 'GET',
           url,
           headers: {
@@ -347,7 +326,7 @@
       const url = `${API_BASE}/v2/${cleanPath}${query ? `?${query}` : ''}`;
 
       return new Promise((resolve, reject) => {
-        GM_xmlhttpRequest({
+        tdsHttpRequest({
           method: 'GET',
           url,
           headers: {
@@ -573,7 +552,6 @@
   // 4. STYLES — matches the reference "Company Manager" design language
   // ---------------------------------------------------------------------
   function injectStyles() {
-    tdsTrace('02 injectStyles entered');
     const css = `
       /* Embedded Management Suite -- lives inside Torn's own Jobs page, not
          an overlay. Structural colours (background/border/text) below are
@@ -749,7 +727,6 @@
     style.id = 'tds-styles';
     style.textContent = css;
     document.head.appendChild(style);
-    tdsTrace('03 injectStyles complete');
   }
 
 
@@ -899,11 +876,9 @@
   }
 
   function buildPanel(mount) {
-    tdsTrace('10 buildPanel entered');
     const panel = document.createElement('section');
     panel.id = 'tds-panel';
     panel.setAttribute('aria-label', 'Torn Company Management Suite');
-    tdsTrace('11 before panel.innerHTML');
     panel.innerHTML = `
       <div id="tds-header">
         <div class="tds-brand">
@@ -944,9 +919,7 @@
     `;
 
     // Put the suite into Torn's Jobs content rather than attaching an overlay to body.
-    tdsTrace('12 panel.innerHTML parsed');
     mount.prepend(panel);
-    tdsTrace('13 panel mounted');
     state.panel = panel;
 
     applyTheme(panel, tdsGetValue(STORAGE_KEY_THEME, 'green'));
@@ -960,25 +933,15 @@
       });
     });
 
-    tdsTrace('14 render Settings');
     renderSettingsTab(panel);
-    tdsTrace('15 render Diagnostics');
     renderDiagnosticsTab(panel, null);
-    tdsTrace('16 render Overview');
     renderOverviewTab(panel, null, null);
-    tdsTrace('17 render Financials');
     renderFinanceTab(panel);
-    tdsTrace('20 render Stock');
     renderStockTab(panel);
-    tdsTrace('18 render Training');
     renderTrainingTab(panel).catch((err) => console.error('[TDS] Training render failed:', err));
-    tdsTrace('19 render Compare');
     renderBenchmarkTab(panel);
-    tdsTrace('21 render Effectiveness');
     renderOptimizeTab(panel);
-    tdsTrace('22 before initial switchTab');
     switchTab(panel, 'overview');
-    tdsTrace('23 buildPanel complete');
 
     return panel;
   }
@@ -999,7 +962,7 @@
 
     el.innerHTML = `
       <div class="tds-section-label">API Key</div>
-      <div class="tds-box tds-box-neutral">Stored only in this browser (Tampermonkey local storage). Never sent anywhere except api.torn.com.</div>
+      <div class="tds-box tds-box-neutral">Stored only in this browser (userscript local storage). Never sent anywhere except api.torn.com.</div>
       <div class="tds-box tds-box-warn">
         <strong>What actually gates each selection</strong> (confirmed by testing a real key at both Limited
         and Full Access, not assumed):
@@ -1399,7 +1362,7 @@
 
   function fetchLicenseList() {
     return new Promise((resolve, reject) => {
-      GM_xmlhttpRequest({
+      tdsHttpRequest({
         method: 'GET',
         url: LICENSE_JSON_URL,
         timeout: 15000,
@@ -4379,7 +4342,6 @@
   let jobsBootPoll = null;
 
   async function bootJobsPage() {
-    tdsTrace('30 bootJobsPage entered', window.location.href);
     console.debug('[TDS] boot check', window.location.href, 'companyPage=', isJobsPage());
     if (!isJobsPage()) {
       removePanel();
@@ -4389,18 +4351,13 @@
     if (document.getElementById('tds-panel')) return;
 
     const mount = findJobsMount();
-    tdsTrace('31 mount resolved', Boolean(mount));
     if (!mount) return;
 
-    tdsTrace('32 before colour detection');
     detectTornColours();
-    tdsTrace('33 after colour detection');
 
     let panel;
     try {
-      tdsTrace('34 before buildPanel');
       panel = buildPanel(mount);
-      tdsTrace('35 after buildPanel');
     } catch (err) {
       console.error('[TDS] Panel build failed:', err);
 
@@ -4424,16 +4381,12 @@
 
     // Hydrate the UI from the last persisted diagnostic first. This means a
     // Torn navigation/refresh does not trigger another API diagnostic.
-    tdsTrace('36 before IndexedDB hydration');
     const hydrated = await loadPersistedDiagnostic(panel);
-    tdsTrace('37 after IndexedDB hydration', hydrated);
     if (hydrated) return;
 
     if (tdsGetValue(STORAGE_KEY_APIKEY, '')) {
       try {
-        tdsTrace('38 before automatic diagnostic');
         await runFullDiagnostic(panel);
-        tdsTrace('39 after automatic diagnostic');
       } catch (err) {
         const status = panel.querySelector('#tds-footer-status');
         if (status) status.textContent = 'Last run: Never';
@@ -4453,7 +4406,6 @@
   }
 
   function startJobsNavigationWatcher() {
-    tdsTrace('40 startJobsNavigationWatcher');
     const routeEvents = ['hashchange', 'popstate', 'pageshow'];
     routeEvents.forEach((eventName) =>
       window.addEventListener(eventName, scheduleJobsBoot, { passive: true })
@@ -4496,10 +4448,8 @@
   }
 
   function initialiseTds() {
-    tdsTrace('41 initialiseTds entered', document.readyState);
     if (!document.getElementById('tds-styles')) injectStyles();
     startJobsNavigationWatcher();
-    tdsTrace('42 initialiseTds complete');
   }
 
   // Works whether TornPDA injects the script at Start, End, or after the page
