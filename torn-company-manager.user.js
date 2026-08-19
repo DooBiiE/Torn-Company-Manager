@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Company Management Suite
 // @namespace    torn-company-management-suite
-// @version      1.3.26
+// @version      1.3.28
 // @description  Local-only company management dashboard for Torn directors, embedded in the Jobs page. No company data ever leaves your browser; only your Torn User ID is checked against a public license list.
 // @author       DooBiiE
 // @match        https://www.torn.com/*
@@ -67,7 +67,7 @@
   // TornPDA does not always expose the legacy GM_info object that desktop
   // userscript managers provide. Try both common metadata APIs, then use the
   // release version as a PDA-safe fallback so the UI never shows vunknown.
-  const TDS_VERSION_FALLBACK = '1.3.26';
+  const TDS_VERSION_FALLBACK = '1.3.28';
   const TDS_VERSION =
     (typeof GM_info !== 'undefined' && GM_info?.script?.version) ||
     (typeof GM !== 'undefined' && GM?.info?.script?.version) ||
@@ -656,6 +656,25 @@
         vertical-align: middle;
         white-space: nowrap;
       }
+      .tds-position-matrix th:first-child,
+      .tds-position-matrix td:first-child {
+        min-width: 150px;
+        width: 150px;
+        max-width: 220px;
+        text-align: left !important;
+        white-space: normal;
+        overflow-wrap: anywhere;
+      }
+      .tds-position-matrix th:nth-child(2),
+      .tds-position-matrix td:nth-child(2) {
+        min-width: 130px;
+        width: 130px;
+        white-space: normal;
+      }
+      .tds-position-matrix th:not(:first-child):not(:nth-child(2)),
+      .tds-position-matrix td:not(:first-child):not(:nth-child(2)) {
+        min-width: 92px;
+      }
       .tds-position-matrix tbody tr td {
         border-bottom: 1px solid rgba(255,255,255,0.16);
         padding-top: 8px;
@@ -664,6 +683,28 @@
       .tds-position-best {
         font-weight: 700;
         outline: 1px solid rgba(255,255,255,0.16);
+      }
+      .tds-balance-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+        gap: 10px;
+        margin-top: 10px;
+      }
+      .tds-balance-card {
+        border: 1px solid var(--tds-border, #444);
+        border-radius: 6px;
+        padding: 10px;
+        background: rgba(255,255,255,0.025);
+      }
+      .tds-balance-title {
+        font-weight: 700;
+        margin-bottom: 6px;
+      }
+      .tds-balance-row {
+        display: flex;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 3px 0;
       }
       .tds-compare-table th,
       .tds-compare-table td {
@@ -2935,12 +2976,22 @@
       const manual = pickNumeric(value, ['manual_labor', 'manual', 'man_required', 'manual_required', 'man']);
       const intelligence = pickNumeric(value, ['intelligence', 'int_required', 'intelligence_required', 'int']);
       const endurance = pickNumeric(value, ['endurance', 'end_required', 'endurance_required', 'end']);
+      const special = pickText(value, [
+        'special', 'special_role', 'specialRole', 'role_special',
+        'effect', 'position_special', 'positionSpecial'
+      ]);
       const statCount = [manual, intelligence, endurance].filter((v) => v !== null && v > 0).length;
       if (!name || statCount < 1) continue;
       const key = normalizeFieldName(name);
       if (!key || seen.has(key)) continue;
       seen.add(key);
-      positions.push({ name: String(name), manual, intelligence, endurance });
+      positions.push({
+        name: String(name),
+        manual,
+        intelligence,
+        endurance,
+        special: special && !/^none$/i.test(String(special)) ? String(special) : null
+      });
     }
     return positions;
   }
@@ -3055,6 +3106,174 @@
     });
   }
 
+  function classifyCompanyRole(position) {
+    const name = String(position?.name || '');
+    const special = String(position?.special || '');
+
+    const reasons = [];
+    let level = 'standard';
+    let score = 0;
+
+    // Revenue-facing roles are important because removing all employees from
+    // them can leave the company with nobody assigned to the obvious selling /
+    // customer-facing function. This is a management heuristic, not an API flag.
+    if (/\b(sales?|salesperson|sales assistant|cashier|seller|retail)\b/i.test(name)) {
+      score += 4;
+      level = 'core';
+      reasons.push('revenue / sales role');
+    }
+
+    // Torn exposes special position functions on company role reference data.
+    // These are operationally meaningful support functions but are not claimed
+    // here as mandatory unless Torn ever exposes such a flag.
+    if (special) {
+      if (/manager/i.test(special)) {
+        score += 3;
+        if (level !== 'core') level = 'important';
+        reasons.push(`special: ${special}`);
+      } else if (/cleaner/i.test(special)) {
+        score += 2;
+        if (level === 'standard') level = 'important';
+        reasons.push(`special: ${special}`);
+      } else if (/secretary/i.test(special)) {
+        score += 2;
+        if (level === 'standard') level = 'important';
+        reasons.push(`special: ${special}`);
+      } else if (/marketer/i.test(special)) {
+        score += 2;
+        if (level === 'standard') level = 'important';
+        reasons.push(`special: ${special}`);
+      } else if (/trainer/i.test(special)) {
+        score += 1;
+        if (level === 'standard') level = 'support';
+        reasons.push(`special: ${special}`);
+      } else {
+        score += 1;
+        if (level === 'standard') level = 'support';
+        reasons.push(`special: ${special}`);
+      }
+    }
+
+    return { level, score, reasons };
+  }
+
+  function analyseCompanyRoles(positions, matrix) {
+    const currentCounts = countEmployeesByPosition(matrix, false);
+
+    const roles = positions.map((position) => {
+      const classification = classifyCompanyRole(position);
+      return {
+        position,
+        classification,
+        current: currentCounts.get(position.name) || 0,
+      };
+    });
+
+    const operational = roles
+      .filter((role) =>
+        role.classification.level === 'core' ||
+        role.classification.level === 'important'
+      )
+      .sort((a, b) =>
+        b.classification.score - a.classification.score ||
+        String(a.position.name).localeCompare(String(b.position.name))
+      );
+
+    return { roles, operational };
+  }
+
+  function countEmployeesByPosition(matrix, useBest = false) {
+    const counts = new Map();
+
+    for (const row of matrix) {
+      const positionName = useBest
+        ? row.best?.position?.name
+        : row.employee?.position;
+
+      if (!positionName) continue;
+
+      counts.set(
+        positionName,
+        (counts.get(positionName) || 0) + 1
+      );
+    }
+
+    return counts;
+  }
+
+  function buildPositionBalanceWarnings(matrix, positions) {
+    const currentCounts = countEmployeesByPosition(matrix, false);
+    const projectedCounts = countEmployeesByPosition(matrix, true);
+
+    const warnings = [];
+
+    for (const position of positions) {
+      const name = position.name;
+      const current = currentCounts.get(name) || 0;
+      const projected = projectedCounts.get(name) || 0;
+
+      if (current > 0 && projected === 0) {
+        warnings.push({
+          severity: 3,
+          position: name,
+          current,
+          projected,
+          text: `${name} would drop from ${current} employee${current === 1 ? '' : 's'} to 0.`
+        });
+      } else if (current >= 2 && projected < Math.ceil(current / 2)) {
+        warnings.push({
+          severity: 2,
+          position: name,
+          current,
+          projected,
+          text: `${name} would fall from ${current} to ${projected}.`
+        });
+      }
+    }
+
+    // Dynamically flag loss of operationally important roles based on the
+    // company type's actual position list and special-function metadata.
+    for (const position of positions) {
+      const classification = classifyCompanyRole(position);
+
+      if (
+        classification.level !== 'core' &&
+        classification.level !== 'important'
+      ) {
+        continue;
+      }
+
+      const current = currentCounts.get(position.name) || 0;
+      const projected = projectedCounts.get(position.name) || 0;
+
+      if (current > 0 && projected < current) {
+        const already = warnings.some((w) => w.position === position.name);
+
+        if (!already) {
+          warnings.push({
+            severity: projected === 0 ? 3 : 2,
+            position: position.name,
+            current,
+            projected,
+            text: `${position.name} would fall from ${current} to ${projected}; this role is classified as operationally important${position.special ? ` (${position.special})` : ''}.`
+          });
+        }
+      }
+    }
+
+    warnings.sort((a, b) =>
+      b.severity - a.severity ||
+      b.current - a.current ||
+      String(a.position).localeCompare(String(b.position))
+    );
+
+    return {
+      currentCounts,
+      projectedCounts,
+      warnings
+    };
+  }
+
   function renderOptimizeTab(panel) {
     const el = panel.querySelector('[data-tabpanel="optimize"]');
     if (!el) return;
@@ -3088,6 +3307,145 @@
     }
 
     const matrix = buildEmployeePositionMatrix(employees, positions);
+    const roleAnalysis = analyseCompanyRoles(positions, matrix);
+    const balance = buildPositionBalanceWarnings(matrix, positions);
+
+    html += `<div class="tds-section-label">Company roles</div>`;
+
+    html += `<div class="tds-box tds-box-info">
+      <strong>Available roles for this company type:</strong>
+      ${formatNumber(positions.length)} role${positions.length === 1 ? '' : 's'} detected dynamically from Torn's company-type reference data.
+    </div>`;
+
+    html += `<div style="overflow-x:auto;">
+      <table class="tds-table tds-optimize-table">
+        <thead>
+          <tr>
+            <th>Role</th>
+            <th>Current Staff</th>
+            <th>Special Function</th>
+            <th>Operational Classification</th>
+            <th>Why</th>
+          </tr>
+        </thead>
+        <tbody>`;
+
+    for (const role of roleAnalysis.roles) {
+      const cls =
+        role.classification.level === 'core'
+          ? 'tds-v-good'
+          : role.classification.level === 'important'
+            ? ''
+            : 'tds-v-dim';
+
+      const label =
+        role.classification.level === 'core'
+          ? 'Core'
+          : role.classification.level === 'important'
+            ? 'Important'
+            : role.classification.level === 'support'
+              ? 'Support'
+              : 'Standard';
+
+      html += `<tr>
+        <td><strong>${escapeHtml(role.position.name)}</strong></td>
+        <td>${formatNumber(role.current)}</td>
+        <td>${role.position.special ? escapeHtml(role.position.special) : '—'}</td>
+        <td class="${cls}"><strong>${label}</strong></td>
+        <td>${role.classification.reasons.length
+          ? escapeHtml(role.classification.reasons.join(', '))
+          : 'No special operational marker detected'}</td>
+      </tr>`;
+    }
+
+    html += `</tbody></table></div>`;
+
+    html += `<div class="tds-section-label">Operationally important roles</div>`;
+
+    if (!roleAnalysis.operational.length) {
+      html += `<div class="tds-box tds-box-neutral">
+        No role in this company type was automatically classified as Core / Important.
+        The script will therefore rely on current staffing-balance warnings rather than inventing an essential-role requirement.
+      </div>`;
+    } else {
+      html += `<div class="tds-card">`;
+
+      for (const role of roleAnalysis.operational) {
+        const classification =
+          role.classification.level === 'core'
+            ? 'Core'
+            : 'Important';
+
+        html += `<div class="tds-row">
+          <span class="tds-row-label">
+            <strong>${escapeHtml(role.position.name)}</strong>
+            ${role.position.special ? `<span class="tds-v-dim"> · ${escapeHtml(role.position.special)}</span>` : ''}
+          </span>
+          <span class="tds-row-value">
+            ${classification} · ${formatNumber(role.current)} currently assigned
+          </span>
+        </div>`;
+      }
+
+      html += `</div>`;
+    }
+
+    html += `<div class="tds-box tds-box-neutral" style="margin-top:10px;">
+      <strong>About “essential” roles:</strong> Torn's company reference data does not provide an official
+      <em>essential / mandatory</em> flag. The suite therefore distinguishes between roles Torn exposes with
+      operational special functions and obvious sales/revenue roles. These are shown as
+      <strong>Operationally Important</strong>, not falsely presented as official mandatory staffing requirements.
+    </div>`;
+
+    html += `<div class="tds-box tds-box-warn">
+      <strong>Important — position capacity & company balance:</strong>
+      the recommendations below evaluate each employee <strong>individually</strong>.
+      Moving everyone to their personal “Best Position” can leave important roles understaffed or completely empty.
+      Treat the matrix as a decision aid, not a one-click staffing plan.
+    </div>`;
+
+    html += `<div class="tds-balance-grid">
+      <div class="tds-balance-card">
+        <div class="tds-balance-title">Current → Recommended Headcount</div>`;
+
+    for (const position of positions) {
+      const current = balance.currentCounts.get(position.name) || 0;
+      const projected = balance.projectedCounts.get(position.name) || 0;
+
+      if (current === 0 && projected === 0) continue;
+
+      const cls =
+        projected < current
+          ? 'tds-v-bad'
+          : projected > current
+            ? 'tds-v-good'
+            : '';
+
+      html += `<div class="tds-balance-row">
+        <span>${escapeHtml(position.name)}</span>
+        <span class="${cls}"><strong>${current} → ${projected}</strong></span>
+      </div>`;
+    }
+
+    html += `</div>`;
+
+    html += `<div class="tds-balance-card">
+      <div class="tds-balance-title">Potential Staffing Risks</div>`;
+
+    if (!balance.warnings.length) {
+      html += `<div class="tds-v-good">No obvious role-collapse risk detected from the individual recommendations.</div>`;
+    } else {
+      for (const warning of balance.warnings) {
+        html += `<div style="margin-bottom:6px;" class="tds-v-bad">
+          ⚠ ${escapeHtml(warning.text)}
+        </div>`;
+      }
+    }
+
+    html += `<div class="tds-v-dim" style="margin-top:8px;">
+      This warning checks current vs individually recommended headcount only.
+      It does not yet know minimum staffing requirements or position-capacity rules.
+    </div></div></div>`;
 
     // Existing recommendation summary
     const rows = [...matrix].sort((a, b) => {
@@ -3096,7 +3454,7 @@
       return av - bv;
     });
 
-    html += `<div class="tds-section-label">Recommended positions</div>`;
+    html += `<div class="tds-section-label">Recommended positions — individual best</div>`;
     html += `<div style="overflow-x:auto;">
       <table class="tds-table tds-optimize-table">
         <thead>
@@ -3232,7 +3590,7 @@
     }
 
     html += `<div class="tds-box tds-box-neutral" style="margin-top:10px;">
-      <strong>Important:</strong> this matrix evaluates employees individually. It does not yet account for the fact that multiple employees may compete for the same limited company position. A future whole-company assignment optimiser can solve that as a separate step.
+      <strong>Next optimisation step:</strong> a whole-company assignment optimiser can consider role coverage and position limits together, so it recommends a balanced team rather than simply placing every employee in their individual highest-EE role.
     </div>`;
 
     el.innerHTML = html;
