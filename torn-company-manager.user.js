@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Company Management Suite
 // @namespace    torn-company-management-suite
-// @version      1.3.65
+// @version      1.3.66
 // @description  Local-only company management dashboard for Torn directors, embedded in the Jobs page. No company data ever leaves your browser; only your Torn User ID is checked against a public license list.
 // @author       DooBiiE
 // @homepageURL  https://github.com/DooBiiE/Torn-Company-Manager
@@ -70,7 +70,7 @@
   // TornPDA does not always expose the legacy GM_info object that desktop
   // userscript managers provide. Try both common metadata APIs, then use the
   // release version as a PDA-safe fallback so the UI never shows vunknown.
-  const TDS_VERSION_FALLBACK = '1.3.65';
+  const TDS_VERSION_FALLBACK = '1.3.66';
   const TDS_VERSION =
     (typeof GM_info !== 'undefined' && GM_info?.script?.version) ||
     (typeof GM !== 'undefined' && GM?.info?.script?.version) ||
@@ -5977,8 +5977,8 @@
               ? 'tds-v-bad'
               : '';
 
-      html += `<tr>
-        <td><strong>${escapeHtml(assignment.row.employee.name)}</strong></td>
+      html += `<tr data-employee-id="${escapeHtml(String(assignment.row.employee.id))}" data-employee-name="${escapeHtml(String(assignment.row.employee.name))}">
+        <td><strong class="tds-employee-profile-link" data-employee-profile data-employee-id="${escapeHtml(String(assignment.row.employee.id))}" data-employee-name="${escapeHtml(String(assignment.row.employee.name))}" title="Open employee summary">${escapeHtml(assignment.row.employee.name)}</strong></td>
         <td>${escapeHtml(assignment.currentPosition || '—')}</td>
         <td class="${isMove ? 'tds-v-good' : ''}"><strong>${escapeHtml(assignment.assignedPosition || '—')}</strong></td>
         <td class="${actionClass}"><strong>${isMove ? 'MOVE' : 'KEEP'}</strong></td>
@@ -6075,8 +6075,8 @@
               ? 'tds-v-bad'
               : '';
 
-      html += `<tr>
-        <td><strong>${escapeHtml(row.employee.name)}</strong></td>
+      html += `<tr data-employee-id="${escapeHtml(String(row.employee.id))}" data-employee-name="${escapeHtml(String(row.employee.name))}">
+        <td><strong class="tds-employee-profile-link" data-employee-profile data-employee-id="${escapeHtml(String(row.employee.id))}" data-employee-name="${escapeHtml(String(row.employee.name))}" title="Open employee summary">${escapeHtml(row.employee.name)}</strong></td>
         <td>${escapeHtml(row.employee.position || '—')}</td>
         <td>${currentTotal !== null ? formatNumber(currentTotal) : '—'}</td>
         <td>${row.best ? escapeHtml(row.best.position.name) : '—'}</td>
@@ -6108,8 +6108,8 @@
     html += `</tr></thead><tbody>`;
 
     for (const row of matrix) {
-      html += `<tr>
-        <td><strong>${escapeHtml(row.employee.name)}</strong></td>
+      html += `<tr data-employee-id="${escapeHtml(String(row.employee.id))}" data-employee-name="${escapeHtml(String(row.employee.name))}">
+        <td><strong class="tds-employee-profile-link" data-employee-profile data-employee-id="${escapeHtml(String(row.employee.id))}" data-employee-name="${escapeHtml(String(row.employee.name))}" title="Open employee summary">${escapeHtml(row.employee.name)}</strong></td>
         <td>${escapeHtml(row.employee.position || '—')}</td>`;
 
       for (const cell of row.cells) {
