@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Company Management Suite
 // @namespace    torn-company-management-suite
-// @version      1.3.48
+// @version      1.3.49
 // @description  Local-only company management dashboard for Torn directors, embedded in the Jobs page. No company data ever leaves your browser; only your Torn User ID is checked against a public license list.
 // @author       DooBiiE
 // @homepageURL  https://github.com/DooBiiE/Torn-Company-Manager
@@ -70,7 +70,7 @@
   // TornPDA does not always expose the legacy GM_info object that desktop
   // userscript managers provide. Try both common metadata APIs, then use the
   // release version as a PDA-safe fallback so the UI never shows vunknown.
-  const TDS_VERSION_FALLBACK = '1.3.48';
+  const TDS_VERSION_FALLBACK = '1.3.49';
   const TDS_VERSION =
     (typeof GM_info !== 'undefined' && GM_info?.script?.version) ||
     (typeof GM !== 'undefined' && GM?.info?.script?.version) ||
@@ -2381,6 +2381,17 @@
     );
   }
 
+  function mergeDefinedFields(base, incoming) {
+    const merged = { ...(base || {}) };
+
+    for (const [key, value] of Object.entries(incoming || {})) {
+      if (value === null || value === undefined) continue;
+      merged[key] = value;
+    }
+
+    return merged;
+  }
+
   async function getDailyPerformanceHistory() {
     const compact = await LocalDB.getAll('performance');
 
@@ -2415,14 +2426,14 @@
       byDay.set(record.day, {
         ...existing,
         ...record,
-        observed: {
-          ...(existing.observed || {}),
-          ...(record.observed || {}),
-        },
-        calculated: {
-          ...(existing.calculated || {}),
-          ...(record.calculated || {}),
-        },
+        observed: mergeDefinedFields(
+          existing.observed,
+          record.observed
+        ),
+        calculated: mergeDefinedFields(
+          existing.calculated,
+          record.calculated
+        ),
       });
     }
 
@@ -2452,14 +2463,14 @@
       ...(existing || {}),
       ...record,
       day,
-      observed: {
-        ...(existing?.observed || {}),
-        ...(record.observed || {}),
-      },
-      calculated: {
-        ...(existing?.calculated || {}),
-        ...(record.calculated || {}),
-      },
+      observed: mergeDefinedFields(
+        existing?.observed,
+        record.observed
+      ),
+      calculated: mergeDefinedFields(
+        existing?.calculated,
+        record.calculated
+      ),
     };
 
     await LocalDB.put('performance', merged);
@@ -3030,7 +3041,23 @@
       }
 
       const latest = history[history.length - 1];
-      const previous = history.length > 1 ? history[history.length - 2] : null;
+
+      const eeHistory = history.filter(
+        (row) =>
+          typeof row.calculated?.salesEE === 'number' &&
+          Number.isFinite(row.calculated.salesEE)
+      );
+
+      const latestEE =
+        eeHistory.length
+          ? eeHistory[eeHistory.length - 1]
+          : null;
+
+      const previousEE =
+        eeHistory.length > 1
+          ? eeHistory[eeHistory.length - 2]
+          : null;
+
       const adaptiveAnalysis = analyseSalesEEPerformance(history);
       const customerCorrelation = adaptiveAnalysis.customerCorrelation;
       const incomeCorrelation = adaptiveAnalysis.incomeCorrelation;
@@ -3044,7 +3071,14 @@
       </div>`;
 
       html += `<div class="tds-card">
-        <div class="tds-row"><span class="tds-row-label">Latest Sales EE capacity</span><span class="tds-row-value">${typeof latest.calculated?.salesEE === 'number' ? `${formatNumber(Math.round(latest.calculated.salesEE))} EE points` : '—'}</span></div>
+        <div class="tds-row">
+          <span class="tds-row-label">Latest Sales EE capacity</span>
+          <span class="tds-row-value">${
+            latestEE
+              ? `${formatNumber(Math.round(latestEE.calculated.salesEE))} EE points · ${escapeHtml(formatPerformanceDate(latestEE.timestamp))}`
+              : 'No locally recorded Sales EE yet'
+          }</span>
+        </div>
         <div class="tds-row"><span class="tds-row-label">Latest daily customers</span><span class="tds-row-value">${typeof latest.observed?.dailyCustomers === 'number' ? formatNumber(latest.observed.dailyCustomers) : '—'}</span></div>
         <div class="tds-row"><span class="tds-row-label">Latest daily income</span><span class="tds-row-value">${typeof latest.observed?.dailyIncome === 'number' ? formatMoney(latest.observed.dailyIncome) : '—'}</span></div>
         <div class="tds-row"><span class="tds-row-label">Sales EE ↔ daily customers</span><span class="tds-row-value">${escapeHtml(correlationLabel(customerCorrelation))}</span></div>
@@ -3086,30 +3120,40 @@
           ${escapeHtml(adaptiveAnalysis.reason)}
         </div>`;
 
-      if (previous) {
+      if (latestEE && previousEE) {
         const salesDelta =
-          typeof latest.calculated?.salesEE === 'number' &&
-          typeof previous.calculated?.salesEE === 'number'
-            ? latest.calculated.salesEE - previous.calculated.salesEE
-            : null;
+          latestEE.calculated.salesEE -
+          previousEE.calculated.salesEE;
 
         const customerDelta =
-          typeof latest.observed?.dailyCustomers === 'number' &&
-          typeof previous.observed?.dailyCustomers === 'number'
-            ? latest.observed.dailyCustomers - previous.observed.dailyCustomers
+          typeof latestEE.observed?.dailyCustomers === 'number' &&
+          typeof previousEE.observed?.dailyCustomers === 'number'
+            ? latestEE.observed.dailyCustomers - previousEE.observed.dailyCustomers
             : null;
 
         const incomeDelta =
-          typeof latest.observed?.dailyIncome === 'number' &&
-          typeof previous.observed?.dailyIncome === 'number'
-            ? latest.observed.dailyIncome - previous.observed.dailyIncome
+          typeof latestEE.observed?.dailyIncome === 'number' &&
+          typeof previousEE.observed?.dailyIncome === 'number'
+            ? latestEE.observed.dailyIncome - previousEE.observed.dailyIncome
             : null;
 
-        html += `<div class="tds-section-label">Latest observed change</div><div class="tds-card">
-          <div class="tds-row"><span class="tds-row-label">Sales EE capacity</span><span class="tds-row-value">${salesDelta === null ? '—' : `${salesDelta > 0 ? '+' : ''}${formatNumber(Math.round(salesDelta))} EE points`}</span></div>
+        html += `<div class="tds-section-label">Latest observed change</div>
+        <div class="tds-box tds-box-neutral">
+          Comparing the two most recent days that actually contain locally recorded Sales EE:
+          <strong>${escapeHtml(formatPerformanceDate(previousEE.timestamp))}</strong> → <strong>${escapeHtml(formatPerformanceDate(latestEE.timestamp))}</strong>.
+        </div>
+        <div class="tds-card">
+          <div class="tds-row"><span class="tds-row-label">Sales EE capacity</span><span class="tds-row-value">${salesDelta > 0 ? '+' : ''}${formatNumber(Math.round(salesDelta))} EE points</span></div>
           <div class="tds-row"><span class="tds-row-label">Daily customers</span><span class="tds-row-value">${customerDelta === null ? '—' : `${customerDelta > 0 ? '+' : ''}${formatNumber(customerDelta)}`}</span></div>
           <div class="tds-row"><span class="tds-row-label">Daily income</span><span class="tds-row-value">${incomeDelta === null ? '—' : `${incomeDelta > 0 ? '+' : ''}${formatMoney(incomeDelta)}`}</span></div>
         </div>`;
+      } else {
+        html += `<div class="tds-section-label">Latest observed change</div>
+          <div class="tds-box tds-box-neutral">
+            ${latestEE
+              ? `Only one day currently contains Sales EE (${escapeHtml(formatPerformanceDate(latestEE.timestamp))}). A change can be calculated after a second EE-bearing daily observation is stored.`
+              : 'No daily observations currently contain Sales EE. Run Diagnostics with employee data available to create the first EE-bearing observation.'}
+          </div>`;
       }
 
       html += `<div class="tds-box tds-box-neutral" style="margin-top:10px;">
