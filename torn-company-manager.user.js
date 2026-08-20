@@ -1,13 +1,13 @@
 // ==UserScript==
 // @name         Torn Company Management Suite
 // @namespace    torn-company-management-suite
-// @version      1.3.46
+// @version      1.3.47
 // @description  Local-only company management dashboard for Torn directors, embedded in the Jobs page. No company data ever leaves your browser; only your Torn User ID is checked against a public license list.
 // @author       DooBiiE
 // @homepageURL  https://github.com/DooBiiE/Torn-Company-Manager
 // @source       https://github.com/DooBiiE/Torn-Company-Manager
 // @supportURL   https://github.com/DooBiiE/Torn-Company-Manager/issues
-// @match        https://www.torn.com/*
+// @match        https://www.torn.com/companies.php*
 // @grant        GM_xmlhttpRequest
 // @grant        GM_setValue
 // @grant        GM_getValue
@@ -70,7 +70,7 @@
   // TornPDA does not always expose the legacy GM_info object that desktop
   // userscript managers provide. Try both common metadata APIs, then use the
   // release version as a PDA-safe fallback so the UI never shows vunknown.
-  const TDS_VERSION_FALLBACK = '1.3.46';
+  const TDS_VERSION_FALLBACK = '1.3.47';
   const TDS_VERSION =
     (typeof GM_info !== 'undefined' && GM_info?.script?.version) ||
     (typeof GM !== 'undefined' && GM?.info?.script?.version) ||
