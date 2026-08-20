@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Company Management Suite
 // @namespace    torn-company-management-suite
-// @version      1.3.49
+// @version      1.3.51
 // @description  Local-only company management dashboard for Torn directors, embedded in the Jobs page. No company data ever leaves your browser; only your Torn User ID is checked against a public license list.
 // @author       DooBiiE
 // @homepageURL  https://github.com/DooBiiE/Torn-Company-Manager
@@ -70,7 +70,7 @@
   // TornPDA does not always expose the legacy GM_info object that desktop
   // userscript managers provide. Try both common metadata APIs, then use the
   // release version as a PDA-safe fallback so the UI never shows vunknown.
-  const TDS_VERSION_FALLBACK = '1.3.49';
+  const TDS_VERSION_FALLBACK = '1.3.51';
   const TDS_VERSION =
     (typeof GM_info !== 'undefined' && GM_info?.script?.version) ||
     (typeof GM !== 'undefined' && GM?.info?.script?.version) ||
@@ -534,31 +534,28 @@
     if (directorOkCount === directorSignals.length && directorSignals.length > 0) {
       return {
         level: 'director',
-        headline: 'Director-level access confirmed',
-        detail: 'company/detailed, company/stock, and company/applications all returned real data. This key can drive the full system.',
+        headline: 'Director Access',
+        detail: 'Full company management features are available.',
       };
     }
     if (roster?.status === 'ok' && directorOkCount === 0 && directorBlockedCount > 0) {
       return {
         level: 'employee',
-        headline: 'Employee-level access only',
-        detail: 'Roster is visible, but financials/stock/applications are blocked (' +
-          directorSignals.map((r) => `${r.selections}: ${r.reason || 'blocked'}`).join('; ') +
-          '). This is a role check (are you the director of this company), not a key-tier limit — ' +
-          'a higher-access key on the same non-director account will not unlock these.',
+        headline: 'Employee Access',
+        detail: 'Employee features are available. You need to be the company director to access the full management features.',
       };
     }
     if (directorOkCount > 0 && directorOkCount < directorSignals.length) {
       return {
         level: 'partial',
-        headline: 'Partial / custom access',
-        detail: 'Some director-level selections succeeded, others didn\u2019t \u2014 looks like a Custom key missing a selection, not a role limit.',
+        headline: 'Partial Access',
+        detail: 'Some features are unavailable. Check your API key permissions in Settings.',
       };
     }
     return {
       level: 'unknown',
-      headline: 'Access level unclear',
-      detail: 'Not enough successful probes to classify yet. Check the Diagnostics tab.',
+      headline: 'Access Unknown',
+      detail: 'Run Diagnostics to check which features are available.',
     };
   }
 
@@ -594,6 +591,9 @@
         color: var(--tds-accent, #3ddc84); font-weight: 800; font-size: 13px; letter-spacing: .04em;
       }
       #tds-header .tds-brand-version { color: var(--tds-text-faintest, #888888); font-size: 10.5px; }
+      #tds-header .tds-access-badge { font-size: 9.5px; font-weight: 800; letter-spacing: .04em; padding: 2px 6px; border: 1px solid var(--tds-border-strong, #4a4a4a); border-radius: 10px; color: var(--tds-text-subtle, #969696); white-space: nowrap; }
+      #tds-header .tds-access-badge.tds-access-director { color: var(--tds-accent, #3ddc84); }
+      #tds-header .tds-access-badge.tds-access-employee, #tds-header .tds-access-badge.tds-access-partial { color: #e6b450; }
       #tds-header .tds-brand-subtitle { color: var(--tds-text-subtle, #969696); font-size: 10.5px; margin-left: 4px; }
       #tds-header-icons { display: flex; gap: 6px; flex-shrink: 0; }
       #tds-header-icons button {
@@ -1081,6 +1081,7 @@
           <span class="tds-brand-dot">\u25cb</span>
           <span class="tds-brand-name">TORN COMPANY MANAGEMENT SUITE</span>
           <span class="tds-brand-version">v${TDS_VERSION}</span>
+          <span class="tds-access-badge" id="tds-access-badge">ACCESS: —</span>
           <span class="tds-brand-subtitle">Company Director Dashboard</span>
         </div>
         <div id="tds-header-icons">
@@ -1117,6 +1118,7 @@
     // Put the suite into Torn's Jobs content rather than attaching an overlay to body.
     mount.prepend(panel);
     state.panel = panel;
+    updateHeaderAccessBadge(panel, GM_getValue(STORAGE_KEY_LAST_VERDICT, null));
 
     applyTheme(panel, GM_getValue(STORAGE_KEY_THEME, 'green'));
 
@@ -1160,21 +1162,17 @@
       <div class="tds-section-label">API Key</div>
       <div class="tds-box tds-box-neutral">Stored only in this browser (Tampermonkey local storage). Never sent anywhere except api.torn.com.</div>
       <div class="tds-box tds-box-warn">
-        <strong>What actually gates each selection</strong> (confirmed by testing a real key at both Limited
-        and Full Access, not assumed):
+        <strong>What the custom API key allows</strong>
         <ul style="margin:6px 0 0 18px; padding:0;">
-          <li><code>company: detailed, stock, applications</code> \u2014 gated by <strong>being the company
-            director</strong>, not by key tier. These returned BLOCKED (Torn error 7, "Incorrect ID-entity
-            relation") even with a Full Access key belonging to a non-director. No key upgrade fixes this;
-            only the director's own key gets real data here.</li>
-          <li><code>user: log</code> (training history) \u2014 <strong>is</strong> tier-gated: BLOCKED at Limited
-            (error 16, "access level not high enough"), ACCESSIBLE at Full.</li>
-          <li><code>company: profile, employees</code> and <code>user: basic, workstats</code> \u2014 worked at
-            Limited already.</li>
+          <li><strong>Company information:</strong> reads your company profile, employees and company type information.</li>
+          <li><strong>Director information:</strong> allows the suite to read financials, stock and applications when the key belongs to the company director.</li>
+          <li><strong>Company history:</strong> provides company news and snapshot data used for performance history and backfill.</li>
+          <li><strong>Employee & training information:</strong> provides your basic work information and the history used by the Training features.</li>
         </ul>
       </div>
       <div class="tds-box tds-box-neutral">
-        Company financials/stock/applications only return real data if you're the company's director.
+        The button below creates a <strong>Custom API Key</strong> with only the permissions requested by Torn Company Management Suite.
+        Some company management data is only available when the key belongs to the company director.
       </div>
       <div class="tds-box tds-box-neutral">
         <strong>Create the API key for this program.</strong><br>
@@ -1331,6 +1329,23 @@
     el.innerHTML = html;
   }
 
+  function updateHeaderAccessBadge(panel, verdict) {
+    const badge = panel?.querySelector('#tds-access-badge');
+    if (!badge) return;
+
+    const level = verdict?.level || 'unknown';
+    const labels = {
+      director: 'DIRECTOR ACCESS',
+      employee: 'EMPLOYEE ACCESS',
+      partial: 'PARTIAL ACCESS',
+      unknown: 'ACCESS UNKNOWN',
+    };
+
+    badge.textContent = labels[level] || 'ACCESS UNKNOWN';
+    badge.className = `tds-access-badge tds-access-${level}`;
+    badge.title = verdict?.detail || 'Access level determined by Diagnostics';
+  }
+
   function renderOverviewTab(panel, results, verdict) {
     const el = panel.querySelector('[data-tabpanel="overview"]');
     if (!results || !verdict) {
@@ -1338,9 +1353,13 @@
       return;
     }
 
+    updateHeaderAccessBadge(panel, verdict);
+
     let html = '';
-    const boxClass = verdict.level === 'director' ? 'tds-box-info' : verdict.level === 'unknown' ? 'tds-box-danger' : 'tds-box-warn';
-    html += `<div class="tds-box ${boxClass}"><strong>${escapeHtml(verdict.headline)}</strong><br>${escapeHtml(verdict.detail)}</div>`;
+    if (verdict.level !== 'director') {
+      const boxClass = verdict.level === 'unknown' ? 'tds-box-danger' : 'tds-box-warn';
+      html += `<div class="tds-box ${boxClass}">${escapeHtml(verdict.detail)}</div>`;
+    }
 
     const profile = findRaw(results, 'company', 'profile');
     const detailed = findRaw(results, 'company', 'detailed');
