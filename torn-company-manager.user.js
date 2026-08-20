@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Company Management Suite
 // @namespace    torn-company-management-suite
-// @version      1.3.52
+// @version      1.3.53
 // @description  Local-only company management dashboard for Torn directors, embedded in the Jobs page. No company data ever leaves your browser; only your Torn User ID is checked against a public license list.
 // @author       DooBiiE
 // @homepageURL  https://github.com/DooBiiE/Torn-Company-Manager
@@ -70,7 +70,7 @@
   // TornPDA does not always expose the legacy GM_info object that desktop
   // userscript managers provide. Try both common metadata APIs, then use the
   // release version as a PDA-safe fallback so the UI never shows vunknown.
-  const TDS_VERSION_FALLBACK = '1.3.52';
+  const TDS_VERSION_FALLBACK = '1.3.53';
   const TDS_VERSION =
     (typeof GM_info !== 'undefined' && GM_info?.script?.version) ||
     (typeof GM !== 'undefined' && GM?.info?.script?.version) ||
@@ -6759,6 +6759,71 @@
     return Boolean(ownName && rowName && ownName === rowName);
   }
 
+  function compareMetricDefinition(label, metric, value, average, median, rankInfo, money = false) {
+    const medianPct = percentDiff(value, median);
+    const averagePct = percentDiff(value, average);
+
+    return {
+      label,
+      metric,
+      value,
+      average,
+      median,
+      rankInfo,
+      money,
+      medianPct,
+      averagePct,
+      percentile:
+        rankInfo?.rank !== null &&
+        rankInfo?.rank !== undefined &&
+        rankInfo?.total > 0
+          ? ((rankInfo.total - rankInfo.rank + 1) / rankInfo.total) * 100
+          : null,
+    };
+  }
+
+  function compareMetricStrengthScore(item) {
+    if (!item || typeof item.value !== 'number') return null;
+
+    // Prefer rank percentile when available because it is directly tied to
+    // the returned comparison set. Fall back to median difference otherwise.
+    if (typeof item.percentile === 'number' && Number.isFinite(item.percentile)) {
+      return item.percentile;
+    }
+
+    if (typeof item.medianPct === 'number' && Number.isFinite(item.medianPct)) {
+      return 50 + Math.max(-50, Math.min(50, item.medianPct));
+    }
+
+    return null;
+  }
+
+  function compareGapToTop(item) {
+    if (!item?.rankInfo?.rows?.length || typeof item.value !== 'number') return null;
+
+    const top = item.rankInfo.rows.find((row) =>
+      typeof row[item.metric] === 'number' &&
+      Number.isFinite(row[item.metric])
+    );
+
+    if (!top) return null;
+
+    const topValue = top[item.metric];
+    return {
+      topValue,
+      absolute: Math.max(0, topValue - item.value),
+      percent:
+        item.value !== 0
+          ? ((topValue - item.value) / Math.abs(item.value)) * 100
+          : null,
+    };
+  }
+
+  function formatCompareMetricValue(item, value) {
+    if (typeof value !== 'number' || !Number.isFinite(value)) return '—';
+    return item.money ? formatMoney(value) : formatNumber(value);
+  }
+
   async function renderBenchmarkResults(panel, data, own) {
     const el = panel.querySelector('[data-tabpanel="benchmark"] #tds-bench-results');
     if (!el) return;
@@ -6929,6 +6994,63 @@
       ? resolveRankFromValue(weeklyCustomersRank, ownRow.weeklyCustomers, 'weeklyCustomers')
       : weeklyCustomersRank;
 
+    const compareMetrics = ownRow
+      ? [
+          compareMetricDefinition(
+            'Daily Income',
+            'dailyIncome',
+            ownRow.dailyIncome,
+            avgDailyIncome,
+            medianNumeric(sorted.map((r) => r.dailyIncome)),
+            resolvedDailyIncomeRank,
+            true
+          ),
+          compareMetricDefinition(
+            'Daily Customers',
+            'dailyCustomers',
+            ownRow.dailyCustomers,
+            avgDailyCustomers,
+            medianDailyCustomers,
+            resolvedDailyCustomersRank,
+            false
+          ),
+          compareMetricDefinition(
+            'Weekly Income',
+            'weeklyIncome',
+            ownRow.weeklyIncome,
+            avgWeeklyIncome,
+            medianWeeklyIncome,
+            resolvedWeeklyIncomeRank,
+            true
+          ),
+          compareMetricDefinition(
+            'Weekly Customers',
+            'weeklyCustomers',
+            ownRow.weeklyCustomers,
+            avgWeeklyCustomers,
+            medianWeeklyCustomers,
+            resolvedWeeklyCustomersRank,
+            false
+          ),
+        ].filter((item) => typeof item.value === 'number')
+      : [];
+
+    const scoredCompareMetrics = compareMetrics
+      .map((item) => ({
+        ...item,
+        strengthScore: compareMetricStrengthScore(item),
+        topGap: compareGapToTop(item),
+      }))
+      .filter((item) => typeof item.strengthScore === 'number');
+
+    const strongestMetric = scoredCompareMetrics.length
+      ? [...scoredCompareMetrics].sort((a, b) => b.strengthScore - a.strengthScore)[0]
+      : null;
+
+    const weakestMetric = scoredCompareMetrics.length
+      ? [...scoredCompareMetrics].sort((a, b) => a.strengthScore - b.strengthScore)[0]
+      : null;
+
     const tierLabel =
       tier === 'same'
         ? (ownRating !== null ? `Same Rating (${ownRating}★)` : 'Same Rating')
@@ -6959,6 +7081,104 @@
       }
     }
     html += `</div>`;
+
+    if (ownRow && compareMetrics.length) {
+      html += `<div class="tds-section-label">Compare Insights</div>`;
+
+      const primaryMetric =
+        metric === 'weeklyIncome'
+          ? compareMetrics.find((item) => item.metric === 'weeklyIncome')
+          : compareMetrics.find((item) => item.metric === 'dailyIncome');
+
+      html += `<div class="tds-optimizer-summary">`;
+
+      if (primaryMetric?.rankInfo?.rank !== null) {
+        html += `<div class="tds-optimizer-card">
+          <div class="tds-optimizer-label">Your Rank</div>
+          <div class="tds-optimizer-value">#${primaryMetric.rankInfo.rank} / ${primaryMetric.rankInfo.total}</div>
+          <div class="tds-v-dim">${escapeHtml(primaryMetric.label)}</div>
+        </div>`;
+      }
+
+      if (primaryMetric && typeof primaryMetric.medianPct === 'number') {
+        html += `<div class="tds-optimizer-card">
+          <div class="tds-optimizer-label">vs Median</div>
+          <div class="tds-optimizer-value ${primaryMetric.medianPct >= 0 ? 'tds-v-good' : 'tds-v-bad'}">${signedPercent(primaryMetric.medianPct)}</div>
+          <div class="tds-v-dim">${escapeHtml(primaryMetric.label)}</div>
+        </div>`;
+      }
+
+      if (primaryMetric?.topGap) {
+        html += `<div class="tds-optimizer-card">
+          <div class="tds-optimizer-label">Gap to #1</div>
+          <div class="tds-optimizer-value">${formatCompareMetricValue(primaryMetric, primaryMetric.topGap.absolute)}</div>
+          <div class="tds-v-dim">${typeof primaryMetric.topGap.percent === 'number' ? `${primaryMetric.topGap.percent.toFixed(1)}%` : ''}</div>
+        </div>`;
+      }
+
+      if (strongestMetric) {
+        html += `<div class="tds-optimizer-card">
+          <div class="tds-optimizer-label">Strongest Metric</div>
+          <div class="tds-optimizer-value tds-v-good" style="font-size:13px;">${escapeHtml(strongestMetric.label)}</div>
+          <div class="tds-v-dim">${strongestMetric.rankInfo?.rank !== null ? `#${strongestMetric.rankInfo.rank} / ${strongestMetric.rankInfo.total}` : signedPercent(strongestMetric.medianPct)}</div>
+        </div>`;
+      }
+
+      if (weakestMetric) {
+        html += `<div class="tds-optimizer-card">
+          <div class="tds-optimizer-label">Weakest Metric</div>
+          <div class="tds-optimizer-value ${weakestMetric.strengthScore < 50 ? 'tds-v-bad' : ''}" style="font-size:13px;">${escapeHtml(weakestMetric.label)}</div>
+          <div class="tds-v-dim">${weakestMetric.rankInfo?.rank !== null ? `#${weakestMetric.rankInfo.rank} / ${weakestMetric.rankInfo.total}` : signedPercent(weakestMetric.medianPct)}</div>
+        </div>`;
+      }
+
+      html += `</div>`;
+
+      html += `<div class="tds-card">`;
+
+      if (strongestMetric) {
+        html += `<div class="tds-row">
+          <span class="tds-row-label">Strongest measurable area</span>
+          <span class="tds-row-value tds-v-good">
+            ${escapeHtml(strongestMetric.label)}
+            ${typeof strongestMetric.medianPct === 'number' ? ` · ${signedPercent(strongestMetric.medianPct)} vs median` : ''}
+          </span>
+        </div>`;
+      }
+
+      if (weakestMetric) {
+        html += `<div class="tds-row">
+          <span class="tds-row-label">Weakest measurable area</span>
+          <span class="tds-row-value ${typeof weakestMetric.medianPct === 'number' && weakestMetric.medianPct < 0 ? 'tds-v-bad' : ''}">
+            ${escapeHtml(weakestMetric.label)}
+            ${typeof weakestMetric.medianPct === 'number' ? ` · ${signedPercent(weakestMetric.medianPct)} vs median` : ''}
+          </span>
+        </div>`;
+      }
+
+      if (primaryMetric?.topGap) {
+        html += `<div class="tds-row">
+          <span class="tds-row-label">Top performer (${escapeHtml(primaryMetric.label)})</span>
+          <span class="tds-row-value">
+            ${formatCompareMetricValue(primaryMetric, primaryMetric.topGap.topValue)}
+          </span>
+        </div>`;
+        html += `<div class="tds-row">
+          <span class="tds-row-label">Difference to top performer</span>
+          <span class="tds-row-value">
+            ${formatCompareMetricValue(primaryMetric, primaryMetric.topGap.absolute)}
+            ${typeof primaryMetric.topGap.percent === 'number' ? ` (${primaryMetric.topGap.percent.toFixed(1)}%)` : ''}
+          </span>
+        </div>`;
+      }
+
+      html += `</div>`;
+
+      html += `<div class="tds-box tds-box-neutral">
+        Insights use only the companies and measurable fields returned in this Compare fetch.
+        They describe relative position within this fetched group and do not infer hidden Torn mechanics.
+      </div>`;
+    }
 
     if (ownRow) {
       html += `<div class="tds-section-label">Performance summary</div>`;
@@ -7139,7 +7359,7 @@
     </tr></thead><tbody>`;
 
     sorted.slice(0, 25).forEach((row, i) => {
-      const isYou = ownId !== null && row.id !== null && String(row.id) === String(ownId);
+      const isYou = isOwnCompareCompany(row, own);
       html += `<tr class="company-data-row" style="${isYou ? 'color:var(--tds-accent,#3ddc84);font-weight:700;' : ''}">
         <td>${i + 1}</td>
         <td>${escapeHtml(String(row.name ?? `#${row.id ?? '?'}`))}${isYou ? ' (you)' : ''}</td>
