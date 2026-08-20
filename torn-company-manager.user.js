@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Company Management Suite
 // @namespace    torn-company-management-suite
-// @version      1.3.47
+// @version      1.3.48
 // @description  Local-only company management dashboard for Torn directors, embedded in the Jobs page. No company data ever leaves your browser; only your Torn User ID is checked against a public license list.
 // @author       DooBiiE
 // @homepageURL  https://github.com/DooBiiE/Torn-Company-Manager
@@ -70,7 +70,7 @@
   // TornPDA does not always expose the legacy GM_info object that desktop
   // userscript managers provide. Try both common metadata APIs, then use the
   // release version as a PDA-safe fallback so the UI never shows vunknown.
-  const TDS_VERSION_FALLBACK = '1.3.47';
+  const TDS_VERSION_FALLBACK = '1.3.48';
   const TDS_VERSION =
     (typeof GM_info !== 'undefined' && GM_info?.script?.version) ||
     (typeof GM !== 'undefined' && GM?.info?.script?.version) ||
@@ -2852,6 +2852,169 @@
     });
   }
 
+  function medianNumeric(values) {
+    const nums = values
+      .filter((value) => typeof value === 'number' && Number.isFinite(value))
+      .sort((a, b) => a - b);
+
+    if (!nums.length) return null;
+
+    const mid = Math.floor(nums.length / 2);
+    return nums.length % 2
+      ? nums[mid]
+      : (nums[mid - 1] + nums[mid]) / 2;
+  }
+
+  function analyseSalesEEPerformance(history) {
+    const paired = (history || []).filter((row) =>
+      typeof row.calculated?.salesEE === 'number' &&
+      Number.isFinite(row.calculated.salesEE) &&
+      typeof row.observed?.dailyCustomers === 'number' &&
+      Number.isFinite(row.observed.dailyCustomers) &&
+      typeof row.observed?.dailyIncome === 'number' &&
+      Number.isFinite(row.observed.dailyIncome)
+    );
+
+    const uniqueSalesEE = new Set(
+      paired.map((row) => Math.round(row.calculated.salesEE))
+    );
+
+    const salesValues = paired.map((row) => row.calculated.salesEE);
+    const minSalesEE = salesValues.length ? Math.min(...salesValues) : null;
+    const maxSalesEE = salesValues.length ? Math.max(...salesValues) : null;
+    const variationRatio =
+      minSalesEE !== null &&
+      maxSalesEE !== null &&
+      maxSalesEE > 0
+        ? (maxSalesEE - minSalesEE) / maxSalesEE
+        : 0;
+
+    const customerCorrelation = pearsonCorrelation(
+      paired.map((row) => [
+        row.calculated.salesEE,
+        row.observed.dailyCustomers,
+      ])
+    );
+
+    const incomeCorrelation = pearsonCorrelation(
+      paired.map((row) => [
+        row.calculated.salesEE,
+        row.observed.dailyIncome,
+      ])
+    );
+
+    const medianCustomers = medianNumeric(
+      paired.map((row) => row.observed.dailyCustomers)
+    );
+
+    const medianIncome = medianNumeric(
+      paired.map((row) => row.observed.dailyIncome)
+    );
+
+    // "Healthy outcome" is deliberately broad: both customers and income
+    // must be at least 90% of this company's median for the paired sample.
+    // This is not a Torn formula; it is used only to identify historically
+    // observed lower-EE days that did not coincide with a large outcome drop.
+    const healthyRows =
+      medianCustomers !== null && medianIncome !== null
+        ? paired.filter((row) =>
+            row.observed.dailyCustomers >= medianCustomers * 0.90 &&
+            row.observed.dailyIncome >= medianIncome * 0.90
+          )
+        : [];
+
+    const latest = paired.length ? paired[paired.length - 1] : null;
+    const latestSalesEE = latest?.calculated?.salesEE ?? null;
+
+    let adaptiveFloor = CORE_CAPACITY_RETAIN_RATIO;
+    let adaptive = false;
+    let reason =
+      'Default 85% Core-role EE safety floor retained because there is not enough paired performance evidence yet.';
+
+    // Require at least a week of paired observations, meaningful EE variation,
+    // and at least three healthy comparison days before changing the floor.
+    if (
+      paired.length >= 7 &&
+      uniqueSalesEE.size >= 3 &&
+      variationRatio >= 0.05 &&
+      healthyRows.length >= 3 &&
+      typeof latestSalesEE === 'number' &&
+      latestSalesEE > 0
+    ) {
+      const healthySalesEE = healthyRows
+        .map((row) => row.calculated.salesEE)
+        .filter((value) => typeof value === 'number' && Number.isFinite(value));
+
+      const observedHealthyMinimum = Math.min(...healthySalesEE);
+      const observedRatio = observedHealthyMinimum / latestSalesEE;
+
+      // Never allow history alone to make the optimiser extremely aggressive.
+      // Evidence may adjust Core protection only within 80%-95%.
+      adaptiveFloor = Math.max(
+        0.80,
+        Math.min(0.95, observedRatio)
+      );
+
+      // Avoid changing the displayed/used floor for tiny differences.
+      if (Math.abs(adaptiveFloor - CORE_CAPACITY_RETAIN_RATIO) >= 0.02) {
+        adaptive = true;
+        reason =
+          `Evidence-informed floor based on the lowest observed Sales EE level that still coincided with at least 90% of median customers and income.`;
+      } else {
+        adaptiveFloor = CORE_CAPACITY_RETAIN_RATIO;
+        reason =
+          'Historical evidence is broadly consistent with the existing 85% safety floor, so no adjustment was made.';
+      }
+    }
+
+    return {
+      pairedCount: paired.length,
+      uniqueSalesEECount: uniqueSalesEE.size,
+      variationRatio,
+      customerCorrelation,
+      incomeCorrelation,
+      medianCustomers,
+      medianIncome,
+      healthyCount: healthyRows.length,
+      latestSalesEE,
+      minSalesEE,
+      maxSalesEE,
+      adaptiveFloor,
+      adaptive,
+      reason,
+    };
+  }
+
+  function adaptiveEvidenceConfidence(analysis) {
+    if (!analysis) return 'LOW';
+
+    if (
+      analysis.pairedCount >= 21 &&
+      analysis.uniqueSalesEECount >= 5 &&
+      analysis.variationRatio >= 0.10
+    ) {
+      return 'HIGHER';
+    }
+
+    if (
+      analysis.pairedCount >= 14 &&
+      analysis.uniqueSalesEECount >= 4 &&
+      analysis.variationRatio >= 0.07
+    ) {
+      return 'MEDIUM';
+    }
+
+    if (
+      analysis.pairedCount >= 7 &&
+      analysis.uniqueSalesEECount >= 3 &&
+      analysis.variationRatio >= 0.05
+    ) {
+      return 'LOW-MEDIUM';
+    }
+
+    return 'LOW';
+  }
+
   async function renderOptimizerPerformanceEvidence(container) {
     const target = container.querySelector('#tds-performance-evidence');
     if (!target) return;
@@ -2868,17 +3031,15 @@
 
       const latest = history[history.length - 1];
       const previous = history.length > 1 ? history[history.length - 2] : null;
-      const customerCorrelation = pearsonCorrelation(
-        history.map((row) => [row.calculated?.salesEE, row.observed?.dailyCustomers])
-      );
-      const incomeCorrelation = pearsonCorrelation(
-        history.map((row) => [row.calculated?.salesEE, row.observed?.dailyIncome])
-      );
+      const adaptiveAnalysis = analyseSalesEEPerformance(history);
+      const customerCorrelation = adaptiveAnalysis.customerCorrelation;
+      const incomeCorrelation = adaptiveAnalysis.incomeCorrelation;
 
       let html = `<div class="tds-box tds-box-info">
         <strong>Performance evidence:</strong>
-        ${formatNumber(history.length)} local daily observation${history.length === 1 ? '' : 's'} available.
-        Confidence: <strong>${escapeHtml(performanceConfidence(history.length))}</strong>.
+        ${formatNumber(history.length)} total local/history observation${history.length === 1 ? '' : 's'} available.
+        ${formatNumber(adaptiveAnalysis.pairedCount)} day${adaptiveAnalysis.pairedCount === 1 ? '' : 's'} contain both Sales EE and real income/customer outcomes.
+        Evidence confidence: <strong>${escapeHtml(adaptiveEvidenceConfidence(adaptiveAnalysis))}</strong>.
         Correlations are observational only and do not prove cause/effect.
       </div>`;
 
@@ -2889,6 +3050,41 @@
         <div class="tds-row"><span class="tds-row-label">Sales EE ↔ daily customers</span><span class="tds-row-value">${escapeHtml(correlationLabel(customerCorrelation))}</span></div>
         <div class="tds-row"><span class="tds-row-label">Sales EE ↔ daily income</span><span class="tds-row-value">${escapeHtml(correlationLabel(incomeCorrelation))}</span></div>
       </div>`;
+
+      html += `<div class="tds-section-label">Adaptive EE impact assessment</div>
+        <div class="tds-card">
+          <div class="tds-row">
+            <span class="tds-row-label">Paired EE + performance days</span>
+            <span class="tds-row-value">${formatNumber(adaptiveAnalysis.pairedCount)}</span>
+          </div>
+          <div class="tds-row">
+            <span class="tds-row-label">Distinct Sales EE levels observed</span>
+            <span class="tds-row-value">${formatNumber(adaptiveAnalysis.uniqueSalesEECount)}</span>
+          </div>
+          <div class="tds-row">
+            <span class="tds-row-label">Observed Sales EE range</span>
+            <span class="tds-row-value">${
+              typeof adaptiveAnalysis.minSalesEE === 'number' &&
+              typeof adaptiveAnalysis.maxSalesEE === 'number'
+                ? `${formatNumber(Math.round(adaptiveAnalysis.minSalesEE))} → ${formatNumber(Math.round(adaptiveAnalysis.maxSalesEE))} EE points`
+                : '—'
+            }</span>
+          </div>
+          <div class="tds-row">
+            <span class="tds-row-label">Sales EE variation</span>
+            <span class="tds-row-value">${(adaptiveAnalysis.variationRatio * 100).toFixed(1)}%</span>
+          </div>
+          <div class="tds-row">
+            <span class="tds-row-label">Core-role safety floor</span>
+            <span class="tds-row-value ${adaptiveAnalysis.adaptive ? 'tds-v-good' : ''}">
+              <strong>${(adaptiveAnalysis.adaptiveFloor * 100).toFixed(0)}%</strong>
+              ${adaptiveAnalysis.adaptive ? ' · evidence-informed' : ' · default'}
+            </span>
+          </div>
+        </div>
+        <div class="tds-box ${adaptiveAnalysis.adaptive ? 'tds-box-info' : 'tds-box-neutral'}" style="margin-top:8px;">
+          ${escapeHtml(adaptiveAnalysis.reason)}
+        </div>`;
 
       if (previous) {
         const salesDelta =
@@ -4936,7 +5132,7 @@
     return total;
   }
 
-  function roleCapacityRules(positions, matrix) {
+  function roleCapacityRules(positions, matrix, coreRetainRatio = CORE_CAPACITY_RETAIN_RATIO) {
     const rules = new Map();
 
     for (const position of positions) {
@@ -4949,7 +5145,7 @@
       let retainRatio = 0;
 
       if (classification.level === 'core' && currentCount > 0) {
-        retainRatio = CORE_CAPACITY_RETAIN_RATIO;
+        retainRatio = coreRetainRatio;
       } else if (classification.level === 'important' && currentCount > 0) {
         retainRatio = IMPORTANT_CAPACITY_RETAIN_RATIO;
       }
@@ -4998,8 +5194,16 @@
     return row.cells.find((cell) => cell.position.name === positionName) || null;
   }
 
-  function optimiseCompanyAssignments(matrix, positions) {
-    const capacityRules = roleCapacityRules(positions, matrix);
+  function optimiseCompanyAssignments(
+    matrix,
+    positions,
+    coreRetainRatio = CORE_CAPACITY_RETAIN_RATIO
+  ) {
+    const capacityRules = roleCapacityRules(
+      positions,
+      matrix,
+      coreRetainRatio
+    );
     const currentCounts = countEmployeesByPosition(matrix, false);
 
     const assignments = matrix.map((row) => {
@@ -5150,7 +5354,7 @@
     };
   }
 
-  function renderOptimizeTab(panel) {
+  async function renderOptimizeTab(panel) {
     const el = panel.querySelector('[data-tabpanel="optimize"]');
     if (!el) return;
     const results = state.lastResults;
@@ -5191,7 +5395,20 @@
     const matrix = buildEmployeePositionMatrix(employees, positions);
     const roleAnalysis = analyseCompanyRoles(positions, matrix);
     const balance = buildPositionBalanceWarnings(matrix, positions);
-    const optimizer = optimiseCompanyAssignments(matrix, positions);
+
+    let optimizerHistory = [];
+    try {
+      optimizerHistory = await getDailyPerformanceHistory();
+    } catch (err) {
+      console.warn('[TDS] Adaptive optimiser history unavailable:', err);
+    }
+
+    const adaptiveAnalysis = analyseSalesEEPerformance(optimizerHistory);
+    const optimizer = optimiseCompanyAssignments(
+      matrix,
+      positions,
+      adaptiveAnalysis.adaptiveFloor
+    );
 
     html += `<div class="tds-section-label">Company roles</div>`;
 
@@ -5341,8 +5558,10 @@
 
     html += `<div class="tds-box tds-box-info">
       This optimiser starts from the current team and only recommends positive-EE moves that preserve protected <strong>role capacity</strong>.
-      Core sales/revenue roles retain at least <strong>85%</strong> of their current estimated EE capacity; other Important roles retain at least <strong>70%</strong>.
-      This is a management heuristic, not an official Torn staffing rule.
+      Core sales/revenue roles currently retain at least <strong>${(adaptiveAnalysis.adaptiveFloor * 100).toFixed(0)}%</strong> of estimated EE capacity
+      (${adaptiveAnalysis.adaptive ? 'evidence-informed from this company\'s paired history' : 'default safety floor'});
+      other Important roles retain at least <strong>70%</strong>.
+      These are management safeguards, not official Torn staffing rules.
     </div>`;
 
     html += `<div class="tds-optimizer-summary">
@@ -5363,6 +5582,10 @@
       <div class="tds-optimizer-card">
         <div class="tds-optimizer-label">Suggested Moves</div>
         <div class="tds-optimizer-value">${formatNumber(optimizer.appliedMoves.length)}</div>
+      </div>
+      <div class="tds-optimizer-card">
+        <div class="tds-optimizer-label">Evidence Confidence</div>
+        <div class="tds-optimizer-value">${escapeHtml(adaptiveEvidenceConfidence(adaptiveAnalysis))}</div>
       </div>
     </div>`;
 
@@ -5694,7 +5917,7 @@
     }
 
     html += `<div class="tds-box tds-box-neutral" style="margin-top:10px;">
-      <strong>Optimizer limitation:</strong> role-capacity floors are estimated from current employee EE and configurable heuristic retention levels (85% Core / 70% Important). They are not official Torn minimum staffing requirements, and revenue impact cannot be predicted exactly from headcount alone.
+      <strong>Optimizer limitation:</strong> Core-role protection may adapt only when enough paired Sales EE + income/customer observations exist; otherwise it remains at the default 85%. Important roles remain at 70%. These are not official Torn minimum staffing requirements, and the suite does not claim that EE changes directly cause a specific revenue change.
     </div>`;
 
     el.innerHTML = html;
@@ -6954,7 +7177,7 @@
       renderTrainingTab(panel).catch((err) => console.error('[TDS] Training render failed:', err));
 
       try { renderBenchmarkTab(panel); } catch (err) { console.warn('[TDS] Compare restore failed:', err); }
-      try { renderOptimizeTab(panel); } catch (err) { console.warn('[TDS] Effectiveness restore failed:', err); }
+      renderOptimizeTab(panel).catch((err) => console.warn('[TDS] Effectiveness restore failed:', err));
 
       startFooterTicker(panel);
 
@@ -7022,7 +7245,7 @@
       renderTrainingTab(panel).catch((err) => console.error('[TDS] Training render failed:', err));
 
       try { renderBenchmarkTab(panel); } catch (err) { console.error('[TDS] Compare render after diagnostic failed:', err); }
-      try { renderOptimizeTab(panel); } catch (err) { console.error('[TDS] Effectiveness render after diagnostic failed:', err); }
+      renderOptimizeTab(panel).catch((err) => console.error('[TDS] Effectiveness render after diagnostic failed:', err));
 
       checkLicense(panel, { force }).catch((err) => console.warn('[TDS] License check after diagnostic failed:', err));
     } catch (err) {
