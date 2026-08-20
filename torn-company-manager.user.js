@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Company Management Suite
 // @namespace    torn-company-management-suite
-// @version      1.3.58
+// @version      1.3.60
 // @description  Local-only company management dashboard for Torn directors, embedded in the Jobs page. No company data ever leaves your browser; only your Torn User ID is checked against a public license list.
 // @author       DooBiiE
 // @homepageURL  https://github.com/DooBiiE/Torn-Company-Manager
@@ -70,7 +70,7 @@
   // TornPDA does not always expose the legacy GM_info object that desktop
   // userscript managers provide. Try both common metadata APIs, then use the
   // release version as a PDA-safe fallback so the UI never shows vunknown.
-  const TDS_VERSION_FALLBACK = '1.3.58';
+  const TDS_VERSION_FALLBACK = '1.3.60';
   const TDS_VERSION =
     (typeof GM_info !== 'undefined' && GM_info?.script?.version) ||
     (typeof GM !== 'undefined' && GM?.info?.script?.version) ||
@@ -642,6 +642,7 @@
       .tds-box strong { color: inherit; }
       .tds-badge { display: inline-flex; align-items: center; font: 700 10px/1 -apple-system, sans-serif; padding: 3px 7px; border-radius: 5px; white-space: nowrap; letter-spacing: .02em; }
       .tds-badge-ok { background: rgba(61,220,132,.14); color: #3ddc84; border: 1px solid rgba(61,220,132,.3); }
+      .tds-badge-warn { background: rgba(245,166,35,.14); color: #f5a623; border: 1px solid rgba(245,166,35,.32); }
       .tds-badge-blocked { background: rgba(255,92,92,.12); color: #ff8b8b; border: 1px solid rgba(255,92,92,.28); }
       .tds-badge-neutral { background: var(--tds-bg-hover, #404040); color: var(--tds-text-icon, #aaaaaa); border: 1px solid var(--tds-border-strong, #4a4a4a); }
       .tds-employee-row { padding: 9px 0; border-bottom: 1px solid var(--tds-border-soft, #242424); }
@@ -1347,6 +1348,36 @@
     badge.title = 'Access level determined by Diagnostics';
   }
 
+  function employeeOnlineStatusMeta(status) {
+    const normalized = String(status || '').trim().toLowerCase();
+
+    if (normalized === 'online') {
+      return {
+        badgeClass: 'tds-badge-ok',
+        textClass: 'tds-v-good',
+      };
+    }
+
+    if (normalized === 'idle') {
+      return {
+        badgeClass: 'tds-badge-warn',
+        textClass: 'tds-v-warn',
+      };
+    }
+
+    if (normalized === 'offline') {
+      return {
+        badgeClass: 'tds-badge-blocked',
+        textClass: 'tds-v-bad',
+      };
+    }
+
+    return {
+      badgeClass: 'tds-badge-neutral',
+      textClass: 'tds-v-dim',
+    };
+  }
+
   function renderOverviewTab(panel, results, verdict) {
     const el = panel.querySelector('[data-tabpanel="overview"]');
     if (!results || !verdict) {
@@ -1507,6 +1538,11 @@
         const onlineStatus = lastAction?.status || '—';
         const playerState = status?.state || '—';
         const stateDetail = status?.description || '—';
+        const onlineMeta = employeeOnlineStatusMeta(onlineStatus);
+        const lastActionText =
+          lastAction?.relative ||
+          formatTimestampRelative(lastAction?.timestamp) ||
+          '—';
 
         html += `
           <details class="tds-employee-row">
@@ -1514,10 +1550,13 @@
               <div class="tds-employee-top">
                 <div>
                   <div class="tds-employee-name">${escapeHtml(String(employee.name))}</div>
-                  <div class="tds-employee-meta">${escapeHtml(String(employee.position || 'Employee'))}</div>
+                  <div class="tds-employee-meta">
+                    ${escapeHtml(String(employee.position || 'Employee'))}
+                    <span class="${onlineMeta.textClass}" style="margin-left:6px;">· ${escapeHtml(String(lastActionText))}</span>
+                  </div>
                 </div>
                 <div style="display:flex; align-items:center; gap:8px;">
-                  <span class="tds-badge tds-badge-neutral">${escapeHtml(String(onlineStatus))}</span>
+                  <span class="tds-badge ${onlineMeta.badgeClass}">${escapeHtml(String(onlineStatus))}</span>
                   <span class="tds-employee-chevron">\u25b8</span>
                 </div>
               </div>
@@ -1541,10 +1580,10 @@
 
               ${status || lastAction ? `
                 <div class="tds-section-label tds-employee-subheading" style="margin-top:10px;">Status</div>
-                <div class="tds-row"><span class="tds-row-label">Online Status</span><span class="tds-row-value">${escapeHtml(String(onlineStatus))}</span></div>
+                <div class="tds-row"><span class="tds-row-label">Online Status</span><span class="tds-row-value ${onlineMeta.textClass}">${escapeHtml(String(onlineStatus))}</span></div>
                 <div class="tds-row"><span class="tds-row-label">State</span><span class="tds-row-value">${escapeHtml(String(playerState))}</span></div>
                 <div class="tds-row"><span class="tds-row-label">Detail</span><span class="tds-row-value">${escapeHtml(String(stateDetail))}</span></div>
-                <div class="tds-row"><span class="tds-row-label">Last action</span><span class="tds-row-value">${escapeHtml(String(lastAction?.relative || formatTimestampRelative(lastAction?.timestamp)))}</span></div>
+                <div class="tds-row"><span class="tds-row-label">Last action</span><span class="tds-row-value ${onlineMeta.textClass}">${escapeHtml(String(lastActionText))}</span></div>
               ` : ''}
             </div>
           </details>`;
@@ -3269,11 +3308,11 @@
 
     // --- Today snapshot card ---
     html += '<div class="tds-section-label">Today</div><div class="tds-card">';
-    html += `<div class="tds-row"><span class="tds-row-label">Gross${dailyField ? ` (${dailyField.path})` : ''}</span><span class="tds-row-value">${todayGross !== null ? formatMoney(todayGross) : '<span class="tds-v-dim">unavailable</span>'}</span></div>`;
-    html += `<div class="tds-row"><span class="tds-row-label">Salaries${salaryFieldName ? ` (${salaryFieldName})` : ''}</span><span class="tds-row-value tds-v-bad">${totalSalary !== null ? '-' + formatMoney(totalSalary) : '<span class="tds-v-dim">no wage field in this key\u2019s response</span>'}</span></div>`;
-    html += `<div class="tds-row"><span class="tds-row-label">Net (DERIVED)</span><span class="tds-row-value ${todayNet !== null ? (todayNet >= 0 ? 'tds-v-good' : 'tds-v-bad') : ''}">${todayNet !== null ? formatMoney(todayNet) : '<span class="tds-v-dim">needs gross + salary above</span>'}</span></div>`;
+    html += `<div class="tds-row"><span class="tds-row-label">Daily Income</span><span class="tds-row-value">${todayGross !== null ? formatMoney(todayGross) : '<span class="tds-v-dim">Unavailable</span>'}</span></div>`;
+    html += `<div class="tds-row"><span class="tds-row-label">Salaries</span><span class="tds-row-value tds-v-bad">${totalSalary !== null ? '-' + formatMoney(totalSalary) : '<span class="tds-v-dim">Unavailable</span>'}</span></div>`;
+    html += `<div class="tds-row"><span class="tds-row-label">Income after Salaries</span><span class="tds-row-value ${todayNet !== null ? (todayNet >= 0 ? 'tds-v-good' : 'tds-v-bad') : ''}">${todayNet !== null ? formatMoney(todayNet) : '<span class="tds-v-dim">Unavailable</span>'}</span></div>`;
     if (weeklyField) {
-      html += `<div class="tds-row"><span class="tds-row-label">Weekly (${weeklyField.path})</span><span class="tds-row-value">${formatMoney(weeklyField.value)}</span></div>`;
+      html += `<div class="tds-row"><span class="tds-row-label">Weekly Income</span><span class="tds-row-value">${formatMoney(weeklyField.value)}</span></div>`;
     }
     html += '</div>';
     if (todayGross === null) {
@@ -7302,11 +7341,13 @@
       html += `<div class="tds-section-label">Top earner rosters</div>
         <div class="tds-box tds-box-neutral">
           Exact public position composition for the top ${formatNumber(rankedCompanies.length)}
-          earners among the companies successfully analysed.<br>
-          <span class="tds-v-good"><strong>Green</strong></span> = exact role-count match.
-          <span class="tds-v-warn"><strong>Amber</strong></span> = you have the role, but the quantity differs.
-          <span class="tds-v-bad"><strong>Red</strong></span> = you do not currently have that role.
-          Hover a role to see the exact count comparison.
+          earners among the companies successfully analysed.
+          <div style="margin-top:8px;">
+            <div><span class="tds-v-good"><strong>Green</strong></span> = exact role-count match.</div>
+            <div><span class="tds-v-warn"><strong>Amber</strong></span> = you have the role, but the quantity differs.</div>
+            <div><span class="tds-v-bad"><strong>Red</strong></span> = you do not currently have that role.</div>
+          </div>
+          <div style="margin-top:8px;">Hover a role to see the exact count comparison.</div>
         </div>`;
 
       rankedCompanies.forEach((company, index) => {
