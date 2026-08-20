@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Company Management Suite
 // @namespace    torn-company-management-suite
-// @version      1.3.56
+// @version      1.3.57
 // @description  Local-only company management dashboard for Torn directors, embedded in the Jobs page. No company data ever leaves your browser; only your Torn User ID is checked against a public license list.
 // @author       DooBiiE
 // @homepageURL  https://github.com/DooBiiE/Torn-Company-Manager
@@ -70,7 +70,7 @@
   // TornPDA does not always expose the legacy GM_info object that desktop
   // userscript managers provide. Try both common metadata APIs, then use the
   // release version as a PDA-safe fallback so the UI never shows vunknown.
-  const TDS_VERSION_FALLBACK = '1.3.56';
+  const TDS_VERSION_FALLBACK = '1.3.57';
   const TDS_VERSION =
     (typeof GM_info !== 'undefined' && GM_info?.script?.version) ||
     (typeof GM !== 'undefined' && GM?.info?.script?.version) ||
@@ -7133,8 +7133,54 @@
     return null;
   }
 
+  function rosterRoleComparisonStyle(position, theirCount, ownPositions) {
+    if (!ownPositions || typeof ownPositions.get !== 'function') {
+      return {
+        cls: '',
+        title: `${position}: comparison unavailable`,
+        you: null,
+        difference: null,
+      };
+    }
+
+    const yourCount = ownPositions.get(position) || 0;
+    const difference = yourCount - theirCount;
+
+    return {
+      cls:
+        yourCount >= theirCount
+          ? 'tds-v-good'
+          : 'tds-v-bad',
+      title:
+        `${position} — You: ${yourCount} · They: ${theirCount} · ` +
+        `Difference: ${difference > 0 ? '+' : ''}${difference}`,
+      you: yourCount,
+      difference,
+    };
+  }
+
   function renderStaffingBenchmarkHtml(result, own, primaryMetric = 'weeklyIncome') {
     const summary = summarizeStaffingBenchmark(result, own);
+
+    let ownPositions = null;
+
+    const ownStaffingCompany = (result?.companies || []).find((company) =>
+      (own?.id !== null && own?.id !== undefined &&
+        String(company.id) === String(own.id)) ||
+      normalizeCompareCompanyName(company.name) ===
+        normalizeCompareCompanyName(own?.name)
+    );
+
+    if (ownStaffingCompany?.positions) {
+      ownPositions = ownStaffingCompany.positions;
+    } else if (state.lastResults) {
+      const localEmployees = extractEmployeesEntries(
+        findRaw(state.lastResults, 'company', 'employees')
+      );
+      if (localEmployees.length) {
+        ownPositions = positionCountsFromEmployees(localEmployees);
+      }
+    }
 
     if (!summary.totalCompanies) {
       return `<div class="tds-box tds-box-warn">
@@ -7251,15 +7297,42 @@
       html += `<div class="tds-section-label">Top earner rosters</div>
         <div class="tds-box tds-box-neutral">
           Exact public position composition for the top ${formatNumber(rankedCompanies.length)}
-          earners among the companies successfully analysed.
+          earners among the companies successfully analysed.<br>
+          <span class="tds-v-good"><strong>Green</strong></span> = you have the same or more staff in that role.
+          <span class="tds-v-bad"><strong>Red</strong></span> = you have fewer or none.
+          Hover a role to see the exact count comparison.
         </div>`;
 
       rankedCompanies.forEach((company, index) => {
         const tags = [...company.positions.entries()]
           .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
-          .map(([position, count]) =>
-            `<span style="display:inline-block;margin:2px 4px 2px 0;padding:3px 6px;border:1px solid var(--tds-border-strong,#4a4a4a);border-radius:5px;">${formatNumber(count)}× ${escapeHtml(position)}</span>`
-          )
+          .map(([position, count]) => {
+            const comparison = rosterRoleComparisonStyle(
+              position,
+              count,
+              ownPositions
+            );
+
+            const border =
+              comparison.cls === 'tds-v-good'
+                ? 'rgba(61,220,132,.55)'
+                : comparison.cls === 'tds-v-bad'
+                  ? 'rgba(255,92,92,.55)'
+                  : 'var(--tds-border-strong,#4a4a4a)';
+
+            const background =
+              comparison.cls === 'tds-v-good'
+                ? 'rgba(61,220,132,.08)'
+                : comparison.cls === 'tds-v-bad'
+                  ? 'rgba(255,92,92,.08)'
+                  : 'transparent';
+
+            return `<span
+              class="${comparison.cls}"
+              title="${escapeHtml(comparison.title)}"
+              style="display:inline-block;margin:2px 4px 2px 0;padding:3px 6px;border:1px solid ${border};background:${background};border-radius:5px;cursor:help;"
+            >${formatNumber(count)}× ${escapeHtml(position)}</span>`;
+          })
           .join('');
 
         html += `<div class="tds-card">
