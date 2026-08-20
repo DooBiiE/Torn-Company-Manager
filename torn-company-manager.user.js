@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Company Management Suite
 // @namespace    torn-company-management-suite
-// @version      1.3.63
+// @version      1.3.64
 // @description  Local-only company management dashboard for Torn directors, embedded in the Jobs page. No company data ever leaves your browser; only your Torn User ID is checked against a public license list.
 // @author       DooBiiE
 // @homepageURL  https://github.com/DooBiiE/Torn-Company-Manager
@@ -70,7 +70,7 @@
   // TornPDA does not always expose the legacy GM_info object that desktop
   // userscript managers provide. Try both common metadata APIs, then use the
   // release version as a PDA-safe fallback so the UI never shows vunknown.
-  const TDS_VERSION_FALLBACK = '1.3.63';
+  const TDS_VERSION_FALLBACK = '1.3.64';
   const TDS_VERSION =
     (typeof GM_info !== 'undefined' && GM_info?.script?.version) ||
     (typeof GM !== 'undefined' && GM?.info?.script?.version) ||
@@ -1099,7 +1099,7 @@
       <div id="tds-tabs">
         <button class="tds-tab tds-tab-active" data-tab="overview">OVERVIEW</button>
         <button class="tds-tab" data-tab="finance">COMPANY FINANCIALS</button>
-        <button class="tds-tab" data-tab="stock">STOCK</button>
+        <button class="tds-tab" data-tab="stock">STOCK MANAGEMENT</button>
         <button class="tds-tab" data-tab="training">TRAINING</button>
         <button class="tds-tab" data-tab="benchmark">COMPARE</button>
         <button class="tds-tab" data-tab="optimize">EMPLOYEE EFFECTIVENESS</button>
