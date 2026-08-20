@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Company Management Suite
 // @namespace    torn-company-management-suite
-// @version      1.3.60
+// @version      1.3.61
 // @description  Local-only company management dashboard for Torn directors, embedded in the Jobs page. No company data ever leaves your browser; only your Torn User ID is checked against a public license list.
 // @author       DooBiiE
 // @homepageURL  https://github.com/DooBiiE/Torn-Company-Manager
@@ -70,7 +70,7 @@
   // TornPDA does not always expose the legacy GM_info object that desktop
   // userscript managers provide. Try both common metadata APIs, then use the
   // release version as a PDA-safe fallback so the UI never shows vunknown.
-  const TDS_VERSION_FALLBACK = '1.3.60';
+  const TDS_VERSION_FALLBACK = '1.3.61';
   const TDS_VERSION =
     (typeof GM_info !== 'undefined' && GM_info?.script?.version) ||
     (typeof GM !== 'undefined' && GM?.info?.script?.version) ||
@@ -81,6 +81,7 @@
   const STORAGE_KEY_LICENSE_CACHE = 'tds_license_cache';
   const STORAGE_KEY_HISTORY_BACKFILL_DAY = 'tds_history_backfill_day';
   const STORAGE_KEY_HISTORY_BACKFILL_RESULT = 'tds_history_backfill_result';
+  const STORAGE_KEY_STAFFING_BENCHMARK_CACHE = 'tds_staffing_benchmark_cache_v1';
   const STORAGE_KEY_LAST_RESULTS = 'tds_last_results_cache';
   const STORAGE_KEY_LAST_VERDICT = 'tds_last_verdict_cache';
   const MIN_CALL_INTERVAL_MS = 800; // ~75 req/min ceiling, well under Torn's 100/min cap
@@ -6879,7 +6880,7 @@
 
 
   const STAFFING_BENCHMARK_MAX_COMPANIES = 25;
-  const STAFFING_BENCHMARK_CACHE_TTL_MS = 30 * 60 * 1000;
+  const STAFFING_BENCHMARK_CACHE_TTL_MS = 6 * 60 * 60 * 1000; // 6h persistent local cache
 
   function staffingPositionName(value) {
     if (value === null || value === undefined) return 'Unassigned';
@@ -6954,6 +6955,37 @@
     return counts;
   }
 
+  function loadPersistentStaffingCache() {
+    const raw = GM_getValue(STORAGE_KEY_STAFFING_BENCHMARK_CACHE, {});
+    return raw && typeof raw === 'object' ? raw : {};
+  }
+
+  function savePersistentStaffingCache(cache) {
+    try {
+      GM_setValue(STORAGE_KEY_STAFFING_BENCHMARK_CACHE, cache || {});
+    } catch (err) {
+      console.warn('[TDS] Could not persist staffing benchmark cache:', err);
+    }
+  }
+
+  function prunePersistentStaffingCache(cache) {
+    const now = Date.now();
+    const next = {};
+
+    for (const [key, entry] of Object.entries(cache || {})) {
+      if (
+        entry &&
+        typeof entry === 'object' &&
+        Number(entry.timestamp) > 0 &&
+        now - Number(entry.timestamp) < STAFFING_BENCHMARK_CACHE_TTL_MS
+      ) {
+        next[key] = entry;
+      }
+    }
+
+    return next;
+  }
+
   function staffingCacheKey(companies) {
     return (companies || [])
       .map((row) => row?.id)
@@ -6999,11 +7031,31 @@
     }
 
     const key = staffingCacheKey(candidates);
-    const cached = state.benchmark.staffingCache[key];
+
+    let cached = state.benchmark.staffingCache[key];
+
+    if (
+      !cached ||
+      Date.now() - Number(cached.timestamp || 0) >= STAFFING_BENCHMARK_CACHE_TTL_MS
+    ) {
+      let persistent = prunePersistentStaffingCache(
+        loadPersistentStaffingCache()
+      );
+
+      cached = persistent[key] || null;
+
+      // Save back the pruned cache so stale benchmark payloads do not
+      // accumulate indefinitely in userscript storage.
+      savePersistentStaffingCache(persistent);
+
+      if (cached) {
+        state.benchmark.staffingCache[key] = cached;
+      }
+    }
 
     if (
       cached &&
-      Date.now() - cached.timestamp < STAFFING_BENCHMARK_CACHE_TTL_MS
+      Date.now() - Number(cached.timestamp || 0) < STAFFING_BENCHMARK_CACHE_TTL_MS
     ) {
       return { ...cached.data, fromCache: true };
     }
@@ -7044,10 +7096,18 @@
       fromCache: false,
     };
 
-    state.benchmark.staffingCache[key] = {
+    const cacheEntry = {
       timestamp: Date.now(),
       data: result,
     };
+
+    state.benchmark.staffingCache[key] = cacheEntry;
+
+    const persistent = prunePersistentStaffingCache(
+      loadPersistentStaffingCache()
+    );
+    persistent[key] = cacheEntry;
+    savePersistentStaffingCache(persistent);
 
     return result;
   }
@@ -7235,7 +7295,7 @@
     let html = `<div class="tds-box tds-box-info">
       Staffing benchmark built from <strong>${formatNumber(summary.totalCompanies)}</strong>
       public company employee roster${summary.totalCompanies === 1 ? '' : 's'}.
-      ${result.fromCache ? 'Loaded from the 30-minute local cache.' : ''}
+      ${result.fromCache ? 'Loaded from the 6-hour local cache.' : ''}
       Only public position/headcount data is used.
     </div>`;
 
@@ -8019,18 +8079,47 @@
             : 'weeklyIncome';
 
       const staffingKey = staffingCacheKey(staffingCandidates);
-      const staffingCached = state.benchmark.staffingCache[staffingKey];
+
+      let staffingCached = state.benchmark.staffingCache[staffingKey];
+
+      if (
+        !staffingCached ||
+        Date.now() - Number(staffingCached.timestamp || 0) >= STAFFING_BENCHMARK_CACHE_TTL_MS
+      ) {
+        const persistent = prunePersistentStaffingCache(
+          loadPersistentStaffingCache()
+        );
+
+        staffingCached = persistent[staffingKey] || null;
+
+        if (staffingCached) {
+          state.benchmark.staffingCache[staffingKey] = staffingCached;
+        }
+
+        savePersistentStaffingCache(persistent);
+      }
 
       if (
         staffingCached &&
-        Date.now() - staffingCached.timestamp < STAFFING_BENCHMARK_CACHE_TTL_MS
+        Date.now() - Number(staffingCached.timestamp || 0) < STAFFING_BENCHMARK_CACHE_TTL_MS
       ) {
+        const ageMinutes = Math.max(
+          0,
+          Math.floor((Date.now() - Number(staffingCached.timestamp)) / 60000)
+        );
+
         staffingButton.textContent = 'Refresh Staffing Benchmark';
+
         staffingResults.innerHTML = renderStaffingBenchmarkHtml(
           { ...staffingCached.data, fromCache: true },
           own,
           primaryStaffingMetric
         );
+
+        if (staffingProgress) {
+          staffingProgress.textContent =
+            `Loaded from local cache · ${formatNumber(ageMinutes)} minute${ageMinutes === 1 ? '' : 's'} old · no roster API calls made.`;
+        }
       }
 
       staffingButton.addEventListener('click', async () => {
@@ -8043,8 +8132,15 @@
         }
 
         try {
-          // Force refresh the staffing-key cache for an explicit button click.
+          // Explicit refresh intentionally bypasses both the in-memory and
+          // persistent cache for this comparison set.
           delete state.benchmark.staffingCache[staffingKey];
+
+          const persistent = prunePersistentStaffingCache(
+            loadPersistentStaffingCache()
+          );
+          delete persistent[staffingKey];
+          savePersistentStaffingCache(persistent);
 
           const staffing = await buildStaffingBenchmark(
             staffingCandidates,
