@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Company Management Suite
 // @namespace    torn-company-management-suite
-// @version      1.3.55
+// @version      1.3.56
 // @description  Local-only company management dashboard for Torn directors, embedded in the Jobs page. No company data ever leaves your browser; only your Torn User ID is checked against a public license list.
 // @author       DooBiiE
 // @homepageURL  https://github.com/DooBiiE/Torn-Company-Manager
@@ -70,7 +70,7 @@
   // TornPDA does not always expose the legacy GM_info object that desktop
   // userscript managers provide. Try both common metadata APIs, then use the
   // release version as a PDA-safe fallback so the UI never shows vunknown.
-  const TDS_VERSION_FALLBACK = '1.3.55';
+  const TDS_VERSION_FALLBACK = '1.3.56';
   const TDS_VERSION =
     (typeof GM_info !== 'undefined' && GM_info?.script?.version) ||
     (typeof GM !== 'undefined' && GM?.info?.script?.version) ||
@@ -6842,11 +6842,73 @@
   const STAFFING_BENCHMARK_MAX_COMPANIES = 25;
   const STAFFING_BENCHMARK_CACHE_TTL_MS = 30 * 60 * 1000;
 
+  function staffingPositionName(value) {
+    if (value === null || value === undefined) return 'Unassigned';
+
+    if (typeof value === 'string' || typeof value === 'number') {
+      const text = String(value).trim();
+      return text || 'Unassigned';
+    }
+
+    if (typeof value !== 'object' || Array.isArray(value)) {
+      return 'Unknown Position';
+    }
+
+    // Torn's public company/{id}/employees response may represent position
+    // as an object rather than the plain string used by some company payloads.
+    const directKeys = [
+      'name',
+      'title',
+      'position',
+      'position_name',
+      'positionName',
+      'role',
+      'role_name',
+      'roleName',
+      'job',
+      'job_title',
+      'jobTitle',
+    ];
+
+    for (const key of directKeys) {
+      const candidate = value[key];
+      if (
+        candidate !== null &&
+        candidate !== undefined &&
+        typeof candidate !== 'object'
+      ) {
+        const text = String(candidate).trim();
+        if (text) return text;
+      }
+    }
+
+    // Defensive one-level fallback for wrapped shapes such as
+    // { position: { name: "Sales Assistant" } }.
+    for (const child of Object.values(value)) {
+      if (!child || typeof child !== 'object' || Array.isArray(child)) continue;
+
+      for (const key of directKeys) {
+        const candidate = child[key];
+        if (
+          candidate !== null &&
+          candidate !== undefined &&
+          typeof candidate !== 'object'
+        ) {
+          const text = String(candidate).trim();
+          if (text) return text;
+        }
+      }
+    }
+
+    console.warn('[TDS] Staffing benchmark could not resolve position object:', value);
+    return 'Unknown Position';
+  }
+
   function positionCountsFromEmployees(employees) {
     const counts = new Map();
 
     for (const employee of employees || []) {
-      const position = String(employee?.position || '').trim() || 'Unassigned';
+      const position = staffingPositionName(employee?.position);
       counts.set(position, (counts.get(position) || 0) + 1);
     }
 
@@ -7037,6 +7099,7 @@
   }
 
   function staffingObservation(row) {
+    if (!row || row.position === 'Unknown Position') return null;
     if (typeof row?.yours !== 'number') return null;
 
     if (row.yours === 0 && row.usagePct >= 50) {
@@ -7157,7 +7220,14 @@
       }
 
       html += `<tr class="company-data-row">
-        <td><strong>${escapeHtml(row.position)}</strong>${observation ? `<div class="${observation.cls}" style="font-size:10px;">${escapeHtml(observation.label)}</div>` : ''}</td>
+        <td class="${row.position === 'Unknown Position' ? 'tds-v-warn' : ''}">
+          <strong>${escapeHtml(row.position)}</strong>
+          ${row.position === 'Unknown Position'
+            ? '<div class="tds-v-warn" style="font-size:10px;">Unrecognised Torn position shape</div>'
+            : observation
+              ? `<div class="${observation.cls}" style="font-size:10px;">${escapeHtml(observation.label)}</div>`
+              : ''}
+        </td>
         <td>${row.usagePct.toFixed(0)}% (${formatNumber(row.companiesUsing)}/${formatNumber(summary.totalCompanies)})</td>
         <td>${row.averagePerCompany.toFixed(1)}</td>
         <td>${yoursText}</td>
