@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Company Management Suite
 // @namespace    torn-company-management-suite
-// @version      1.3.44
+// @version      1.3.45
 // @description  Local-only company management dashboard for Torn directors, embedded in the Jobs page. No company data ever leaves your browser; only your Torn User ID is checked against a public license list.
 // @author       DooBiiE
 // @match        https://www.torn.com/*
@@ -67,7 +67,7 @@
   // TornPDA does not always expose the legacy GM_info object that desktop
   // userscript managers provide. Try both common metadata APIs, then use the
   // release version as a PDA-safe fallback so the UI never shows vunknown.
-  const TDS_VERSION_FALLBACK = '1.3.44';
+  const TDS_VERSION_FALLBACK = '1.3.45';
   const TDS_VERSION =
     (typeof GM_info !== 'undefined' && GM_info?.script?.version) ||
     (typeof GM !== 'undefined' && GM?.info?.script?.version) ||
@@ -2471,29 +2471,145 @@
     return Math.floor(d.getTime() / 1000);
   }
 
-  async function backfillCompanyPerformanceHistory(companyIdentity, onProgress = null) {
-    const companyId = companyIdentity?.id ?? null;
+  function buildBackfillTargetDays(historyDays = 30) {
+    const targets = [];
+
+    // Newest -> oldest. If we only know the company name, matching a recent
+    // snapshot first lets us discover the real company ID and then use that ID
+    // for older dates, even if the company name changed historically.
+    for (let daysAgo = 0; daysAgo < historyDays; daysAgo += 1) {
+      const timestampSeconds = snapshotTimestampForDaysAgo(daysAgo);
+      const timestampMs = timestampSeconds * 1000;
+
+      targets.push({
+        daysAgo,
+        day: isoDayKey(timestampMs),
+        timestampSeconds,
+        timestampMs,
+      });
+    }
+
+    return targets;
+  }
+
+  function performanceRecordHasFinancials(record) {
+    if (!record) return false;
+
+    const observed = record.observed || {};
+
+    return [
+      observed.dailyIncome,
+      observed.weeklyIncome,
+      observed.dailyCustomers,
+      observed.weeklyCustomers,
+    ].some((value) => typeof value === 'number' && Number.isFinite(value));
+  }
+
+  function analyseBackfillCoverage(history, historyDays = 30) {
+    const targets = buildBackfillTargetDays(historyDays);
+    const byDay = new Map(
+      (history || []).map((record) => [
+        record.day || isoDayKey(record.timestamp),
+        record,
+      ])
+    );
+
+    const stored = [];
+    const missing = [];
+
+    for (const target of targets) {
+      const record = byDay.get(target.day);
+
+      if (record && performanceRecordHasFinancials(record)) {
+        stored.push({ ...target, record });
+      } else {
+        missing.push(target);
+      }
+    }
+
+    const coveredRecords = stored
+      .map((item) => item.record)
+      .filter(Boolean)
+      .sort((a, b) => Number(a.timestamp || 0) - Number(b.timestamp || 0));
+
+    return {
+      historyDays,
+      targets,
+      stored,
+      missing,
+      storedCount: stored.length,
+      missingCount: missing.length,
+      oldest:
+        coveredRecords.length
+          ? coveredRecords[0]
+          : null,
+      newest:
+        coveredRecords.length
+          ? coveredRecords[coveredRecords.length - 1]
+          : null,
+    };
+  }
+
+  async function backfillCompanyPerformanceHistory(
+    companyIdentity,
+    targetDays,
+    onProgress = null
+  ) {
+    let resolvedCompanyId = companyIdentity?.id ?? null;
     const companyName = String(companyIdentity?.name || '').trim();
 
-    if ((companyId === null || companyId === undefined) && !companyName) {
+    if ((resolvedCompanyId === null || resolvedCompanyId === undefined) && !companyName) {
       throw new Error('Company ID and company name are both unavailable.');
     }
 
-    const historyDays = 30;
+    const targets = Array.isArray(targetDays)
+      ? [...targetDays]
+      : buildBackfillTargetDays(30);
+
+    // Always newest -> oldest so an exact-name match can discover the actual
+    // company ID before we inspect older snapshots.
+    targets.sort(
+      (a, b) => Number(b.timestampMs || 0) - Number(a.timestampMs || 0)
+    );
+
     let saved = 0;
     let unavailable = 0;
     let errors = 0;
+    let matchedByName = 0;
+    let matchedById = 0;
     const errorDetails = [];
 
-    for (let daysAgo = historyDays - 1; daysAgo >= 0; daysAgo -= 1) {
-      const timestampSeconds = snapshotTimestampForDaysAgo(daysAgo);
-      const timestampMs = timestampSeconds * 1000;
-      const day = isoDayKey(timestampMs);
+    if (!targets.length) {
+      onProgress?.({
+        day: null,
+        complete: 0,
+        total: 0,
+      });
+
+      return {
+        saved,
+        unavailable,
+        errors,
+        errorDetails,
+        requested: 0,
+        matchedByName,
+        matchedById,
+        resolvedCompanyId,
+      };
+    }
+
+    for (let index = 0; index < targets.length; index += 1) {
+      const target = targets[index];
+      const {
+        timestampSeconds,
+        timestampMs,
+        day,
+      } = target;
 
       onProgress?.({
         day,
-        complete: historyDays - 1 - daysAgo,
-        total: historyDays,
+        complete: index,
+        total: targets.length,
       });
 
       try {
@@ -2502,15 +2618,17 @@
         });
 
         const map = buildSnapshotFinancialMap(csv);
+
         let row =
-          companyId !== null && companyId !== undefined
-            ? map.get(String(companyId))
+          resolvedCompanyId !== null && resolvedCompanyId !== undefined
+            ? map.get(String(resolvedCompanyId))
             : null;
 
         let matchedBy = row ? 'id' : null;
 
         if (!row && companyName) {
           const wanted = normalizeFieldName(companyName);
+
           const matches = [...map.values()].filter((candidate) =>
             candidate?.name &&
             normalizeFieldName(candidate.name) === wanted
@@ -2519,6 +2637,19 @@
           if (matches.length === 1) {
             row = matches[0];
             matchedBy = 'name';
+
+            // Once the exact current company name identifies one company,
+            // remember its ID and use that ID for all older snapshots.
+            if (
+              resolvedCompanyId === null ||
+              resolvedCompanyId === undefined
+            ) {
+              resolvedCompanyId = row.id;
+              console.log(
+                '[TDS] Historical backfill resolved company ID from snapshot:',
+                resolvedCompanyId
+              );
+            }
           } else if (matches.length > 1) {
             throw new Error(
               `Multiple snapshot companies matched the exact name "${companyName}". Refusing to guess.`
@@ -2528,16 +2659,30 @@
 
         if (!row) {
           unavailable += 1;
+
           console.warn(
             '[TDS] Backfill snapshot did not contain company',
-            { companyId, companyName, day }
+            {
+              resolvedCompanyId,
+              companyName,
+              day,
+            }
           );
+
           continue;
         }
 
+        if (matchedBy === 'name') matchedByName += 1;
+        if (matchedBy === 'id') matchedById += 1;
+
         console.log(
           '[TDS] Backfill snapshot company match',
-          { day, matchedBy, id: row.id, name: row.name }
+          {
+            day,
+            matchedBy,
+            id: row.id,
+            name: row.name,
+          }
         );
 
         await saveCompactPerformanceRecord({
@@ -2569,19 +2714,26 @@
           'Unknown error'
         );
 
-        errorDetails.push({ day, reason });
+        errorDetails.push({
+          day,
+          reason,
+        });
 
         console.error(
           '[TDS] Historical backfill error',
-          { day, reason, error: err }
+          {
+            day,
+            reason,
+            error: err,
+          }
         );
       }
     }
 
     onProgress?.({
       day: null,
-      complete: historyDays,
-      total: historyDays,
+      complete: targets.length,
+      total: targets.length,
     });
 
     return {
@@ -2589,7 +2741,10 @@
       unavailable,
       errors,
       errorDetails,
-      requested: historyDays,
+      requested: targets.length,
+      matchedByName,
+      matchedById,
+      resolvedCompanyId,
     };
   }
 
@@ -3126,8 +3281,31 @@
 
       html += `</tbody></table></div>`;
 
+      const backfillCoverage = analyseBackfillCoverage(performanceHistory, 30);
+
+      html += `<div class="tds-section-label">History Coverage</div>
+      <div class="tds-card">
+        <div class="tds-row">
+          <span class="tds-row-label">Available 30-day window stored</span>
+          <span class="tds-row-value"><strong>${formatNumber(backfillCoverage.storedCount)} / ${formatNumber(backfillCoverage.historyDays)} days</strong></span>
+        </div>
+        <div class="tds-row">
+          <span class="tds-row-label">Missing days</span>
+          <span class="tds-row-value ${backfillCoverage.missingCount ? 'tds-v-warn' : 'tds-v-good'}"><strong>${formatNumber(backfillCoverage.missingCount)}</strong></span>
+        </div>
+        <div class="tds-row">
+          <span class="tds-row-label">Oldest stored day in current window</span>
+          <span class="tds-row-value">${backfillCoverage.oldest ? escapeHtml(formatPerformanceDate(backfillCoverage.oldest.timestamp)) : '—'}</span>
+        </div>
+        <div class="tds-row">
+          <span class="tds-row-label">Newest stored day in current window</span>
+          <span class="tds-row-value">${backfillCoverage.newest ? escapeHtml(formatPerformanceDate(backfillCoverage.newest.timestamp)) : '—'}</span>
+        </div>
+      </div>`;
+
       html += `<div class="tds-box tds-box-neutral" style="margin-top:10px;">
         <strong>Historical backfill:</strong> Torn's Company Snapshot can supply retained historical income/customer figures for dates before this script recorded them.
+        Backfill now requests <strong>only missing days</strong> from the current 30-day window.
         Historical Snapshot rows cannot reconstruct past employee EE or staffing, so those fields remain blank rather than being guessed.
       </div>
       <div style="margin-top:10px;">
@@ -3175,24 +3353,56 @@
     const backfillDetail = el.querySelector('#tds-history-backfill-detail');
 
     if (backfillButton) {
-      const todayKey = isoDayKey(Date.now());
-      const lastBackfillDay = GM_getValue(STORAGE_KEY_HISTORY_BACKFILL_DAY, '');
-      const lastBackfillResult = GM_getValue(STORAGE_KEY_HISTORY_BACKFILL_RESULT, null);
+      const currentCoverage = analyseBackfillCoverage(
+        performanceHistory,
+        30
+      );
 
-      if (lastBackfillDay === todayKey) {
+      const lastBackfillDay = GM_getValue(
+        STORAGE_KEY_HISTORY_BACKFILL_DAY,
+        ''
+      );
+
+      const lastBackfillResult = GM_getValue(
+        STORAGE_KEY_HISTORY_BACKFILL_RESULT,
+        null
+      );
+
+      if (currentCoverage.missingCount === 0) {
         backfillButton.disabled = true;
-        backfillButton.textContent = 'Backfill checked today';
+        backfillButton.textContent = 'History complete';
 
         if (backfillStatus) {
-          backfillStatus.textContent = 'Already checked today.';
+          backfillStatus.textContent =
+            'All 30 days in the current historical window are already stored.';
+          backfillStatus.classList.remove('tds-v-dim', 'tds-v-warn');
+          backfillStatus.classList.add('tds-v-good');
         }
 
-        if (backfillDetail && lastBackfillResult) {
+        if (backfillDetail) {
           backfillDetail.textContent =
-            `Last result: ${formatNumber(lastBackfillResult.saved || 0)} day(s) saved/updated · ` +
+            `Coverage: ${formatNumber(currentCoverage.storedCount)} / ${formatNumber(currentCoverage.historyDays)} days. No API requests are needed.`;
+        }
+      } else {
+        backfillButton.disabled = false;
+        backfillButton.textContent =
+          `Backfill ${formatNumber(currentCoverage.missingCount)} missing day${currentCoverage.missingCount === 1 ? '' : 's'}`;
+
+        if (backfillStatus) {
+          backfillStatus.textContent =
+            `${formatNumber(currentCoverage.storedCount)} / ${formatNumber(currentCoverage.historyDays)} days already stored.`;
+        }
+
+        if (
+          backfillDetail &&
+          lastBackfillDay &&
+          lastBackfillResult
+        ) {
+          backfillDetail.textContent =
+            `Last run: ${formatNumber(lastBackfillResult.saved || 0)} newly saved · ` +
             `${formatNumber(lastBackfillResult.unavailable || 0)} not found · ` +
             `${formatNumber(lastBackfillResult.errors || 0)} error(s). ` +
-            `It will be available to check again tomorrow.`;
+            `Only currently missing days will be requested next.`;
         }
       }
 
@@ -3203,6 +3413,29 @@
         const own = getOwnCompanyCompareInfo(profile, currentResults);
 
         console.log('[TDS] Historical backfill company detected:', own);
+
+        const historyBeforeBackfill = await getDailyPerformanceHistory();
+        const coverageBeforeBackfill = analyseBackfillCoverage(
+          historyBeforeBackfill,
+          30
+        );
+
+        if (coverageBeforeBackfill.missingCount === 0) {
+          backfillButton.disabled = true;
+          backfillButton.textContent = 'History complete';
+
+          if (backfillStatus) {
+            backfillStatus.textContent =
+              'All 30 days are already stored — no API requests made.';
+          }
+
+          if (backfillDetail) {
+            backfillDetail.textContent =
+              `Coverage: ${formatNumber(coverageBeforeBackfill.storedCount)} / ${formatNumber(coverageBeforeBackfill.historyDays)} days.`;
+          }
+
+          return;
+        }
 
         if (own.id === null && !own.name) {
           if (backfillStatus) {
@@ -3218,10 +3451,13 @@
         backfillButton.textContent = 'Backfilling…';
 
         if (backfillStatus) {
-          backfillStatus.textContent =
+          const companyText =
             own.id !== null
-              ? `Starting backfill for company ${formatNumber(own.id)}${own.name ? ` (${own.name})` : ''}…`
-              : `Starting backfill for ${own.name} using exact name matching…`;
+              ? `company ${formatNumber(own.id)}${own.name ? ` (${own.name})` : ''}`
+              : `${own.name} using exact name matching`;
+
+          backfillStatus.textContent =
+            `Checking ${formatNumber(coverageBeforeBackfill.missingCount)} missing day${coverageBeforeBackfill.missingCount === 1 ? '' : 's'} for ${companyText}…`;
         }
 
         if (backfillProgress) backfillProgress.hidden = false;
@@ -3237,6 +3473,7 @@
         try {
           const result = await backfillCompanyPerformanceHistory(
             own,
+            coverageBeforeBackfill.missing,
             (progress) => {
               const pct = progress.total
                 ? Math.min(100, Math.round((progress.complete / progress.total) * 100))
@@ -3248,7 +3485,7 @@
 
               if (backfillStatus) {
                 backfillStatus.textContent =
-                  `Fetching ${progress.complete}/${progress.total}${progress.day ? ` · ${progress.day}` : ''}`;
+                  `Checking missing days ${progress.complete}/${progress.total}${progress.day ? ` · ${progress.day}` : ''}`;
               }
 
               if (backfillDetail) {
@@ -3264,6 +3501,9 @@
             unavailable: result.unavailable,
             errors: result.errors,
             requested: result.requested,
+            resolvedCompanyId: result.resolvedCompanyId,
+            matchedByName: result.matchedByName,
+            matchedById: result.matchedById,
             completedAt: Date.now(),
           });
 
@@ -3277,9 +3517,11 @@
 
           if (backfillDetail) {
             const summary =
-              `${formatNumber(result.saved)} historical day(s) saved/updated · ` +
+              `${formatNumber(coverageBeforeBackfill.storedCount)} already stored · ` +
+              `${formatNumber(result.saved)} newly downloaded · ` +
               `${formatNumber(result.unavailable)} not found · ` +
-              `${formatNumber(result.errors)} error(s) out of ${formatNumber(result.requested)} checked.`;
+              `${formatNumber(result.errors)} error(s) · ` +
+              `${formatNumber(result.requested)} missing day(s) checked.`;
 
             const firstError = result.errorDetails?.[0];
 
@@ -3288,7 +3530,7 @@
               : summary;
           }
 
-          backfillButton.textContent = 'Backfill checked today';
+          backfillButton.textContent = 'Refreshing history…';
 
           // Give the user a moment to see the completion state, then refresh
           // Company Financials so the new historical rows/chart appear.
