@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Company Management Suite
 // @namespace    torn-company-management-suite
-// @version      1.3.41
+// @version      1.3.44
 // @description  Local-only company management dashboard for Torn directors, embedded in the Jobs page. No company data ever leaves your browser; only your Torn User ID is checked against a public license list.
 // @author       DooBiiE
 // @match        https://www.torn.com/*
@@ -67,7 +67,7 @@
   // TornPDA does not always expose the legacy GM_info object that desktop
   // userscript managers provide. Try both common metadata APIs, then use the
   // release version as a PDA-safe fallback so the UI never shows vunknown.
-  const TDS_VERSION_FALLBACK = '1.3.41';
+  const TDS_VERSION_FALLBACK = '1.3.44';
   const TDS_VERSION =
     (typeof GM_info !== 'undefined' && GM_info?.script?.version) ||
     (typeof GM !== 'undefined' && GM?.info?.script?.version) ||
@@ -2471,14 +2471,19 @@
     return Math.floor(d.getTime() / 1000);
   }
 
-  async function backfillCompanyPerformanceHistory(companyId, onProgress = null) {
-    if (companyId === null || companyId === undefined) {
-      throw new Error('Company ID is unavailable.');
+  async function backfillCompanyPerformanceHistory(companyIdentity, onProgress = null) {
+    const companyId = companyIdentity?.id ?? null;
+    const companyName = String(companyIdentity?.name || '').trim();
+
+    if ((companyId === null || companyId === undefined) && !companyName) {
+      throw new Error('Company ID and company name are both unavailable.');
     }
 
     const historyDays = 30;
     let saved = 0;
     let unavailable = 0;
+    let errors = 0;
+    const errorDetails = [];
 
     for (let daysAgo = historyDays - 1; daysAgo >= 0; daysAgo -= 1) {
       const timestampSeconds = snapshotTimestampForDaysAgo(daysAgo);
@@ -2497,12 +2502,43 @@
         });
 
         const map = buildSnapshotFinancialMap(csv);
-        const row = map.get(String(companyId));
+        let row =
+          companyId !== null && companyId !== undefined
+            ? map.get(String(companyId))
+            : null;
+
+        let matchedBy = row ? 'id' : null;
+
+        if (!row && companyName) {
+          const wanted = normalizeFieldName(companyName);
+          const matches = [...map.values()].filter((candidate) =>
+            candidate?.name &&
+            normalizeFieldName(candidate.name) === wanted
+          );
+
+          if (matches.length === 1) {
+            row = matches[0];
+            matchedBy = 'name';
+          } else if (matches.length > 1) {
+            throw new Error(
+              `Multiple snapshot companies matched the exact name "${companyName}". Refusing to guess.`
+            );
+          }
+        }
 
         if (!row) {
           unavailable += 1;
+          console.warn(
+            '[TDS] Backfill snapshot did not contain company',
+            { companyId, companyName, day }
+          );
           continue;
         }
+
+        console.log(
+          '[TDS] Backfill snapshot company match',
+          { day, matchedBy, id: row.id, name: row.name }
+        );
 
         await saveCompactPerformanceRecord({
           day,
@@ -2524,8 +2560,21 @@
 
         saved += 1;
       } catch (err) {
-        // Older-than-retention snapshots legitimately may not exist.
-        unavailable += 1;
+        errors += 1;
+
+        const reason = String(
+          err?.reason ??
+          err?.message ??
+          err ??
+          'Unknown error'
+        );
+
+        errorDetails.push({ day, reason });
+
+        console.error(
+          '[TDS] Historical backfill error',
+          { day, reason, error: err }
+        );
       }
     }
 
@@ -2535,7 +2584,13 @@
       total: historyDays,
     });
 
-    return { saved, unavailable, requested: historyDays };
+    return {
+      saved,
+      unavailable,
+      errors,
+      errorDetails,
+      requested: historyDays,
+    };
   }
 
   function pearsonCorrelation(pairs) {
@@ -3135,7 +3190,8 @@
         if (backfillDetail && lastBackfillResult) {
           backfillDetail.textContent =
             `Last result: ${formatNumber(lastBackfillResult.saved || 0)} day(s) saved/updated · ` +
-            `${formatNumber(lastBackfillResult.unavailable || 0)} unavailable. ` +
+            `${formatNumber(lastBackfillResult.unavailable || 0)} not found · ` +
+            `${formatNumber(lastBackfillResult.errors || 0)} error(s). ` +
             `It will be available to check again tomorrow.`;
         }
       }
@@ -3143,24 +3199,34 @@
       backfillButton.addEventListener('click', async () => {
         console.log('[TDS] Historical backfill button clicked');
         const currentResults = state.lastResults;
-        const own = extractOwnCompanyInfo(currentResults);
+        const profile = findRaw(currentResults, 'company', 'profile');
+        const own = getOwnCompanyCompareInfo(profile, currentResults);
 
-        if (own.id === null) {
+        console.log('[TDS] Historical backfill company detected:', own);
+
+        if (own.id === null && !own.name) {
           if (backfillStatus) {
-            backfillStatus.textContent = 'Company ID unavailable — cannot start backfill.';
+            backfillStatus.textContent = 'Company ID and name unavailable — cannot start backfill.';
             backfillStatus.classList.remove('tds-v-dim');
             backfillStatus.classList.add('tds-v-bad');
           }
-          console.warn('[TDS] Historical backfill aborted: company ID unavailable');
+          console.warn('[TDS] Historical backfill aborted: company identity unavailable');
           return;
         }
 
         backfillButton.disabled = true;
         backfillButton.textContent = 'Backfilling…';
 
+        if (backfillStatus) {
+          backfillStatus.textContent =
+            own.id !== null
+              ? `Starting backfill for company ${formatNumber(own.id)}${own.name ? ` (${own.name})` : ''}…`
+              : `Starting backfill for ${own.name} using exact name matching…`;
+        }
+
         if (backfillProgress) backfillProgress.hidden = false;
         if (backfillProgressBar) backfillProgressBar.style.width = '0%';
-        if (backfillStatus) backfillStatus.textContent = 'Starting historical backfill…';
+
         if (backfillDetail) {
           backfillDetail.textContent =
             'This performs read-only Torn API requests. No company actions are submitted.';
@@ -3170,7 +3236,7 @@
 
         try {
           const result = await backfillCompanyPerformanceHistory(
-            own.id,
+            own,
             (progress) => {
               const pct = progress.total
                 ? Math.min(100, Math.round((progress.complete / progress.total) * 100))
@@ -3196,6 +3262,7 @@
           GM_setValue(STORAGE_KEY_HISTORY_BACKFILL_RESULT, {
             saved: result.saved,
             unavailable: result.unavailable,
+            errors: result.errors,
             requested: result.requested,
             completedAt: Date.now(),
           });
@@ -3209,9 +3276,16 @@
           }
 
           if (backfillDetail) {
-            backfillDetail.textContent =
+            const summary =
               `${formatNumber(result.saved)} historical day(s) saved/updated · ` +
-              `${formatNumber(result.unavailable)} unavailable out of ${formatNumber(result.requested)} checked.`;
+              `${formatNumber(result.unavailable)} not found · ` +
+              `${formatNumber(result.errors)} error(s) out of ${formatNumber(result.requested)} checked.`;
+
+            const firstError = result.errorDetails?.[0];
+
+            backfillDetail.textContent = firstError
+              ? `${summary} First error (${firstError.day}): ${firstError.reason}`
+              : summary;
           }
 
           backfillButton.textContent = 'Backfill checked today';
@@ -5977,6 +6051,24 @@
     return rows;
   }
 
+  function snapshotValue(row, names) {
+    if (!row || typeof row !== 'object') return null;
+
+    const wanted = new Set(
+      (names || []).map((name) => normalizeFieldName(name))
+    );
+
+    for (const [key, value] of Object.entries(row)) {
+      if (!wanted.has(normalizeFieldName(key))) continue;
+      if (value === null || value === undefined) return null;
+
+      const text = String(value).trim();
+      return text === '' ? null : text;
+    }
+
+    return null;
+  }
+
   function snapshotNumeric(row, names) {
     for (const name of names) {
       if (!row || !Object.prototype.hasOwnProperty.call(row, name)) continue;
@@ -5996,7 +6088,13 @@
       const id = snapshotNumeric(row, ['id', 'company_id', 'companyid']);
       if (id === null) continue;
 
+      const name =
+        snapshotValue(row, ['name', 'company_name', 'companyname']) ??
+        null;
+
       map.set(String(id), {
+        id,
+        name: name !== null && name !== undefined ? String(name).trim() : null,
         dailyIncome: snapshotNumeric(row, ['daily_income', 'dailyincome']),
         weeklyIncome: snapshotNumeric(row, ['weekly_income', 'weeklyincome']),
         dailyCustomers: snapshotNumeric(row, ['daily_customers', 'dailycustomers']),
