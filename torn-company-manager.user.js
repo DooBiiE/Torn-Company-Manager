@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Company Management Suite
 // @namespace    torn-company-management-suite
-// @version      1.3.53
+// @version      1.3.54
 // @description  Local-only company management dashboard for Torn directors, embedded in the Jobs page. No company data ever leaves your browser; only your Torn User ID is checked against a public license list.
 // @author       DooBiiE
 // @homepageURL  https://github.com/DooBiiE/Torn-Company-Manager
@@ -70,7 +70,7 @@
   // TornPDA does not always expose the legacy GM_info object that desktop
   // userscript managers provide. Try both common metadata APIs, then use the
   // release version as a PDA-safe fallback so the UI never shows vunknown.
-  const TDS_VERSION_FALLBACK = '1.3.53';
+  const TDS_VERSION_FALLBACK = '1.3.54';
   const TDS_VERSION =
     (typeof GM_info !== 'undefined' && GM_info?.script?.version) ||
     (typeof GM !== 'undefined' && GM?.info?.script?.version) ||
@@ -6702,6 +6702,20 @@
     return `${value > 0 ? '+' : ''}${value.toFixed(1)}%`;
   }
 
+  function formatCompareBaseline(percentValue, baselineValue, { money = false, label = '' } = {}) {
+    const pct = signedPercent(percentValue);
+
+    if (typeof baselineValue !== 'number' || !Number.isFinite(baselineValue)) {
+      return pct;
+    }
+
+    const baselineText = money
+      ? formatMoney(baselineValue)
+      : formatNumber(baselineValue);
+
+    return `${pct} · ${label ? `${label} ` : ''}${baselineText}`;
+  }
+
   function compareClass(value, baseline) {
     if (typeof value !== 'number' || typeof baseline !== 'number') return '';
     return value >= baseline ? 'tds-v-good' : 'tds-v-bad';
@@ -7104,7 +7118,7 @@
         html += `<div class="tds-optimizer-card">
           <div class="tds-optimizer-label">vs Median</div>
           <div class="tds-optimizer-value ${primaryMetric.medianPct >= 0 ? 'tds-v-good' : 'tds-v-bad'}">${signedPercent(primaryMetric.medianPct)}</div>
-          <div class="tds-v-dim">${escapeHtml(primaryMetric.label)}</div>
+          <div class="tds-v-dim">${escapeHtml(primaryMetric.label)} · Median ${formatCompareMetricValue(primaryMetric, primaryMetric.median)}</div>
         </div>`;
       }
 
@@ -7120,7 +7134,9 @@
         html += `<div class="tds-optimizer-card">
           <div class="tds-optimizer-label">Strongest Metric</div>
           <div class="tds-optimizer-value tds-v-good" style="font-size:13px;">${escapeHtml(strongestMetric.label)}</div>
-          <div class="tds-v-dim">${strongestMetric.rankInfo?.rank !== null ? `#${strongestMetric.rankInfo.rank} / ${strongestMetric.rankInfo.total}` : signedPercent(strongestMetric.medianPct)}</div>
+          <div class="tds-v-dim">${strongestMetric.rankInfo?.rank !== null
+            ? `#${strongestMetric.rankInfo.rank} / ${strongestMetric.rankInfo.total}`
+            : formatCompareBaseline(strongestMetric.medianPct, strongestMetric.median, { money: strongestMetric.money, label: 'Median' })}</div>
         </div>`;
       }
 
@@ -7128,7 +7144,9 @@
         html += `<div class="tds-optimizer-card">
           <div class="tds-optimizer-label">Weakest Metric</div>
           <div class="tds-optimizer-value ${weakestMetric.strengthScore < 50 ? 'tds-v-bad' : ''}" style="font-size:13px;">${escapeHtml(weakestMetric.label)}</div>
-          <div class="tds-v-dim">${weakestMetric.rankInfo?.rank !== null ? `#${weakestMetric.rankInfo.rank} / ${weakestMetric.rankInfo.total}` : signedPercent(weakestMetric.medianPct)}</div>
+          <div class="tds-v-dim">${weakestMetric.rankInfo?.rank !== null
+            ? `#${weakestMetric.rankInfo.rank} / ${weakestMetric.rankInfo.total}`
+            : formatCompareBaseline(weakestMetric.medianPct, weakestMetric.median, { money: weakestMetric.money, label: 'Median' })}</div>
         </div>`;
       }
 
@@ -7141,7 +7159,9 @@
           <span class="tds-row-label">Strongest measurable area</span>
           <span class="tds-row-value tds-v-good">
             ${escapeHtml(strongestMetric.label)}
-            ${typeof strongestMetric.medianPct === 'number' ? ` · ${signedPercent(strongestMetric.medianPct)} vs median` : ''}
+            ${typeof strongestMetric.medianPct === 'number'
+              ? ` · ${signedPercent(strongestMetric.medianPct)} vs median (${formatCompareMetricValue(strongestMetric, strongestMetric.median)})`
+              : ''}
           </span>
         </div>`;
       }
@@ -7151,7 +7171,9 @@
           <span class="tds-row-label">Weakest measurable area</span>
           <span class="tds-row-value ${typeof weakestMetric.medianPct === 'number' && weakestMetric.medianPct < 0 ? 'tds-v-bad' : ''}">
             ${escapeHtml(weakestMetric.label)}
-            ${typeof weakestMetric.medianPct === 'number' ? ` · ${signedPercent(weakestMetric.medianPct)} vs median` : ''}
+            ${typeof weakestMetric.medianPct === 'number'
+              ? ` · ${signedPercent(weakestMetric.medianPct)} vs median (${formatCompareMetricValue(weakestMetric, weakestMetric.median)})`
+              : ''}
           </span>
         </div>`;
       }
@@ -7228,8 +7250,16 @@
       performanceRows.forEach((item) => {
         if (item.value === null || item.value === undefined) return;
         const valueText = item.money ? formatMoney(item.value) : formatNumber(item.value);
-        const avgText = signedPercent(percentDiff(item.value, item.average));
-        const medianText = signedPercent(percentDiff(item.value, item.median));
+        const avgText = formatCompareBaseline(
+          percentDiff(item.value, item.average),
+          item.average,
+          { money: item.money, label: 'Avg' }
+        );
+        const medianText = formatCompareBaseline(
+          percentDiff(item.value, item.median),
+          item.median,
+          { money: item.money, label: 'Median' }
+        );
         const rankText = item.rank.rank !== null
           ? `#${item.rank.rank} / ${item.rank.total}`
           : '—';
@@ -7249,8 +7279,8 @@
 
       if (ownRow.weeklyIncome !== null) {
         html += `<div class="tds-row"><span class="tds-row-label">Weekly income</span><span class="tds-row-value ${compareClass(ownRow.weeklyIncome, avgWeeklyIncome)}">${formatMoney(ownRow.weeklyIncome)}</span></div>`;
-        html += `<div class="tds-row"><span class="tds-row-label">vs weekly average</span><span class="tds-row-value ${compareClass(ownRow.weeklyIncome, avgWeeklyIncome)}">${signedPercent(percentDiff(ownRow.weeklyIncome, avgWeeklyIncome))}</span></div>`;
-        html += `<div class="tds-row"><span class="tds-row-label">vs weekly median</span><span class="tds-row-value ${compareClass(ownRow.weeklyIncome, medianWeeklyIncome)}">${signedPercent(percentDiff(ownRow.weeklyIncome, medianWeeklyIncome))}</span></div>`;
+        html += `<div class="tds-row"><span class="tds-row-label">vs weekly average</span><span class="tds-row-value ${compareClass(ownRow.weeklyIncome, avgWeeklyIncome)}">${formatCompareBaseline(percentDiff(ownRow.weeklyIncome, avgWeeklyIncome), avgWeeklyIncome, { money: true, label: 'Avg' })}</span></div>`;
+        html += `<div class="tds-row"><span class="tds-row-label">vs weekly median</span><span class="tds-row-value ${compareClass(ownRow.weeklyIncome, medianWeeklyIncome)}">${formatCompareBaseline(percentDiff(ownRow.weeklyIncome, medianWeeklyIncome), medianWeeklyIncome, { money: true, label: 'Median' })}</span></div>`;
       }
 
       if (ownRow.dailyIncome !== null) {
