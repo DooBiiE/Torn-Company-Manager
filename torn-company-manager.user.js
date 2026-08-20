@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Company Management Suite
 // @namespace    torn-company-management-suite
-// @version      1.3.57
+// @version      1.3.58
 // @description  Local-only company management dashboard for Torn directors, embedded in the Jobs page. No company data ever leaves your browser; only your Torn User ID is checked against a public license list.
 // @author       DooBiiE
 // @homepageURL  https://github.com/DooBiiE/Torn-Company-Manager
@@ -70,7 +70,7 @@
   // TornPDA does not always expose the legacy GM_info object that desktop
   // userscript managers provide. Try both common metadata APIs, then use the
   // release version as a PDA-safe fallback so the UI never shows vunknown.
-  const TDS_VERSION_FALLBACK = '1.3.57';
+  const TDS_VERSION_FALLBACK = '1.3.58';
   const TDS_VERSION =
     (typeof GM_info !== 'undefined' && GM_info?.script?.version) ||
     (typeof GM !== 'undefined' && GM?.info?.script?.version) ||
@@ -7146,11 +7146,16 @@
     const yourCount = ownPositions.get(position) || 0;
     const difference = yourCount - theirCount;
 
+    let cls = 'tds-v-warn';
+
+    if (yourCount === 0) {
+      cls = 'tds-v-bad';
+    } else if (yourCount === theirCount) {
+      cls = 'tds-v-good';
+    }
+
     return {
-      cls:
-        yourCount >= theirCount
-          ? 'tds-v-good'
-          : 'tds-v-bad',
+      cls,
       title:
         `${position} — You: ${yourCount} · They: ${theirCount} · ` +
         `Difference: ${difference > 0 ? '+' : ''}${difference}`,
@@ -7298,8 +7303,9 @@
         <div class="tds-box tds-box-neutral">
           Exact public position composition for the top ${formatNumber(rankedCompanies.length)}
           earners among the companies successfully analysed.<br>
-          <span class="tds-v-good"><strong>Green</strong></span> = you have the same or more staff in that role.
-          <span class="tds-v-bad"><strong>Red</strong></span> = you have fewer or none.
+          <span class="tds-v-good"><strong>Green</strong></span> = exact role-count match.
+          <span class="tds-v-warn"><strong>Amber</strong></span> = you have the role, but the quantity differs.
+          <span class="tds-v-bad"><strong>Red</strong></span> = you do not currently have that role.
           Hover a role to see the exact count comparison.
         </div>`;
 
@@ -7318,14 +7324,18 @@
                 ? 'rgba(61,220,132,.55)'
                 : comparison.cls === 'tds-v-bad'
                   ? 'rgba(255,92,92,.55)'
-                  : 'var(--tds-border-strong,#4a4a4a)';
+                  : comparison.cls === 'tds-v-warn'
+                    ? 'rgba(245,166,35,.55)'
+                    : 'var(--tds-border-strong,#4a4a4a)';
 
             const background =
               comparison.cls === 'tds-v-good'
                 ? 'rgba(61,220,132,.08)'
                 : comparison.cls === 'tds-v-bad'
                   ? 'rgba(255,92,92,.08)'
-                  : 'transparent';
+                  : comparison.cls === 'tds-v-warn'
+                    ? 'rgba(245,166,35,.08)'
+                    : 'transparent';
 
             return `<span
               class="${comparison.cls}"
