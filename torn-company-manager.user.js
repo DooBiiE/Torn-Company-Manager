@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Company Management Suite
 // @namespace    torn-company-management-suite
-// @version      1.3.62
+// @version      1.3.63
 // @description  Local-only company management dashboard for Torn directors, embedded in the Jobs page. No company data ever leaves your browser; only your Torn User ID is checked against a public license list.
 // @author       DooBiiE
 // @homepageURL  https://github.com/DooBiiE/Torn-Company-Manager
@@ -70,7 +70,7 @@
   // TornPDA does not always expose the legacy GM_info object that desktop
   // userscript managers provide. Try both common metadata APIs, then use the
   // release version as a PDA-safe fallback so the UI never shows vunknown.
-  const TDS_VERSION_FALLBACK = '1.3.62';
+  const TDS_VERSION_FALLBACK = '1.3.63';
   const TDS_VERSION =
     (typeof GM_info !== 'undefined' && GM_info?.script?.version) ||
     (typeof GM !== 'undefined' && GM?.info?.script?.version) ||
@@ -659,6 +659,11 @@
       .tds-employee-row[open] > summary { margin-bottom: 2px; }
       .tds-employee-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; }
       .tds-employee-name { font-weight: 700; color: var(--tds-text-strong, #f0f0f0); font-size: 13px; }
+      .tds-employee-profile-link { cursor:pointer; text-decoration:underline; text-decoration-style:dotted; text-underline-offset:3px; }
+      .tds-profile-overlay { position:fixed; inset:0; z-index:2147483646; background:rgba(0,0,0,.58); display:flex; align-items:center; justify-content:center; padding:14px; }
+      .tds-profile-modal { width:min(560px,96vw); max-height:86vh; overflow:auto; background:var(--tds-bg-panel,#1f1f1f); border:1px solid var(--tds-border-strong,#4a4a4a); border-radius:10px; box-shadow:0 14px 40px rgba(0,0,0,.45); padding:14px; }
+      .tds-profile-head { display:flex; justify-content:space-between; gap:10px; align-items:flex-start; margin-bottom:10px; }
+      .tds-profile-actions { display:flex; flex-wrap:wrap; gap:6px; margin-top:12px; }
       .tds-employee-meta { color: var(--tds-text-dim, #999999); font-size: 11px; margin-top: 1px; }
       .tds-diag-row { display: flex; justify-content: space-between; align-items: flex-start; padding: 8px 0; border-bottom: 1px solid var(--tds-border-soft, #242424); gap: 10px; }
       .tds-diag-row:last-child { border-bottom: none; }
@@ -1155,6 +1160,7 @@
     // Sales history can require an extra company/news API request. Load it only
     // when the Stock tab is actually opened, not on every Torn page refresh.
     if (tabName === 'stock') renderStockTab(panel).catch((err) => console.error('[TDS] Stock tab failed:', err));
+    setTimeout(() => bindEmployeeProfileLinks(panel), 0);
   }
 
   function renderSettingsTab(panel) {
@@ -1379,6 +1385,81 @@
     };
   }
 
+  function findEmployeeByIdOrName(id, name) {
+    return extractEmployeesEntries(findRaw(state.lastResults, 'company', 'employees'))
+      .find((employee) =>
+        (id !== null && id !== undefined && String(employee.id) === String(id)) ||
+        String(employee.name || '').toLowerCase() === String(name || '').toLowerCase()
+      ) || null;
+  }
+
+  function openEmployeeDetail(panel, id, name) {
+    const employee = findEmployeeByIdOrName(id, name);
+    if (!employee) return;
+    panel.querySelector('.tds-profile-overlay')?.remove();
+
+    const emp = employee.raw || {};
+    const ee = getEmployeeEffectiveness(emp);
+    const lastAction = emp.last_action && typeof emp.last_action === 'object' ? emp.last_action : null;
+    const onlineStatus = lastAction?.status || '—';
+    const onlineMeta = employeeOnlineStatusMeta(onlineStatus);
+    const lastActionText = lastAction?.relative || formatTimestampRelative(lastAction?.timestamp) || '—';
+    let roleSummary = 'Open Employee Effectiveness for detailed role analysis.';
+
+    try {
+      const profile = findRaw(state.lastResults, 'company', 'profile');
+      const reference = findRaw(state.lastResults, 'torn', 'companies');
+      const typeId = numericValue(findValueDeep(profile, ['company_type', 'type_id', 'type']));
+      const typeName = resolveCompanyTypeName(reference, typeId);
+      const positions = extractPositionRequirements(reference, typeId).map((position) => ({
+        ...position, resolvedSpecial: resolvePositionSpecial(position, typeId, typeName),
+      }));
+      const row = positions.length ? buildEmployeePositionMatrix([employee], positions)[0] : null;
+      if (row?.best?.position?.name) {
+        roleSummary = `Best estimated role: ${row.best.position.name}${typeof row.best.estimate?.total === 'number' ? ` · ${formatNumber(row.best.estimate.total)} EE` : ''}`;
+      }
+    } catch (err) { console.warn('[TDS] Employee summary role analysis unavailable:', err); }
+
+    const overlay = document.createElement('div');
+    overlay.className = 'tds-profile-overlay';
+    overlay.innerHTML = `<div class="tds-profile-modal" role="dialog" aria-modal="true">
+      <div class="tds-profile-head"><div><div class="tds-employee-name" style="font-size:17px;">${escapeHtml(String(employee.name))}</div><div class="tds-employee-meta">${escapeHtml(String(employee.position || 'Employee'))}</div></div><button class="tds-btn" data-profile-close>Close</button></div>
+      <div class="tds-card">
+        <div class="tds-row"><span class="tds-row-label">Current EE</span><span class="tds-row-value">${ee?.total !== null && ee?.total !== undefined ? formatNumber(ee.total) : '—'}</span></div>
+        <div class="tds-row"><span class="tds-row-label">Days employed</span><span class="tds-row-value">${formatNumber(emp.days_in_company)}</span></div>
+        <div class="tds-row"><span class="tds-row-label">Online status</span><span class="tds-row-value ${onlineMeta.textClass}">${escapeHtml(String(onlineStatus))}</span></div>
+        <div class="tds-row"><span class="tds-row-label">Last action</span><span class="tds-row-value ${onlineMeta.textClass}">${escapeHtml(String(lastActionText))}</span></div>
+      </div>
+      <div class="tds-section-label">Working Stats</div>
+      <div class="tds-card">
+        <div class="tds-row"><span class="tds-row-label">Manual Labor</span><span class="tds-row-value">${formatNumber(emp.manual_labor)}</span></div>
+        <div class="tds-row"><span class="tds-row-label">Intelligence</span><span class="tds-row-value">${formatNumber(emp.intelligence)}</span></div>
+        <div class="tds-row"><span class="tds-row-label">Endurance</span><span class="tds-row-value">${formatNumber(emp.endurance)}</span></div>
+      </div>
+      <div class="tds-section-label">Role Summary</div><div class="tds-box tds-box-neutral">${escapeHtml(roleSummary)}</div>
+      <div class="tds-profile-actions"><button class="tds-btn" data-profile-tab="training">View in Training</button><button class="tds-btn" data-profile-tab="optimize">View in Employee Effectiveness</button></div>
+    </div>`;
+
+    const close = () => overlay.remove();
+    overlay.querySelector('[data-profile-close]')?.addEventListener('click', close);
+    overlay.addEventListener('click', (event) => { if (event.target === overlay) close(); });
+    overlay.querySelectorAll('[data-profile-tab]').forEach((button) => button.addEventListener('click', () => {
+      const tab = button.dataset.profileTab; close(); switchTab(panel, tab);
+    }));
+    panel.appendChild(overlay);
+  }
+
+  function bindEmployeeProfileLinks(panel) {
+    panel.querySelectorAll('[data-employee-profile]').forEach((node) => {
+      if (node.dataset.profileBound === '1') return;
+      node.dataset.profileBound = '1';
+      node.addEventListener('click', (event) => {
+        event.preventDefault(); event.stopPropagation();
+        openEmployeeDetail(panel, node.dataset.employeeId, node.dataset.employeeName);
+      });
+    });
+  }
+
   function renderOverviewTab(panel, results, verdict) {
     const el = panel.querySelector('[data-tabpanel="overview"]');
     if (!results || !verdict) {
@@ -1550,7 +1631,7 @@
             <summary class="tds-employee-summary">
               <div class="tds-employee-top">
                 <div>
-                  <div class="tds-employee-name">${escapeHtml(String(employee.name))}</div>
+                  <div class="tds-employee-name tds-employee-profile-link" data-employee-profile data-employee-id="${escapeHtml(String(employee.id))}" data-employee-name="${escapeHtml(String(employee.name))}" title="Open employee summary">${escapeHtml(String(employee.name))}</div>
                   <div class="tds-employee-meta">
                     ${escapeHtml(String(employee.position || 'Employee'))}
                     <span class="${onlineMeta.textClass}" style="margin-left:6px;">· ${escapeHtml(String(lastActionText))}</span>
@@ -1599,6 +1680,7 @@
     }
 
     el.innerHTML = html;
+    bindEmployeeProfileLinks(panel);
   }
 
   function escapeHtml(str) {
@@ -6081,7 +6163,7 @@
           <div class="tds-employee-row">
             <div class="tds-employee-top">
               <div>
-                <div class="tds-employee-name">${i === 0 ? '▶ ' : ''}${escapeHtml(String(e.name))}</div>
+                <div class="tds-employee-name tds-employee-profile-link" data-employee-profile data-employee-id="${escapeHtml(String(e.id))}" data-employee-name="${escapeHtml(String(e.name))}" title="Open employee summary">${i === 0 ? '▶ ' : ''}${escapeHtml(String(e.name))}</div>
                 <div class="tds-employee-meta">${escapeHtml(String(e.position))}</div>
               </div>
               <div class="tds-row-value">${e.ee ? e.ee.value : '<span class="tds-v-dim">no EE field</span>'}</div>
