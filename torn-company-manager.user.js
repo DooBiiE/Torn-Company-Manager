@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Company Management Suite
 // @namespace    torn-company-management-suite
-// @version      1.3.54
+// @version      1.3.55
 // @description  Local-only company management dashboard for Torn directors, embedded in the Jobs page. No company data ever leaves your browser; only your Torn User ID is checked against a public license list.
 // @author       DooBiiE
 // @homepageURL  https://github.com/DooBiiE/Torn-Company-Manager
@@ -70,7 +70,7 @@
   // TornPDA does not always expose the legacy GM_info object that desktop
   // userscript managers provide. Try both common metadata APIs, then use the
   // release version as a PDA-safe fallback so the UI never shows vunknown.
-  const TDS_VERSION_FALLBACK = '1.3.54';
+  const TDS_VERSION_FALLBACK = '1.3.55';
   const TDS_VERSION =
     (typeof GM_info !== 'undefined' && GM_info?.script?.version) ||
     (typeof GM !== 'undefined' && GM?.info?.script?.version) ||
@@ -1041,7 +1041,7 @@
     lastRunAt: null,
     diagnosticRunning: false,
     panel: null,
-    benchmark: { tier: 'same', cache: {}, snapshot: null }, // cache keyed by categoryId -> { timestamp, data }
+    benchmark: { tier: 'same', cache: {}, snapshot: null, staffingCache: {} }, // compare + on-demand staffing cache
     stock: { loading: false, newsCache: null, newsCacheAt: 0 },
   };
 
@@ -6838,6 +6838,379 @@
     return item.money ? formatMoney(value) : formatNumber(value);
   }
 
+
+  const STAFFING_BENCHMARK_MAX_COMPANIES = 25;
+  const STAFFING_BENCHMARK_CACHE_TTL_MS = 30 * 60 * 1000;
+
+  function positionCountsFromEmployees(employees) {
+    const counts = new Map();
+
+    for (const employee of employees || []) {
+      const position = String(employee?.position || '').trim() || 'Unassigned';
+      counts.set(position, (counts.get(position) || 0) + 1);
+    }
+
+    return counts;
+  }
+
+  function staffingCacheKey(companies) {
+    return (companies || [])
+      .map((row) => row?.id)
+      .filter((id) => id !== null && id !== undefined)
+      .map(String)
+      .sort()
+      .join(',');
+  }
+
+  async function fetchPublicCompanyStaffing(company) {
+    if (!company || company.id === null || company.id === undefined) {
+      throw new Error('Company ID unavailable');
+    }
+
+    const data = await ApiClient.callV2(
+      `company/${encodeURIComponent(company.id)}/employees`
+    );
+
+    const employees = extractEmployeesEntries(data);
+
+    return {
+      id: company.id,
+      name: company.name || `#${company.id}`,
+      rating: company.rating ?? null,
+      dailyIncome: company.dailyIncome ?? null,
+      weeklyIncome: company.weeklyIncome ?? null,
+      employeeCount: employees.length,
+      positions: positionCountsFromEmployees(employees),
+    };
+  }
+
+  async function buildStaffingBenchmark(companies, onProgress = null) {
+    const candidates = [];
+    const seen = new Set();
+
+    for (const company of companies || []) {
+      if (company?.id === null || company?.id === undefined) continue;
+      const key = String(company.id);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      candidates.push(company);
+      if (candidates.length >= STAFFING_BENCHMARK_MAX_COMPANIES) break;
+    }
+
+    const key = staffingCacheKey(candidates);
+    const cached = state.benchmark.staffingCache[key];
+
+    if (
+      cached &&
+      Date.now() - cached.timestamp < STAFFING_BENCHMARK_CACHE_TTL_MS
+    ) {
+      return { ...cached.data, fromCache: true };
+    }
+
+    const companiesWithStaffing = [];
+    const errors = [];
+
+    for (let index = 0; index < candidates.length; index += 1) {
+      const company = candidates[index];
+
+      onProgress?.({
+        complete: index,
+        total: candidates.length,
+        company,
+      });
+
+      try {
+        const staffing = await fetchPublicCompanyStaffing(company);
+        companiesWithStaffing.push(staffing);
+      } catch (err) {
+        errors.push({
+          company,
+          reason: String(err?.reason || err?.message || err || 'Unknown error'),
+        });
+      }
+    }
+
+    onProgress?.({
+      complete: candidates.length,
+      total: candidates.length,
+      company: null,
+    });
+
+    const result = {
+      requested: candidates.length,
+      companies: companiesWithStaffing,
+      errors,
+      fromCache: false,
+    };
+
+    state.benchmark.staffingCache[key] = {
+      timestamp: Date.now(),
+      data: result,
+    };
+
+    return result;
+  }
+
+  function summarizeStaffingBenchmark(result, own) {
+    const companies = result?.companies || [];
+    const totalCompanies = companies.length;
+    const positions = new Map();
+
+    for (const company of companies) {
+      for (const [position, count] of company.positions || []) {
+        if (!positions.has(position)) {
+          positions.set(position, {
+            position,
+            companiesUsing: 0,
+            totalAssigned: 0,
+          });
+        }
+
+        const row = positions.get(position);
+        if (count > 0) row.companiesUsing += 1;
+        row.totalAssigned += count;
+      }
+    }
+
+    const ownCompany =
+      companies.find((company) =>
+        (own?.id !== null && own?.id !== undefined &&
+          String(company.id) === String(own.id)) ||
+        normalizeCompareCompanyName(company.name) ===
+          normalizeCompareCompanyName(own?.name)
+      ) || null;
+
+    // If our company wasn't in the public benchmark fetch, use the locally
+    // available employee roster so "Yours" still works for employee users.
+    let ownPositions = ownCompany?.positions || null;
+    let ownEmployeeCount = ownCompany?.employeeCount ?? null;
+
+    if (!ownPositions && state.lastResults) {
+      const localEmployees = extractEmployeesEntries(
+        findRaw(state.lastResults, 'company', 'employees')
+      );
+      if (localEmployees.length) {
+        ownPositions = positionCountsFromEmployees(localEmployees);
+        ownEmployeeCount = localEmployees.length;
+      }
+    }
+
+    const rows = [...positions.values()]
+      .map((row) => {
+        const usagePct =
+          totalCompanies > 0
+            ? (row.companiesUsing / totalCompanies) * 100
+            : 0;
+
+        const averagePerCompany =
+          totalCompanies > 0
+            ? row.totalAssigned / totalCompanies
+            : 0;
+
+        const yours = ownPositions
+          ? (ownPositions.get(row.position) || 0)
+          : null;
+
+        return {
+          ...row,
+          usagePct,
+          averagePerCompany,
+          yours,
+        };
+      })
+      .sort((a, b) =>
+        b.usagePct - a.usagePct ||
+        b.averagePerCompany - a.averagePerCompany ||
+        a.position.localeCompare(b.position)
+      );
+
+    return {
+      totalCompanies,
+      averageEmployees:
+        totalCompanies > 0
+          ? companies.reduce((sum, company) => sum + company.employeeCount, 0) /
+            totalCompanies
+          : null,
+      ownEmployeeCount,
+      rows,
+    };
+  }
+
+  function staffingObservation(row) {
+    if (typeof row?.yours !== 'number') return null;
+
+    if (row.yours === 0 && row.usagePct >= 50) {
+      return {
+        cls: 'tds-v-warn',
+        label: 'Missing common role',
+      };
+    }
+
+    if (
+      row.averagePerCompany >= 1 &&
+      row.yours > 0 &&
+      row.yours < row.averagePerCompany * 0.60
+    ) {
+      return {
+        cls: 'tds-v-warn',
+        label: 'Below benchmark',
+      };
+    }
+
+    if (
+      row.averagePerCompany > 0 &&
+      row.yours > Math.max(2, row.averagePerCompany * 1.60)
+    ) {
+      return {
+        cls: 'tds-v-dim',
+        label: 'Above benchmark',
+      };
+    }
+
+    return null;
+  }
+
+  function renderStaffingBenchmarkHtml(result, own, primaryMetric = 'weeklyIncome') {
+    const summary = summarizeStaffingBenchmark(result, own);
+
+    if (!summary.totalCompanies) {
+      return `<div class="tds-box tds-box-warn">
+        No public employee rosters could be read for the fetched comparison companies.
+      </div>`;
+    }
+
+    let html = `<div class="tds-box tds-box-info">
+      Staffing benchmark built from <strong>${formatNumber(summary.totalCompanies)}</strong>
+      public company employee roster${summary.totalCompanies === 1 ? '' : 's'}.
+      ${result.fromCache ? 'Loaded from the 30-minute local cache.' : ''}
+      Only public position/headcount data is used.
+    </div>`;
+
+    html += `<div class="tds-card">
+      <div class="tds-row">
+        <span class="tds-row-label">Companies analysed</span>
+        <span class="tds-row-value">${formatNumber(summary.totalCompanies)}</span>
+      </div>
+      <div class="tds-row">
+        <span class="tds-row-label">Average total employees</span>
+        <span class="tds-row-value">${summary.averageEmployees !== null ? summary.averageEmployees.toFixed(1) : '—'}</span>
+      </div>
+      <div class="tds-row">
+        <span class="tds-row-label">Your total employees</span>
+        <span class="tds-row-value">${summary.ownEmployeeCount !== null ? formatNumber(summary.ownEmployeeCount) : '—'}</span>
+      </div>
+      <div class="tds-row">
+        <span class="tds-row-label">Roster fetch errors</span>
+        <span class="tds-row-value ${result.errors?.length ? 'tds-v-warn' : 'tds-v-good'}">${formatNumber(result.errors?.length || 0)}</span>
+      </div>
+    </div>`;
+
+    const observations = summary.rows
+      .map((row) => ({ row, observation: staffingObservation(row) }))
+      .filter((item) => item.observation);
+
+    if (observations.length) {
+      html += `<div class="tds-section-label">Staffing observations</div><div class="tds-card">`;
+      observations.slice(0, 8).forEach(({ row, observation }) => {
+        html += `<div class="tds-row">
+          <span class="tds-row-label ${observation.cls}">${escapeHtml(observation.label)}</span>
+          <span class="tds-row-value">
+            ${escapeHtml(row.position)} · you ${formatNumber(row.yours)}
+            · avg ${row.averagePerCompany.toFixed(1)}
+            · used by ${row.usagePct.toFixed(0)}%
+          </span>
+        </div>`;
+      });
+      html += `</div>`;
+    }
+
+    html += `<div class="tds-section-label">Position benchmark</div>`;
+    html += `<div style="overflow-x:auto;"><table class="tds-table tds-compare-table">
+      <thead><tr>
+        <th>Position</th>
+        <th>Usage</th>
+        <th>Avg / Co.</th>
+        <th>Yours</th>
+        <th>Comparison</th>
+      </tr></thead><tbody>`;
+
+    summary.rows.forEach((row) => {
+      const observation = staffingObservation(row);
+      const yoursText =
+        typeof row.yours === 'number'
+          ? formatNumber(row.yours)
+          : '—';
+
+      let comparison = '—';
+      let comparisonCls = '';
+
+      if (typeof row.yours === 'number') {
+        const delta = row.yours - row.averagePerCompany;
+        comparison =
+          `${delta > 0 ? '+' : ''}${delta.toFixed(1)} vs avg`;
+        comparisonCls =
+          delta > 0.25
+            ? 'tds-v-good'
+            : delta < -0.25
+              ? 'tds-v-warn'
+              : '';
+      }
+
+      html += `<tr class="company-data-row">
+        <td><strong>${escapeHtml(row.position)}</strong>${observation ? `<div class="${observation.cls}" style="font-size:10px;">${escapeHtml(observation.label)}</div>` : ''}</td>
+        <td>${row.usagePct.toFixed(0)}% (${formatNumber(row.companiesUsing)}/${formatNumber(summary.totalCompanies)})</td>
+        <td>${row.averagePerCompany.toFixed(1)}</td>
+        <td>${yoursText}</td>
+        <td class="${comparisonCls}">${comparison}</td>
+      </tr>`;
+    });
+
+    html += `</tbody></table></div>`;
+
+    const rankedCompanies = [...(result.companies || [])]
+      .filter((company) => typeof company[primaryMetric] === 'number')
+      .sort((a, b) => b[primaryMetric] - a[primaryMetric])
+      .slice(0, 5);
+
+    if (rankedCompanies.length) {
+      const incomeLabel =
+        primaryMetric === 'weeklyIncome'
+          ? 'Weekly Income'
+          : 'Daily Income';
+
+      html += `<div class="tds-section-label">Top earner rosters</div>
+        <div class="tds-box tds-box-neutral">
+          Exact public position composition for the top ${formatNumber(rankedCompanies.length)}
+          earners among the companies successfully analysed.
+        </div>`;
+
+      rankedCompanies.forEach((company, index) => {
+        const tags = [...company.positions.entries()]
+          .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+          .map(([position, count]) =>
+            `<span style="display:inline-block;margin:2px 4px 2px 0;padding:3px 6px;border:1px solid var(--tds-border-strong,#4a4a4a);border-radius:5px;">${formatNumber(count)}× ${escapeHtml(position)}</span>`
+          )
+          .join('');
+
+        html += `<div class="tds-card">
+          <div class="tds-row">
+            <span class="tds-row-label"><strong>#${index + 1} — ${escapeHtml(company.name)}</strong></span>
+            <span class="tds-row-value">${company.rating !== null ? `${company.rating}★ · ` : ''}${formatCompareMetricValue({ money: true }, company[primaryMetric])}</span>
+          </div>
+          <div class="tds-v-dim" style="margin-bottom:6px;">${escapeHtml(incomeLabel)} · ${formatNumber(company.employeeCount)} employees</div>
+          <div>${tags || 'No positions returned'}</div>
+        </div>`;
+      });
+    }
+
+    html += `<div class="tds-box tds-box-neutral">
+      Position counts are descriptive benchmarks only. A common roster is not automatically the best roster for your company,
+      and this section does not recommend staffing changes based on headcount alone.
+    </div>`;
+
+    return html;
+  }
+
   async function renderBenchmarkResults(panel, data, own) {
     const el = panel.querySelector('[data-tabpanel="benchmark"] #tds-bench-results');
     if (!el) return;
@@ -7379,6 +7752,20 @@
       </div>`;
     }
 
+    html += `<div class="tds-section-label">Staffing Benchmark</div>
+      <div id="tds-staffing-benchmark">
+        <div class="tds-box tds-box-neutral">
+          Compare public employee-position structures across up to
+          <strong>${STAFFING_BENCHMARK_MAX_COMPANIES}</strong> of the fetched companies.
+          This is loaded only when requested because each company roster requires a separate read-only Torn API request.
+        </div>
+        <button class="tds-btn" id="tds-load-staffing-benchmark">
+          Load Staffing Benchmark
+        </button>
+        <div id="tds-staffing-progress" class="tds-v-dim" style="margin-top:8px;"></div>
+        <div id="tds-staffing-results" style="margin-top:10px;"></div>
+      </div>`;
+
     html += `<div class="tds-section-label">Comparison table</div>`;
     html += `<div style="overflow-x:auto;"><table class="tds-table tds-compare-table"><thead><tr>
       <th>#</th><th>Company</th><th>★</th>
@@ -7420,6 +7807,88 @@
     }
 
     el.innerHTML = html;
+
+    const staffingButton = el.querySelector('#tds-load-staffing-benchmark');
+    const staffingProgress = el.querySelector('#tds-staffing-progress');
+    const staffingResults = el.querySelector('#tds-staffing-results');
+
+    if (staffingButton && staffingResults) {
+      const staffingCandidates = sorted
+        .filter((row) => row.id !== null && row.id !== undefined)
+        .slice(0, STAFFING_BENCHMARK_MAX_COMPANIES);
+
+      const primaryStaffingMetric =
+        hasWeeklyIncome
+          ? 'weeklyIncome'
+          : hasDailyIncome
+            ? 'dailyIncome'
+            : 'weeklyIncome';
+
+      const staffingKey = staffingCacheKey(staffingCandidates);
+      const staffingCached = state.benchmark.staffingCache[staffingKey];
+
+      if (
+        staffingCached &&
+        Date.now() - staffingCached.timestamp < STAFFING_BENCHMARK_CACHE_TTL_MS
+      ) {
+        staffingButton.textContent = 'Refresh Staffing Benchmark';
+        staffingResults.innerHTML = renderStaffingBenchmarkHtml(
+          { ...staffingCached.data, fromCache: true },
+          own,
+          primaryStaffingMetric
+        );
+      }
+
+      staffingButton.addEventListener('click', async () => {
+        staffingButton.disabled = true;
+        staffingButton.textContent = 'Loading Staffing…';
+
+        if (staffingProgress) {
+          staffingProgress.textContent =
+            `Starting public roster comparison for up to ${formatNumber(staffingCandidates.length)} companies…`;
+        }
+
+        try {
+          // Force refresh the staffing-key cache for an explicit button click.
+          delete state.benchmark.staffingCache[staffingKey];
+
+          const staffing = await buildStaffingBenchmark(
+            staffingCandidates,
+            (progress) => {
+              if (!staffingProgress) return;
+
+              staffingProgress.textContent =
+                progress.company
+                  ? `Reading roster ${formatNumber(progress.complete + 1)} / ${formatNumber(progress.total)} · ${progress.company.name || `#${progress.company.id}`}`
+                  : `Roster requests complete · ${formatNumber(progress.total)} checked`;
+            }
+          );
+
+          staffingResults.innerHTML = renderStaffingBenchmarkHtml(
+            staffing,
+            own,
+            primaryStaffingMetric
+          );
+
+          if (staffingProgress) {
+            staffingProgress.textContent =
+              `${formatNumber(staffing.companies.length)} company roster(s) loaded · ${formatNumber(staffing.errors.length)} error(s).`;
+          }
+
+          staffingButton.textContent = 'Refresh Staffing Benchmark';
+        } catch (err) {
+          staffingResults.innerHTML = `<div class="tds-box tds-box-danger">
+            <strong>Staffing benchmark failed:</strong>
+            ${escapeHtml(String(err?.reason || err?.message || err || 'Unknown error'))}
+          </div>`;
+
+          if (staffingProgress) staffingProgress.textContent = '';
+          staffingButton.textContent = 'Retry Staffing Benchmark';
+        } finally {
+          staffingButton.disabled = false;
+        }
+      });
+    }
   }
 
 
