@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Company Management Suite
 // @namespace    torn-company-management-suite
-// @version      1.3.51
+// @version      1.3.52
 // @description  Local-only company management dashboard for Torn directors, embedded in the Jobs page. No company data ever leaves your browser; only your Torn User ID is checked against a public license list.
 // @author       DooBiiE
 // @homepageURL  https://github.com/DooBiiE/Torn-Company-Manager
@@ -70,7 +70,7 @@
   // TornPDA does not always expose the legacy GM_info object that desktop
   // userscript managers provide. Try both common metadata APIs, then use the
   // release version as a PDA-safe fallback so the UI never shows vunknown.
-  const TDS_VERSION_FALLBACK = '1.3.51';
+  const TDS_VERSION_FALLBACK = '1.3.52';
   const TDS_VERSION =
     (typeof GM_info !== 'undefined' && GM_info?.script?.version) ||
     (typeof GM !== 'undefined' && GM?.info?.script?.version) ||
@@ -1118,7 +1118,8 @@
     // Put the suite into Torn's Jobs content rather than attaching an overlay to body.
     mount.prepend(panel);
     state.panel = panel;
-    updateHeaderAccessBadge(panel, GM_getValue(STORAGE_KEY_LAST_VERDICT, null));
+    const cachedAccessLevel = GM_getValue(STORAGE_KEY_LAST_VERDICT, null)?.level || 'unknown';
+    updateHeaderAccessBadge(panel, { level: cachedAccessLevel });
 
     applyTheme(panel, GM_getValue(STORAGE_KEY_THEME, 'green'));
 
@@ -1343,7 +1344,7 @@
 
     badge.textContent = labels[level] || 'ACCESS UNKNOWN';
     badge.className = `tds-access-badge tds-access-${level}`;
-    badge.title = verdict?.detail || 'Access level determined by Diagnostics';
+    badge.title = 'Access level determined by Diagnostics';
   }
 
   function renderOverviewTab(panel, results, verdict) {
@@ -1356,9 +1357,12 @@
     updateHeaderAccessBadge(panel, verdict);
 
     let html = '';
-    if (verdict.level !== 'director') {
-      const boxClass = verdict.level === 'unknown' ? 'tds-box-danger' : 'tds-box-warn';
-      html += `<div class="tds-box ${boxClass}">${escapeHtml(verdict.detail)}</div>`;
+    if (verdict.level === 'employee') {
+      html += `<div class="tds-box tds-box-warn">Employee features are available. You need to be the company director to access the full management features.</div>`;
+    } else if (verdict.level === 'partial') {
+      html += `<div class="tds-box tds-box-warn">Some features are unavailable. Check Settings and Diagnostics for details.</div>`;
+    } else if (verdict.level === 'unknown') {
+      html += `<div class="tds-box tds-box-danger">Access level could not be confirmed yet. Run Diagnostics to refresh it.</div>`;
     }
 
     const profile = findRaw(results, 'company', 'profile');
@@ -7223,7 +7227,10 @@
 
       if (!Array.isArray(results) || !results.length) return false;
 
-      const verdict = GM_getValue(STORAGE_KEY_LAST_VERDICT, null) || classifyAccess(results);
+      // Rebuild the verdict from the current diagnostic results so wording
+      // from older cached versions cannot reappear after an update.
+      const verdict = classifyAccess(results);
+      GM_setValue(STORAGE_KEY_LAST_VERDICT, verdict);
 
       state.lastResults = results;
       state.lastVerdict = verdict;
