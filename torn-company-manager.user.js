@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Company Management Suite
 // @namespace    torn-company-management-suite
-// @version      1.3.64
+// @version      1.3.65
 // @description  Local-only company management dashboard for Torn directors, embedded in the Jobs page. No company data ever leaves your browser; only your Torn User ID is checked against a public license list.
 // @author       DooBiiE
 // @homepageURL  https://github.com/DooBiiE/Torn-Company-Manager
@@ -70,7 +70,7 @@
   // TornPDA does not always expose the legacy GM_info object that desktop
   // userscript managers provide. Try both common metadata APIs, then use the
   // release version as a PDA-safe fallback so the UI never shows vunknown.
-  const TDS_VERSION_FALLBACK = '1.3.64';
+  const TDS_VERSION_FALLBACK = '1.3.65';
   const TDS_VERSION =
     (typeof GM_info !== 'undefined' && GM_info?.script?.version) ||
     (typeof GM !== 'undefined' && GM?.info?.script?.version) ||
@@ -664,6 +664,13 @@
       .tds-profile-modal { width:min(560px,96vw); max-height:86vh; overflow:auto; background:var(--tds-bg-panel,#1f1f1f); border:1px solid var(--tds-border-strong,#4a4a4a); border-radius:10px; box-shadow:0 14px 40px rgba(0,0,0,.45); padding:14px; }
       .tds-profile-head { display:flex; justify-content:space-between; gap:10px; align-items:flex-start; margin-bottom:10px; }
       .tds-profile-actions { display:flex; flex-wrap:wrap; gap:6px; margin-top:12px; }
+      .tds-employee-deeplink-highlight {
+        outline: 2px solid var(--tds-accent, #3ddc84);
+        outline-offset: 3px;
+        border-radius: 6px;
+        background: var(--tds-accent-dim, rgba(61,220,132,.14)) !important;
+        transition: background .2s ease, outline-color .2s ease;
+      }
       .tds-employee-meta { color: var(--tds-text-dim, #999999); font-size: 11px; margin-top: 1px; }
       .tds-diag-row { display: flex; justify-content: space-between; align-items: flex-start; padding: 8px 0; border-bottom: 1px solid var(--tds-border-soft, #242424); gap: 10px; }
       .tds-diag-row:last-child { border-bottom: none; }
@@ -1393,6 +1400,69 @@
       ) || null;
   }
 
+  function employeeDeepLinkSelector(id, name) {
+    const safeId = String(id ?? '').replace(/"/g, '\\"');
+    const safeName = String(name ?? '').replace(/"/g, '\\"');
+
+    return [
+      safeId ? `[data-employee-id="${safeId}"]` : '',
+      safeName ? `[data-employee-name="${safeName}"]` : '',
+    ].filter(Boolean).join(',');
+  }
+
+  function clearEmployeeDeepLinkHighlights(panel) {
+    panel.querySelectorAll('.tds-employee-deeplink-highlight').forEach((node) => {
+      node.classList.remove('tds-employee-deeplink-highlight');
+    });
+  }
+
+  function focusEmployeeInTab(panel, tabName, employee) {
+    switchTab(panel, tabName);
+
+    const tryFocus = (attempt = 0) => {
+      clearEmployeeDeepLinkHighlights(panel);
+
+      const selector = employeeDeepLinkSelector(employee.id, employee.name);
+      const candidates = selector
+        ? [...panel.querySelectorAll(selector)]
+        : [];
+
+      const visible = candidates.find((node) => {
+        const tabPanel = node.closest('.tds-tabpanel');
+        return tabPanel && tabPanel.dataset.tabpanel === tabName && !tabPanel.hidden;
+      });
+
+      const target =
+        visible?.closest('.tds-employee-row, tr, .tds-card, details') ||
+        visible ||
+        null;
+
+      if (target) {
+        if (target.tagName === 'DETAILS') {
+          target.open = true;
+        }
+
+        target.classList.add('tds-employee-deeplink-highlight');
+        target.scrollIntoView({
+          behavior: 'smooth',
+          block: 'center',
+        });
+
+        setTimeout(() => {
+          target.classList.remove('tds-employee-deeplink-highlight');
+        }, 5000);
+
+        return;
+      }
+
+      if (attempt < 12) {
+        setTimeout(() => tryFocus(attempt + 1), 150);
+      }
+    };
+
+    setTimeout(() => tryFocus(), 0);
+  }
+
   function openEmployeeDetail(panel, id, name) {
     const employee = findEmployeeByIdOrName(id, name);
     if (!employee) return;
@@ -1444,7 +1514,9 @@
     overlay.querySelector('[data-profile-close]')?.addEventListener('click', close);
     overlay.addEventListener('click', (event) => { if (event.target === overlay) close(); });
     overlay.querySelectorAll('[data-profile-tab]').forEach((button) => button.addEventListener('click', () => {
-      const tab = button.dataset.profileTab; close(); switchTab(panel, tab);
+      const tab = button.dataset.profileTab;
+      close();
+      focusEmployeeInTab(panel, tab, employee);
     }));
     panel.appendChild(overlay);
   }
@@ -1627,7 +1699,7 @@
           '—';
 
         html += `
-          <details class="tds-employee-row">
+          <details class="tds-employee-row" data-employee-id="${escapeHtml(String(employee.id))}" data-employee-name="${escapeHtml(String(employee.name))}">
             <summary class="tds-employee-summary">
               <div class="tds-employee-top">
                 <div>
@@ -6110,6 +6182,7 @@
     </div>`;
 
     el.innerHTML = html;
+    bindEmployeeProfileLinks(panel);
     renderOptimizerPerformanceEvidence(el).catch((err) =>
       console.warn('[TDS] Performance evidence render failed:', err)
     );
@@ -6183,6 +6256,7 @@
 
     el.innerHTML = html;
     bindTrainingModeButtons(panel);
+    bindEmployeeProfileLinks(panel);
   }
 
   function bindTrainingModeButtons(panel) {
