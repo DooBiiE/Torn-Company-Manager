@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Company Management Suite
 // @namespace    torn-company-management-suite
-// @version      1.3.61
+// @version      1.3.62
 // @description  Local-only company management dashboard for Torn directors, embedded in the Jobs page. No company data ever leaves your browser; only your Torn User ID is checked against a public license list.
 // @author       DooBiiE
 // @homepageURL  https://github.com/DooBiiE/Torn-Company-Manager
@@ -70,7 +70,7 @@
   // TornPDA does not always expose the legacy GM_info object that desktop
   // userscript managers provide. Try both common metadata APIs, then use the
   // release version as a PDA-safe fallback so the UI never shows vunknown.
-  const TDS_VERSION_FALLBACK = '1.3.61';
+  const TDS_VERSION_FALLBACK = '1.3.62';
   const TDS_VERSION =
     (typeof GM_info !== 'undefined' && GM_info?.script?.version) ||
     (typeof GM !== 'undefined' && GM?.info?.script?.version) ||
@@ -6553,10 +6553,11 @@
       This uses Torn's read-only API and may take a few seconds when several pages are available.
     </div>`;
 
+    let data;
+
     try {
-      const data = await fetchBenchmarkCompanies(own.typeId, tier, own.rating);
+      data = await fetchBenchmarkCompanies(own.typeId, tier, own.rating);
       state.benchmark.cache[cacheKey] = { timestamp: Date.now(), data };
-      await renderBenchmarkResults(panel, data, own);
     } catch (err) {
       if (!resultsEl) return;
 
@@ -6565,7 +6566,22 @@
         : '';
 
       resultsEl.innerHTML =
-        `<div class="tds-box tds-box-danger"><strong>Compare fetch failed:</strong> Torn error ${err.code ?? ''}: ${escapeHtml(String(err.reason || 'unknown'))}.${permissionHint}</div>`;
+        `<div class="tds-box tds-box-danger"><strong>Compare fetch failed:</strong> Torn error ${err.code ?? ''}: ${escapeHtml(String(err.reason || err.message || 'unknown'))}.${permissionHint}</div>`;
+      return;
+    }
+
+    try {
+      await renderBenchmarkResults(panel, data, own);
+    } catch (err) {
+      console.error('[TDS] Compare render failed:', err);
+
+      if (resultsEl) {
+        resultsEl.innerHTML =
+          `<div class="tds-box tds-box-danger">
+            <strong>Compare display failed:</strong>
+            ${escapeHtml(String(err?.message || err?.reason || err || 'Unknown display error'))}
+          </div>`;
+      }
     }
   }
 
@@ -6955,6 +6971,60 @@
     return counts;
   }
 
+  function serializeStaffingBenchmarkData(data) {
+    if (!data || typeof data !== 'object') return data;
+
+    return {
+      ...data,
+      companies: (data.companies || []).map((company) => ({
+        ...company,
+        positions:
+          company?.positions instanceof Map
+            ? Object.fromEntries(company.positions)
+            : (company?.positions && typeof company.positions === 'object'
+                ? company.positions
+                : {}),
+      })),
+    };
+  }
+
+  function rehydrateStaffingBenchmarkData(data) {
+    if (!data || typeof data !== 'object') return data;
+
+    return {
+      ...data,
+      companies: (data.companies || []).map((company) => {
+        let positions = company?.positions;
+
+        if (positions instanceof Map) {
+          return company;
+        }
+
+        if (Array.isArray(positions)) {
+          try {
+            positions = new Map(positions);
+          } catch (_) {
+            positions = new Map();
+          }
+        } else if (positions && typeof positions === 'object') {
+          positions = new Map(
+            Object.entries(positions).map(([position, count]) => [
+              position,
+              Number(count) || 0,
+            ])
+          );
+        } else {
+          positions = new Map();
+        }
+
+        return {
+          ...company,
+          positions,
+        };
+      }),
+    };
+  }
+
   function loadPersistentStaffingCache() {
     const raw = GM_getValue(STORAGE_KEY_STAFFING_BENCHMARK_CACHE, {});
     return raw && typeof raw === 'object' ? raw : {};
@@ -7049,6 +7119,10 @@
       savePersistentStaffingCache(persistent);
 
       if (cached) {
+        cached = {
+          ...cached,
+          data: rehydrateStaffingBenchmarkData(cached.data),
+        };
         state.benchmark.staffingCache[key] = cached;
       }
     }
@@ -7106,7 +7180,12 @@
     const persistent = prunePersistentStaffingCache(
       loadPersistentStaffingCache()
     );
-    persistent[key] = cacheEntry;
+
+    persistent[key] = {
+      timestamp: cacheEntry.timestamp,
+      data: serializeStaffingBenchmarkData(result),
+    };
+
     savePersistentStaffingCache(persistent);
 
     return result;
@@ -7118,7 +7197,12 @@
     const positions = new Map();
 
     for (const company of companies) {
-      for (const [position, count] of company.positions || []) {
+      const positionEntries =
+        company?.positions instanceof Map
+          ? company.positions.entries()
+          : Object.entries(company?.positions || {});
+
+      for (const [position, count] of positionEntries) {
         if (!positions.has(position)) {
           positions.set(position, {
             position,
@@ -7411,7 +7495,12 @@
         </div>`;
 
       rankedCompanies.forEach((company, index) => {
-        const tags = [...company.positions.entries()]
+        const companyPositionEntries =
+          company?.positions instanceof Map
+            ? [...company.positions.entries()]
+            : Object.entries(company?.positions || {});
+
+        const tags = companyPositionEntries
           .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
           .map(([position, count]) => {
             const comparison = rosterRoleComparisonStyle(
@@ -8093,6 +8182,10 @@
         staffingCached = persistent[staffingKey] || null;
 
         if (staffingCached) {
+          staffingCached = {
+            ...staffingCached,
+            data: rehydrateStaffingBenchmarkData(staffingCached.data),
+          };
           state.benchmark.staffingCache[staffingKey] = staffingCached;
         }
 
