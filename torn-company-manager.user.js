@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Company Management Suite
 // @namespace    torn-company-management-suite
-// @version      1.3.70
+// @version      1.3.71
 // @description  Local-only company management dashboard for Torn directors, embedded in the Jobs page. No company data ever leaves your browser; only your Torn User ID is checked against a public license list.
 // @author       DooBiiE
 // @homepageURL  https://github.com/DooBiiE/Torn-Company-Manager
@@ -70,7 +70,7 @@
   // TornPDA does not always expose the legacy GM_info object that desktop
   // userscript managers provide. Try both common metadata APIs, then use the
   // release version as a PDA-safe fallback so the UI never shows vunknown.
-  const TDS_VERSION_FALLBACK = '1.3.70';
+  const TDS_VERSION_FALLBACK = '1.3.71';
   const TDS_VERSION =
     (typeof GM_info !== 'undefined' && GM_info?.script?.version) ||
     (typeof GM !== 'undefined' && GM?.info?.script?.version) ||
@@ -1590,36 +1590,72 @@
         ['trains_available', 'Trains Available'], ['trains', 'Trains'],
         ['daily_income', 'Daily Income'], ['daily_customers', 'Daily Customers'],
         ['weekly_income', 'Weekly Income'], ['weekly_customers', 'Weekly Customers'],
-        ['company_bank', 'Company Bank']
+        ['company_bank', 'Company Bank'],
+        ['advertising_budget', 'Advertising Budget'],
+        ['company_value', 'Company Value'],
+        ['storage', 'Storage'],
+        ['applications_allowed', 'Applications Allowed']
       ];
 
       const infoLabels = new Set([
-        'Name', 'Type', 'Director', 'ID', 'Rating'
+        'Name', 'Type', 'Director', 'ID'
       ]);
 
       const shown = new Set();
       const shownFieldNames = new Set();
 
-      // Torn can expose these three health values at different nesting levels
-      // depending on the API response shape.
-      const healthMetrics = {
-        Popularity: findValueDeep(profile, ['popularity', 'company_popularity']) ?? findValueDeep(detailed, ['popularity', 'company_popularity']),
-        Efficiency: findValueDeep(profile, ['efficiency', 'company_efficiency']) ?? findValueDeep(detailed, ['efficiency', 'company_efficiency']),
-        Environment: findValueDeep(profile, ['environment', 'company_environment']) ?? findValueDeep(detailed, ['environment', 'company_environment'])
+      // API v2 company/profile encompasses the old profile + detailed data
+      // for directors. Resolve important metrics from either payload so a
+      // nesting change does not make them disappear from Overview.
+      const metricSources = [profile, detailed].filter(Boolean);
+      const findCompanyMetric = (aliases) => {
+        for (const source of metricSources) {
+          const value = findValueDeep(source, aliases);
+          if (value !== null && value !== undefined && value !== '') return value;
+        }
+        return null;
+      };
+
+      const explicitMetrics = {
+        Rating: findCompanyMetric(['rating', 'stars', 'star_rating', 'company_rating']),
+        Popularity: findCompanyMetric(['popularity', 'company_popularity']),
+        Efficiency: findCompanyMetric(['efficiency', 'company_efficiency']),
+        Environment: findCompanyMetric(['environment', 'company_environment']),
+        'Trains Available': findCompanyMetric([
+          'trains_available', 'available_trains', 'trains', 'train_count',
+          'trains_remaining', 'company_trains'
+        ]),
+        'Daily Income': findCompanyMetric(['daily_income', 'income_daily']),
+        'Daily Customers': findCompanyMetric(['daily_customers', 'customers_daily']),
+        'Weekly Income': findCompanyMetric(['weekly_income', 'income_weekly']),
+        'Weekly Customers': findCompanyMetric(['weekly_customers', 'customers_weekly']),
+        'Company Bank': findCompanyMetric(['company_bank', 'bank', 'company_funds']),
+        'Advertising Budget': findCompanyMetric([
+          'advertising_budget', 'advertising', 'ad_budget', 'daily_advertising'
+        ]),
+        'Company Value': findCompanyMetric([
+          'company_value', 'value', 'market_value', 'sell_value'
+        ]),
+        'Storage': findCompanyMetric([
+          'storage', 'storage_space', 'storage_size', 'warehouse_size'
+        ]),
+        'Applications Allowed': findCompanyMetric([
+          'applications_allowed', 'applications_open', 'accepting_applications'
+        ])
       };
 
       const preferredRows = [];
 
       for (const [key, label] of preferred) {
         const row = profileRows.find((r) => normalizeFieldName(r.key) === normalizeFieldName(key));
-        const explicitHealthValue = Object.prototype.hasOwnProperty.call(healthMetrics, label)
-          ? healthMetrics[label]
+        const explicitValue = Object.prototype.hasOwnProperty.call(explicitMetrics, label)
+          ? explicitMetrics[label]
           : null;
 
-        if ((!row && explicitHealthValue === null) || (row && shown.has(row.path))) continue;
+        if ((!row && explicitValue === null) || (row && shown.has(row.path))) continue;
 
         let formatter = formatCompanyValue;
-        const value = row ? row.value : explicitHealthValue;
+        const value = row ? row.value : explicitValue;
 
         if (label === 'Director') {
           formatter = (value) => formatDirectorName(value, employees, results);
@@ -1633,7 +1669,11 @@
           };
         } else if (label === 'Company Age') {
           formatter = formatCompanyAge;
-        } else if (label === 'Daily Income' || label === 'Weekly Income') {
+        } else if (
+          label === 'Daily Income' || label === 'Weekly Income' ||
+          label === 'Company Bank' || label === 'Advertising Budget' ||
+          label === 'Company Value'
+        ) {
           formatter = formatCurrency;
         } else if (label === 'Popularity' || label === 'Efficiency' || label === 'Environment') {
           formatter = formatPercent;
@@ -1677,6 +1717,24 @@
 
       for (const item of preferredRows.filter((item) => !infoLabels.has(item.label))) {
         html += companyOverviewRow(item.label, item.value, item.formatter);
+      }
+
+      const preferredLabels = new Set(preferredRows.map((item) => item.label));
+      for (const label of [
+        'Rating', 'Popularity', 'Efficiency', 'Environment', 'Trains Available',
+        'Advertising Budget', 'Company Value', 'Storage', 'Applications Allowed'
+      ]) {
+        if (preferredLabels.has(label)) continue;
+        const value = explicitMetrics[label];
+        if (value === null || value === undefined || value === '') continue;
+
+        let formatter = formatCompanyValue;
+        if (label === 'Popularity' || label === 'Efficiency' || label === 'Environment') {
+          formatter = formatPercent;
+        } else if (label === 'Advertising Budget' || label === 'Company Value') {
+          formatter = formatCurrency;
+        }
+        html += companyOverviewRow(label, value, formatter);
       }
 
       // Preserve every other scalar Torn returns, but place it in Statistics.
