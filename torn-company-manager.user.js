@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Company Management Suite
 // @namespace    torn-company-management-suite
-// @version      1.3.68
+// @version      1.3.69
 // @description  Local-only company management dashboard for Torn directors, embedded in the Jobs page. No company data ever leaves your browser; only your Torn User ID is checked against a public license list.
 // @author       DooBiiE
 // @homepageURL  https://github.com/DooBiiE/Torn-Company-Manager
@@ -70,7 +70,7 @@
   // TornPDA does not always expose the legacy GM_info object that desktop
   // userscript managers provide. Try both common metadata APIs, then use the
   // release version as a PDA-safe fallback so the UI never shows vunknown.
-  const TDS_VERSION_FALLBACK = '1.3.68';
+  const TDS_VERSION_FALLBACK = '1.3.69';
   const TDS_VERSION =
     (typeof GM_info !== 'undefined' && GM_info?.script?.version) ||
     (typeof GM !== 'undefined' && GM?.info?.script?.version) ||
@@ -4200,29 +4200,67 @@
 
     for (const { value, path } of deepObjectEntries(stockRaw)) {
       if (!value || typeof value !== 'object' || Array.isArray(value)) continue;
-      const name = pickText(value, ['name', 'item_name', 'stock_name', 'product_name']);
-      const id = pickText(value, ['id', 'item_id', 'stock_id', 'product_id']) || (path.length ? path[path.length - 1] : null);
-      const current = pickNumeric(value, ['amount', 'quantity', 'qty', 'stock', 'in_stock', 'instock', 'available', 'inventory']);
+
+      // Torn's company/stock response can expose each product as an object
+      // keyed by its product name under company_stock, e.g.
+      // company_stock["Product Name"] = { cost, in_stock, on_order, price,
+      // rrp, sold_amount, sold_worth }. Older/alternate response shapes may
+      // instead contain the name as a field, so support both.
+      const pathName = path.length ? String(path[path.length - 1]) : '';
+      const directName = pickText(value, ['name', 'item_name', 'stock_name', 'product_name']);
+      const hasStockMetrics = [
+        'cost', 'in_stock', 'on_order', 'price', 'rrp', 'sold_amount', 'sold_worth',
+        'amount', 'quantity', 'qty', 'stock', 'inventory'
+      ].some((field) => pickNumeric(value, [field]) !== null);
+
+      const name = directName || (
+        hasStockMetrics &&
+        pathName &&
+        !/^(company_stock|stock|data|items)$/i.test(pathName)
+          ? pathName
+          : null
+      );
+
+      const id = pickText(value, ['id', 'item_id', 'stock_id', 'product_id']);
+      const current = pickNumeric(value, [
+        'in_stock', 'instock', 'amount', 'quantity', 'qty', 'stock', 'available', 'inventory'
+      ]);
+      const onOrder = pickNumeric(value, ['on_order', 'onorder', 'ordered', 'incoming']);
       const setPrice = pickNumeric(value, ['price', 'selling_price', 'sell_price', 'price_each', 'priceeach']);
       const costEach = pickNumeric(value, ['cost', 'cost_each', 'costeach', 'unit_cost', 'buy_price']);
       const rrp = pickNumeric(value, ['rrp', 'recommended_retail_price', 'retail_price']);
-      const soldTotal = pickNumeric(value, ['sold_total', 'soldtotal', 'total_sold', 'units_sold_total']);
+      const soldTotal = pickNumeric(value, [
+        'sold_amount', 'soldamount', 'sold_total', 'soldtotal', 'total_sold', 'units_sold_total'
+      ]);
+      const soldWorth = pickNumeric(value, ['sold_worth', 'soldworth', 'sales_worth', 'revenue']);
       const soldDaily = pickNumeric(value, ['sold_daily', 'solddaily', 'daily_sold', 'sold_day', 'sold_today', 'daily_sales', 'sales_day']);
       const sold24 = pickNumeric(value, ['sold_24h', 'sold24h', 'sold_day', 'sold_today', 'daily_sold', 'daily_sales', 'sales_day']);
       const sold7 = pickNumeric(value, ['sold_7d', 'sold7d', 'sold_week', 'weekly_sold', 'weekly_sales', 'sales_week']);
 
-      if (!name || (current === null && sold24 === null && sold7 === null && soldDaily === null && setPrice === null)) continue;
+      if (!name || (
+        current === null &&
+        onOrder === null &&
+        soldTotal === null &&
+        sold24 === null &&
+        sold7 === null &&
+        soldDaily === null &&
+        setPrice === null
+      )) continue;
+
       const key = `${id || ''}|${name}`.toLowerCase();
       if (seenKeys.has(key)) continue;
       seenKeys.add(key);
+
       candidates.push({
         id,
         name,
         current,
+        onOrder,
         setPrice,
         costEach,
         rrp,
         soldTotal,
+        soldWorth,
         soldDaily,
         sold24,
         sold7,
@@ -4738,7 +4776,7 @@
     }
 
     if (!items.length) {
-      el.innerHTML = `<div class="tds-box tds-box-warn"><strong>Stock data was returned, but its item structure was not recognised yet.</strong><br>Open Diagnostics and check the fields shown for Company stock. The raw response is deliberately not guessed into fake item rows.</div>`;
+      el.innerHTML = `<div class="tds-box tds-box-warn"><strong>Stock data was returned, but no product rows could be recognised.</strong><br>The suite supports Torn's current <code>company_stock → product name → { cost, in_stock, on_order, price, rrp, sold_amount, sold_worth }</code> structure as well as older field-based shapes. If this still appears, please send the Company stock field names from Diagnostics.</div>`;
       return;
     }
 
@@ -6411,6 +6449,271 @@
         });
       });
     });
+  }
+
+  async function fetchTrainingHistorySources(results) {
+    let newsRaw = findRaw(results, 'company', 'news');
+    let logRaw = findRaw(results, 'user', 'log');
+
+    // Diagnostics normally already has both selections. Only make an extra
+    // request if one is absent, so opening Training does not needlessly use
+    // additional API calls.
+    if (!newsRaw) {
+      try {
+        newsRaw = await ApiClient.call('company', 'news');
+      } catch (_) {
+        newsRaw = null;
+      }
+    }
+
+    if (!logRaw) {
+      try {
+        logRaw = await ApiClient.call('user', 'log');
+      } catch (_) {
+        logRaw = null;
+      }
+    }
+
+    if (!newsRaw && !logRaw) {
+      throw new Error('No readable company-news or user-log training history was returned.');
+    }
+
+    return { newsRaw, logRaw };
+  }
+
+  function flattenTrainingHistoryEntries(raw) {
+    if (!raw) return [];
+
+    const entries = [];
+    const seen = new Set();
+
+    for (const { value, path } of deepObjectEntries(raw)) {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) continue;
+
+      const timestamp = pickNumeric(value, [
+        'timestamp', 'time', 'created_at', 'date', 'logtime'
+      ]);
+      if (!timestamp) continue;
+
+      const text = pickText(value, [
+        'text', 'news', 'message', 'description', 'event', 'title', 'log'
+      ]) || '';
+
+      const id = pickText(value, [
+        'id', 'log_id', 'news_id', 'event_id'
+      ]) || path.join('.');
+
+      const key = `${id}|${timestamp}|${text}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+
+      entries.push({
+        id,
+        timestamp: Number(timestamp),
+        text: String(text || ''),
+        raw: value
+      });
+    }
+
+    return entries.sort((a, b) => b.timestamp - a.timestamp);
+  }
+
+  function matchTrainingEmployee(entry, employees) {
+    const raw = entry.raw || {};
+
+    const possibleId = pickText(raw, [
+      'employee_id', 'user_id', 'player_id', 'target_id', 'member_id'
+    ]);
+
+    if (possibleId !== null && possibleId !== undefined) {
+      const byId = employees.find((employee) =>
+        String(employee.id) === String(possibleId)
+      );
+      if (byId) return byId;
+    }
+
+    const possibleName = pickText(raw, [
+      'employee_name', 'user_name', 'player_name', 'target_name', 'name'
+    ]);
+
+    if (possibleName) {
+      const normalized = normalizeFieldName(possibleName);
+      const byName = employees.find((employee) =>
+        normalizeFieldName(employee.name) === normalized
+      );
+      if (byName) return byName;
+    }
+
+    const text = String(entry.text || '').toLowerCase();
+    if (!text) return null;
+
+    // Longest name first avoids a short employee name accidentally matching
+    // inside another employee's name.
+    return [...employees]
+      .filter((employee) => employee.name && !String(employee.name).startsWith('#'))
+      .sort((a, b) => String(b.name).length - String(a.name).length)
+      .find((employee) => text.includes(String(employee.name).toLowerCase())) || null;
+  }
+
+  function trainingQuantity(entry) {
+    const raw = entry.raw || {};
+
+    const structured = pickNumeric(raw, [
+      'trains', 'train_count', 'traincount', 'quantity', 'qty', 'amount', 'count'
+    ]);
+    if (structured !== null && structured > 0 && structured <= 1000) {
+      return Math.max(1, Math.floor(structured));
+    }
+
+    const text = String(entry.text || '');
+    const patterns = [
+      /(\d[\d,]*)\s+(?:company\s+)?trains?\b/i,
+      /(?:trained|training)\s+(?:x\s*)?(\d[\d,]*)\b/i,
+      /(\d[\d,]*)\s+times?\b/i,
+    ];
+
+    for (const pattern of patterns) {
+      const match = text.match(pattern);
+      if (!match) continue;
+      const value = Number(String(match[1]).replace(/,/g, ''));
+      if (Number.isFinite(value) && value > 0 && value <= 1000) {
+        return Math.floor(value);
+      }
+    }
+
+    return 1;
+  }
+
+  function collectTrainingEvents(raw, employees) {
+    const sourceEntries = flattenTrainingHistoryEntries(raw);
+    const events = [];
+
+    for (const entry of sourceEntries) {
+      const text = String(entry.text || '');
+      const rawObj = entry.raw || {};
+
+      // Require an explicit training signal in either the visible text or
+      // structured event/log fields. This deliberately avoids counting
+      // unrelated employee events.
+      const structuredSignal = Object.entries(rawObj).some(([key, value]) => {
+        const k = normalizeFieldName(key);
+        const v = typeof value === 'string' ? value.toLowerCase() : '';
+        return /train/.test(k) || /train/.test(v);
+      });
+
+      if (!/\btrain(?:ed|ing|s)?\b/i.test(text) && !structuredSignal) continue;
+
+      const employee = matchTrainingEmployee(entry, employees);
+      if (!employee) continue;
+
+      events.push({
+        employeeId: String(employee.id),
+        employeeName: String(employee.name),
+        timestamp: Number(entry.timestamp),
+        quantity: trainingQuantity(entry),
+        sourceId: String(entry.id || ''),
+        text
+      });
+    }
+
+    return { events, sourceEntries };
+  }
+
+  function mergeTrainingEventSources(newsEvents, logEvents) {
+    const merged = [];
+    const seen = new Set();
+
+    for (const event of [...(newsEvents || []), ...(logEvents || [])]) {
+      // News and user log can describe the same train with slightly different
+      // text/IDs. Employee + timestamp bucket + quantity is a stable enough
+      // dedupe key without inventing additional events.
+      const timeBucket = Math.floor(Number(event.timestamp || 0) / 5);
+      const key = `${event.employeeId}|${timeBucket}|${event.quantity}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      merged.push(event);
+    }
+
+    return merged.sort((a, b) => b.timestamp - a.timestamp);
+  }
+
+  function formatTrainingCoverage(coverageStart) {
+    if (!coverageStart) return 'unknown returned history';
+    const seconds = Math.max(0, Math.floor(Date.now() / 1000) - Number(coverageStart));
+    const days = seconds / 86400;
+
+    if (days < 1) return `${Math.max(1, Math.round(seconds / 3600))} hour(s)`;
+    if (days < 60) return `${days.toFixed(1)} day(s)`;
+    return `${(days / 30).toFixed(1)} month(s)`;
+  }
+
+  function calculateRotationalDebt(employees, events, coverageStart) {
+    const nowSec = Math.floor(Date.now() / 1000);
+    const historyStart = Number(coverageStart) || nowSec;
+    const historyDays = Math.max(0, (nowSec - historyStart) / 86400);
+
+    const eventMap = new Map();
+    for (const event of events || []) {
+      const key = String(event.employeeId);
+      const list = eventMap.get(key) || [];
+      list.push(event);
+      eventMap.set(key, list);
+    }
+
+    const rows = employees.map((employee) => {
+      const daysInCompany = Math.max(0, Number(employee.raw?.days_in_company) || 0);
+      const eligibleCompanyDays = Math.max(0, daysInCompany - 3);
+      const eligibleWeight = Math.min(historyDays, eligibleCompanyDays);
+
+      const employeeEvents = eventMap.get(String(employee.id)) || [];
+      const actual = employeeEvents.reduce(
+        (sum, event) => sum + (Number(event.quantity) || 0),
+        0
+      );
+
+      const cutoff7 = nowSec - 7 * 86400;
+      const cutoff30 = nowSec - 30 * 86400;
+
+      const trains7 = employeeEvents
+        .filter((event) => Number(event.timestamp) >= cutoff7)
+        .reduce((sum, event) => sum + (Number(event.quantity) || 0), 0);
+
+      const trains30 = employeeEvents
+        .filter((event) => Number(event.timestamp) >= cutoff30)
+        .reduce((sum, event) => sum + (Number(event.quantity) || 0), 0);
+
+      const lastTrain = employeeEvents.length
+        ? Math.max(...employeeEvents.map((event) => Number(event.timestamp) || 0))
+        : null;
+
+      return {
+        employee,
+        eligibleWeight,
+        actual,
+        trains7,
+        trains30,
+        lastTrain,
+        expected: 0,
+        debt: 0
+      };
+    });
+
+    const totalObserved = rows.reduce((sum, row) => sum + row.actual, 0);
+    const totalWeight = rows.reduce((sum, row) => sum + row.eligibleWeight, 0);
+
+    rows.forEach((row) => {
+      row.expected = totalWeight > 0
+        ? totalObserved * (row.eligibleWeight / totalWeight)
+        : 0;
+      row.debt = row.expected - row.actual;
+    });
+
+    rows.sort((a, b) => {
+      if (b.debt !== a.debt) return b.debt - a.debt;
+      return String(a.employee.name).localeCompare(String(b.employee.name));
+    });
+
+    return { rows, totalObserved, totalWeight };
   }
 
   async function renderRotationalDebt(panel, employees, results) {
