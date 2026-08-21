@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Company Management Suite
 // @namespace    torn-company-management-suite
-// @version      1.4.2
+// @version      1.5.0
 // @description  Local-only company management dashboard for Torn directors, embedded in the Jobs page. No company data ever leaves your browser; only your Torn User ID is checked against a public license list.
 // @author       DooBiiE
 // @homepageURL  https://github.com/DooBiiE/Torn-Company-Manager
@@ -70,7 +70,7 @@
   // TornPDA does not always expose the legacy GM_info object that desktop
   // userscript managers provide. Try both common metadata APIs, then use the
   // release version as a PDA-safe fallback so the UI never shows vunknown.
-  const TDS_VERSION_FALLBACK = '1.4.2';
+  const TDS_VERSION_FALLBACK = '1.5.0';
   const TDS_VERSION =
     (typeof GM_info !== 'undefined' && GM_info?.script?.version) ||
     (typeof GM !== 'undefined' && GM?.info?.script?.version) ||
@@ -832,6 +832,44 @@
         min-width: 28px;
         font-weight: 700;
       }
+      .tds-attention-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+        gap: 8px;
+        margin: 8px 0 12px;
+      }
+      .tds-attention-item {
+        border: 1px solid var(--tds-border, #444);
+        border-radius: 6px;
+        padding: 10px;
+        background: rgba(255,255,255,0.025);
+      }
+      .tds-attention-item strong { display: block; margin-bottom: 3px; }
+      .tds-timeline {
+        border-left: 2px solid var(--tds-border-strong, #555);
+        margin: 8px 0 8px 7px;
+        padding-left: 14px;
+      }
+      .tds-timeline-item {
+        position: relative;
+        padding: 0 0 12px;
+      }
+      .tds-timeline-item::before {
+        content: '';
+        position: absolute;
+        left: -20px;
+        top: 4px;
+        width: 9px;
+        height: 9px;
+        border-radius: 50%;
+        background: currentColor;
+      }
+      .tds-timeline-date {
+        font-size: 10px;
+        opacity: .65;
+        margin-bottom: 2px;
+      }
+      .tds-timeline-text { font-size: 12px; }
       .tds-stock-table th,
       .tds-stock-table td {
         text-align: center !important;
@@ -1562,6 +1600,307 @@
     });
   }
 
+  function snapshotCompanySummary(snapshot) {
+    if (!snapshot) return null;
+
+    const profile = snapshot.company_profile || null;
+    const detailed = snapshot.company_detailed || null;
+    const employeesRaw = snapshot.company_employees || null;
+    const employees = extractEmployeesEntries(employeesRaw);
+    const performance = snapshot.performance || performanceRecordFromSnapshot(snapshot);
+    const roleSummary = performanceRoleSummary(employeesRaw);
+
+    const sources = [profile, detailed].filter(Boolean);
+    const metric = (aliases) => {
+      for (const source of sources) {
+        const value = numericValue(findValueDeep(source, aliases));
+        if (value !== null) return value;
+      }
+      return null;
+    };
+
+    return {
+      timestamp: Number(snapshot.timestamp || 0),
+      profile,
+      employees,
+      employeeCount: employees.length || roleSummary.employeeCount || null,
+      totalEE: roleSummary.employeesWithEE ? roleSummary.totalEE : null,
+      dailyIncome: performance?.observed?.dailyIncome ?? metric(['daily_income', 'income_daily']),
+      dailyCustomers: performance?.observed?.dailyCustomers ?? metric(['daily_customers', 'customers_daily']),
+      weeklyIncome: performance?.observed?.weeklyIncome ?? metric(['weekly_income', 'income_weekly']),
+      weeklyCustomers: performance?.observed?.weeklyCustomers ?? metric(['weekly_customers', 'customers_weekly']),
+      rating: metric(['rating', 'star_rating', 'stars', 'company_rating']),
+      popularity: metric(['popularity', 'company_popularity']),
+      efficiency: metric(['efficiency', 'company_efficiency']),
+      environment: metric(['environment', 'company_environment']),
+      trains: metric(['trains_available', 'available_trains', 'trains', 'trains_remaining', 'company_trains']),
+    };
+  }
+
+  function formatSignedChange(value, formatter = formatNumber) {
+    if (typeof value !== 'number' || !Number.isFinite(value)) return '—';
+    return `${value > 0 ? '+' : ''}${formatter(value)}`;
+  }
+
+  function snapshotChangeEvents(previousSnapshot, currentSnapshot) {
+    const previous = snapshotCompanySummary(previousSnapshot);
+    const current = snapshotCompanySummary(currentSnapshot);
+    if (!previous || !current) return [];
+
+    const events = [];
+    const pushNumeric = (key, label, formatter, meaningful = () => true) => {
+      const before = previous[key];
+      const after = current[key];
+      if (typeof before !== 'number' || typeof after !== 'number' || before === after) return;
+      const delta = after - before;
+      if (!meaningful(delta, before, after)) return;
+      events.push({
+        type: key,
+        timestamp: current.timestamp,
+        label,
+        before,
+        after,
+        delta,
+        text: `${label}: ${formatter(before)} → ${formatter(after)} (${formatSignedChange(delta, formatter)})`,
+      });
+    };
+
+    pushNumeric('dailyIncome', 'Daily Income', formatMoney);
+    pushNumeric('dailyCustomers', 'Daily Customers', formatNumber);
+    pushNumeric('weeklyIncome', 'Weekly Income', formatMoney);
+    pushNumeric('weeklyCustomers', 'Weekly Customers', formatNumber);
+    pushNumeric('rating', 'Rating', (value) => `${formatNumber(value)}★`);
+    pushNumeric('popularity', 'Popularity', (value) => `${formatNumber(value)}%`);
+    pushNumeric('efficiency', 'Efficiency', (value) => `${formatNumber(value)}%`);
+    pushNumeric('environment', 'Environment', (value) => `${formatNumber(value)}%`);
+    pushNumeric('trains', 'Trains Available', formatNumber);
+    pushNumeric('employeeCount', 'Employee Count', formatNumber);
+    pushNumeric('totalEE', 'Total Employee EE', formatNumber);
+
+    const previousById = new Map(previous.employees.map((employee) => [String(employee.id), employee]));
+    const currentById = new Map(current.employees.map((employee) => [String(employee.id), employee]));
+
+    for (const [id, employee] of currentById) {
+      const old = previousById.get(id);
+      if (!old) {
+        events.push({
+          type: 'employee_joined',
+          timestamp: current.timestamp,
+          employeeId: id,
+          text: `${employee.name} joined the company${employee.position ? ` as ${employee.position}` : ''}.`,
+        });
+        continue;
+      }
+
+      if (String(old.position || '') !== String(employee.position || '')) {
+        events.push({
+          type: 'position_change',
+          timestamp: current.timestamp,
+          employeeId: id,
+          text: `${employee.name}: ${old.position || 'Unassigned'} → ${employee.position || 'Unassigned'}.`,
+        });
+      }
+
+      const oldEE = getEmployeeEffectiveness(old.raw)?.total;
+      const newEE = getEmployeeEffectiveness(employee.raw)?.total;
+      if (typeof oldEE === 'number' && typeof newEE === 'number' && oldEE !== newEE) {
+        events.push({
+          type: 'employee_ee',
+          timestamp: current.timestamp,
+          employeeId: id,
+          delta: newEE - oldEE,
+          text: `${employee.name} EE: ${formatNumber(oldEE)} → ${formatNumber(newEE)} (${formatSignedChange(newEE - oldEE)}).`,
+        });
+      }
+    }
+
+    for (const [id, employee] of previousById) {
+      if (!currentById.has(id)) {
+        events.push({
+          type: 'employee_left',
+          timestamp: current.timestamp,
+          employeeId: id,
+          text: `${employee.name} left the company.`,
+        });
+      }
+    }
+
+    return events;
+  }
+
+  function overviewChangeClass(event) {
+    if (!event) return '';
+    if (['employee_left'].includes(event.type)) return 'tds-v-bad';
+    if (['employee_joined'].includes(event.type)) return 'tds-v-good';
+    if (typeof event.delta !== 'number') return '';
+    if (['dailyIncome', 'dailyCustomers', 'weeklyIncome', 'weeklyCustomers', 'rating', 'popularity', 'efficiency', 'environment', 'totalEE'].includes(event.type)) {
+      return event.delta > 0 ? 'tds-v-good' : event.delta < 0 ? 'tds-v-bad' : '';
+    }
+    return '';
+  }
+
+  function buildAttentionItems(previousSnapshot, currentSnapshot, results) {
+    const previous = snapshotCompanySummary(previousSnapshot);
+    const current = snapshotCompanySummary(currentSnapshot);
+    const items = [];
+    if (!current) return items;
+
+    const add = (severity, title, detail, tab = null) => {
+      items.push({ severity, title, detail, tab });
+    };
+
+    if (previous) {
+      if (typeof previous.dailyIncome === 'number' && previous.dailyIncome > 0 && typeof current.dailyIncome === 'number') {
+        const pct = ((current.dailyIncome - previous.dailyIncome) / previous.dailyIncome) * 100;
+        if (pct <= -10) add('bad', 'Daily income dropped', `${Math.abs(pct).toFixed(1)}% below the previous comparable snapshot.`, 'finance');
+        else if (pct >= 10) add('good', 'Daily income improved', `${pct.toFixed(1)}% above the previous comparable snapshot.`, 'finance');
+      }
+
+      if (typeof previous.environment === 'number' && typeof current.environment === 'number' && current.environment <= previous.environment - 3) {
+        add('warn', 'Environment fell', `${formatNumber(previous.environment)}% → ${formatNumber(current.environment)}%.`, 'overview');
+      }
+
+      if (typeof previous.efficiency === 'number' && typeof current.efficiency === 'number' && current.efficiency <= previous.efficiency - 3) {
+        add('warn', 'Efficiency fell', `${formatNumber(previous.efficiency)}% → ${formatNumber(current.efficiency)}%.`, 'overview');
+      }
+
+      if (typeof previous.employeeCount === 'number' && typeof current.employeeCount === 'number' && current.employeeCount < previous.employeeCount) {
+        add('warn', 'Roster reduced', `${formatNumber(previous.employeeCount)} → ${formatNumber(current.employeeCount)} employees.`, 'optimize');
+      }
+
+      if (typeof previous.totalEE === 'number' && previous.totalEE > 0 && typeof current.totalEE === 'number') {
+        const pct = ((current.totalEE - previous.totalEE) / previous.totalEE) * 100;
+        if (pct <= -5) add('warn', 'Total employee EE fell', `${Math.abs(pct).toFixed(1)}% below the previous snapshot.`, 'optimize');
+      }
+    }
+
+    // Training attention uses already-cached Diagnostic results only. No extra
+    // API request is made just to populate Overview.
+    try {
+      const employeesRaw = findRaw(results, 'company', 'employees');
+      const employees = extractEmployeesEntries(employeesRaw);
+      const newsRaw = findRaw(results, 'company', 'news');
+      const logRaw = findRaw(results, 'user', 'log');
+
+      if (employees.length && (newsRaw || logRaw)) {
+        const newsParsed = collectTrainingEvents(newsRaw, employees);
+        const logParsed = collectTrainingEvents(logRaw, employees);
+        const events = mergeTrainingEventSources(newsParsed.events, logParsed.events);
+        const entries = [...newsParsed.sourceEntries, ...logParsed.sourceEntries];
+        const coverageStart = entries.length
+          ? Math.min(...entries.map((entry) => Number(entry.timestamp)).filter(Number.isFinite))
+          : null;
+
+        if (events.length && coverageStart) {
+          const debt = calculateRotationalDebt(employees, events, coverageStart);
+          const mostOwed = debt.rows.find((row) => row.eligibleWeight > 0);
+          if (mostOwed && mostOwed.debt > 1) {
+            add(
+              'warn',
+              'Training debt needs attention',
+              `${mostOwed.employee.name} is approximately ${mostOwed.debt.toFixed(2)} train(s) behind fair share.`,
+              'training'
+            );
+          }
+        }
+      }
+    } catch (err) {
+      console.warn('[TDS] Attention Centre training check unavailable:', err);
+    }
+
+    if (!items.length) {
+      add('good', 'No major changes need attention', 'Nothing crossed the current alert thresholds in the latest comparable data.');
+    }
+
+    return items.slice(0, 8);
+  }
+
+  async function renderOverviewIntelligence(panel, results) {
+    const target = panel.querySelector('#tds-overview-intelligence');
+    if (!target) return;
+
+    try {
+      const snapshots = collapseToDaily(await getSnapshotsSorted());
+      if (snapshots.length < 2) {
+        target.innerHTML = `
+          <div class="tds-section-label">Attention Centre</div>
+          <div class="tds-box tds-box-neutral">More than one local daily snapshot is needed before change alerts and the company timeline can be calculated.</div>
+          <div class="tds-section-label">What Changed?</div>
+          <div class="tds-box tds-box-neutral">No previous comparable local snapshot yet.</div>`;
+        return;
+      }
+
+      const current = snapshots[snapshots.length - 1];
+      const previous = snapshots[snapshots.length - 2];
+      const latestEvents = snapshotChangeEvents(previous, current);
+      const attention = buildAttentionItems(previous, current, results);
+
+      let html = `<div class="tds-section-label">Attention Centre</div><div class="tds-attention-grid">`;
+      for (const item of attention) {
+        const cls = item.severity === 'bad'
+          ? 'tds-v-bad'
+          : item.severity === 'warn'
+            ? 'tds-v-warn'
+            : 'tds-v-good';
+
+        html += `<div class="tds-attention-item ${cls}"${item.tab ? ` data-attention-tab="${escapeHtml(item.tab)}" style="cursor:pointer;"` : ''}>
+          <strong>${escapeHtml(item.title)}</strong>
+          <span>${escapeHtml(item.detail)}</span>
+        </div>`;
+      }
+      html += `</div>`;
+
+      html += `<div class="tds-section-label">What Changed?</div>`;
+      if (!latestEvents.length) {
+        html += `<div class="tds-box tds-box-neutral">No meaningful changes were detected between the last two daily local snapshots.</div>`;
+      } else {
+        html += `<div class="tds-card">`;
+        for (const event of latestEvents.slice(0, 10)) {
+          html += `<div class="tds-row">
+            <span class="tds-row-label">${escapeHtml(event.text)}</span>
+            <span class="tds-row-value ${overviewChangeClass(event)}">${overviewChangeClass(event) === 'tds-v-good' ? '▲' : overviewChangeClass(event) === 'tds-v-bad' ? '▼' : '•'}</span>
+          </div>`;
+        }
+        html += `</div>`;
+      }
+
+      const timelineEvents = [];
+      for (let index = Math.max(1, snapshots.length - 30); index < snapshots.length; index += 1) {
+        timelineEvents.push(...snapshotChangeEvents(snapshots[index - 1], snapshots[index]));
+      }
+      timelineEvents.sort((a, b) => Number(b.timestamp || 0) - Number(a.timestamp || 0));
+
+      html += `<details style="margin-top:10px;">
+        <summary class="tds-section-label" style="cursor:pointer;">Company Timeline</summary>`;
+
+      if (!timelineEvents.length) {
+        html += `<div class="tds-box tds-box-neutral">No meaningful company changes have been recorded in the available local snapshot history.</div>`;
+      } else {
+        html += `<div class="tds-timeline">`;
+        for (const event of timelineEvents.slice(0, 40)) {
+          html += `<div class="tds-timeline-item ${overviewChangeClass(event)}">
+            <div class="tds-timeline-date">${escapeHtml(new Date(event.timestamp).toLocaleString('en-GB', { dateStyle: 'medium', timeStyle: 'short' }))}</div>
+            <div class="tds-timeline-text">${escapeHtml(event.text)}</div>
+          </div>`;
+        }
+        html += `</div>`;
+      }
+
+      html += `<div class="tds-box tds-box-neutral">
+        Timeline and What Changed are <strong>CALCULATED</strong> from locally stored snapshots.
+        They describe changes observed together and do not claim that one change caused another.
+      </div></details>`;
+
+      target.innerHTML = html;
+
+      target.querySelectorAll('[data-attention-tab]').forEach((node) => {
+        node.addEventListener('click', () => switchTab(panel, node.dataset.attentionTab));
+      });
+    } catch (err) {
+      target.innerHTML = `<div class="tds-box tds-box-warn">Company change intelligence could not be calculated: ${escapeHtml(String(err?.message || err))}</div>`;
+    }
+  }
+
   function renderOverviewTab(panel, results, verdict) {
     const el = panel.querySelector('[data-tabpanel="overview"]');
     if (!results || !verdict) {
@@ -1584,6 +1923,11 @@
     const detailed = findRaw(results, 'company', 'detailed');
     const employeesRaw = findRaw(results, 'company', 'employees');
     const employees = extractEmployeesEntries(employeesRaw);
+
+    html += `<div id="tds-overview-intelligence">
+      <div class="tds-section-label">Attention Centre</div>
+      <div class="tds-box tds-box-neutral">Analysing recent local company changes…</div>
+    </div>`;
 
     // Show every usable scalar value returned by company/profile, rather than
     // maintaining a small hard-coded list. This means new fields Torn adds to
@@ -1909,6 +2253,9 @@
 
     el.innerHTML = html;
     bindEmployeeProfileLinks(panel);
+    renderOverviewIntelligence(panel, results).catch((err) =>
+      console.warn('[TDS] Overview intelligence render failed:', err)
+    );
 
     if (state.currentDirectorValue !== undefined) {
       refreshDirectorName(panel, state.currentDirectorValue).catch((err) =>
@@ -6998,6 +7345,64 @@
     };
   }
 
+  function calculateTrainingBalanceForecast(debt, tolerance = 1, maxTrains = 500) {
+    const eligible = (debt?.rows || [])
+      .filter((row) => Number(row.eligibleWeight) > 0)
+      .map((row) => ({
+        employee: row.employee,
+        weight: Number(row.eligibleWeight) || 0,
+        received: Number(row.actual) || 0,
+      }));
+
+    const totalWeight = eligible.reduce((sum, row) => sum + row.weight, 0);
+    const startingTotal = eligible.reduce((sum, row) => sum + row.received, 0);
+    if (!eligible.length || totalWeight <= 0) {
+      return { trainsNeeded: null, balanced: false, maxDebt: null, simulated: 0 };
+    }
+
+    const debtFor = (row, total) =>
+      total * (row.weight / totalWeight) - row.received;
+
+    const currentMaxDebt = Math.max(...eligible.map((row) => debtFor(row, startingTotal)));
+    if (currentMaxDebt <= tolerance) {
+      return {
+        trainsNeeded: 0,
+        balanced: true,
+        maxDebt: currentMaxDebt,
+        simulated: 0,
+      };
+    }
+
+    for (let step = 1; step <= maxTrains; step += 1) {
+      const totalAfter = startingTotal + step;
+      const chosen = [...eligible].sort((a, b) => {
+        const debtA = debtFor(a, totalAfter);
+        const debtB = debtFor(b, totalAfter);
+        if (debtB !== debtA) return debtB - debtA;
+        return String(a.employee.name).localeCompare(String(b.employee.name));
+      })[0];
+
+      chosen.received += 1;
+
+      const maxDebt = Math.max(...eligible.map((row) => debtFor(row, totalAfter)));
+      if (maxDebt <= tolerance) {
+        return {
+          trainsNeeded: step,
+          balanced: true,
+          maxDebt,
+          simulated: step,
+        };
+      }
+    }
+
+    return {
+      trainsNeeded: null,
+      balanced: false,
+      maxDebt: Math.max(...eligible.map((row) => debtFor(row, startingTotal + maxTrains))),
+      simulated: maxTrains,
+    };
+  }
+
   function renderTrainingPlanner(debt, results) {
     const availableTrains = resolveAvailableCompanyTrains(results);
 
@@ -7010,6 +7415,7 @@
         : 5;
 
     const plan = buildRotationalTrainingPlan(debt, requestedCount);
+    const forecast = calculateTrainingBalanceForecast(debt, 1, 500);
 
     let html = `
       <div class="tds-section-label">Training Planner</div>
@@ -7019,6 +7425,29 @@
         history and eligibility weighting shown in the Rotational / Debt tab.
         After every planned train, the suite recalculates the queue before
         choosing the next employee.
+      </div>`;
+
+    html += `<div class="tds-section-label">Training Forecast</div>
+      <div class="tds-training-plan">
+        <div class="tds-training-plan-card">
+          <div class="tds-stock-summary-label">Balance Target</div>
+          <div class="tds-stock-summary-value">≤ 1.00 debt</div>
+        </div>
+        <div class="tds-training-plan-card">
+          <div class="tds-stock-summary-label">Additional Trains Needed</div>
+          <div class="tds-stock-summary-value">${forecast.trainsNeeded !== null ? formatNumber(forecast.trainsNeeded) : '500+'}</div>
+        </div>
+        <div class="tds-training-plan-card">
+          <div class="tds-stock-summary-label">Current Balance</div>
+          <div class="tds-stock-summary-value">${forecast.trainsNeeded === 0 ? 'Balanced' : 'In progress'}</div>
+        </div>
+      </div>
+      <div class="tds-box tds-box-neutral">
+        Forecast means the number of additional fair-rotation trains required until no eligible employee is more than
+        <strong>1 train behind</strong> their calculated fair share. This is a simulation from observed history, not a promise about when new trains will become available.
+        ${availableTrains !== null && forecast.trainsNeeded !== null
+          ? `<br><strong>Current saved trains:</strong> ${formatNumber(availableTrains)} · ${availableTrains >= forecast.trainsNeeded ? 'enough to reach the balance target now.' : `${formatNumber(forecast.trainsNeeded - availableTrains)} more would still be required after using the current balance.`}`
+          : ''}
       </div>`;
 
     if (availableTrains !== null) {
