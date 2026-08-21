@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Company Management Suite
 // @namespace    torn-company-management-suite
-// @version      1.4.0
+// @version      1.4.1
 // @description  Local-only company management dashboard for Torn directors, embedded in the Jobs page. No company data ever leaves your browser; only your Torn User ID is checked against a public license list.
 // @author       DooBiiE
 // @homepageURL  https://github.com/DooBiiE/Torn-Company-Manager
@@ -70,7 +70,7 @@
   // TornPDA does not always expose the legacy GM_info object that desktop
   // userscript managers provide. Try both common metadata APIs, then use the
   // release version as a PDA-safe fallback so the UI never shows vunknown.
-  const TDS_VERSION_FALLBACK = '1.4.0';
+  const TDS_VERSION_FALLBACK = '1.4.1';
   const TDS_VERSION =
     (typeof GM_info !== 'undefined' && GM_info?.script?.version) ||
     (typeof GM !== 'undefined' && GM?.info?.script?.version) ||
@@ -6510,6 +6510,7 @@
       <div class="tds-segmented">
         <div class="tds-segment ${mode === 'priority' ? 'tds-segment-active' : ''}" data-trainmode="priority">PRIORITY</div>
         <div class="tds-segment ${mode === 'rotational' ? 'tds-segment-active' : ''}" data-trainmode="rotational">ROTATIONAL / DEBT</div>
+        <div class="tds-segment ${mode === 'planner' ? 'tds-segment-active' : ''}" data-trainmode="planner">TRAINING PLANNER</div>
       </div>`;
 
     if (employees.length === 0) {
@@ -6526,7 +6527,7 @@
 
     if (mode === 'priority') {
       html += `<div class="tds-box tds-box-info">
-        Sorted by <strong>current effectiveness, lowest first</strong>. This is an EE-priority view, not the Training Planner. The planner lives under Rotational / Debt because that mode has enough historical evidence to simulate a fair future queue.
+        Sorted by <strong>current effectiveness, lowest first</strong>. This is the EE-priority view. Use <strong>Training Planner</strong> for a forward-looking fair-rotation plan based on recorded training history.
       </div>`;
 
       const withEE = employees.map((e) => ({ ...e, ee: findEffectivenessField(e.raw) }));
@@ -6548,7 +6549,9 @@
       html += '</div>';
     } else {
       html += `<div class="tds-box tds-box-neutral" id="tds-training-loading">
-        Reading Torn training history and calculating fair-share debt…
+        ${mode === 'planner'
+          ? 'Reading Torn training history and building the training plan…'
+          : 'Reading Torn training history and calculating fair-share debt…'}
       </div>`;
       el.innerHTML = html;
       bindTrainingModeButtons(panel);
@@ -6974,7 +6977,7 @@
       <div class="tds-box tds-box-info">
         <strong>Fair Rotation Plan:</strong>
         this is a read-only forecast built from the same observed training
-        history and eligibility weighting used by Rotational / Debt.
+        history and eligibility weighting shown in the Rotational / Debt tab.
         After every planned train, the suite recalculates the queue before
         choosing the next employee.
       </div>`;
@@ -7082,7 +7085,7 @@
 
   async function renderRotationalDebt(panel, employees, results) {
     const el = panel.querySelector('[data-tabpanel="training"]');
-    if (!el || state.trainingMode !== 'rotational') return;
+    if (!el || !['rotational', 'planner'].includes(state.trainingMode)) return;
 
     let sources;
     try {
@@ -7133,9 +7136,13 @@
     const debt = calculateRotationalDebt(employees, events, coverageStart);
     const next = debt.rows.find((row) => row.eligibleWeight > 0) || null;
 
-    let html = renderTrainingPlanner(debt, results);
+    if (state.trainingMode === 'planner') {
+      el.insertAdjacentHTML('beforeend', renderTrainingPlanner(debt, results));
+      bindEmployeeProfileLinks(panel);
+      return;
+    }
 
-    html += `
+    let html = `
       <div class="tds-section-label">Rotational / Debt Evidence</div>
       <div class="tds-box tds-box-info">
         <strong>Rotational / Debt is live.</strong>
