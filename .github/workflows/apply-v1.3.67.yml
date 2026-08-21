@@ -15,358 +15,229 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - name: Apply tested v1.3.67 patch
+      - name: Transform current main to v1.3.67
         shell: bash
         run: |
-          cat > /tmp/v1367.patch <<'PATCH'
---- a/torn-company-manager.user.js
-+++ b/torn-company-manager.user.js
-@@ -1,7 +1,7 @@
- // ==UserScript==
- // @name         Torn Company Management Suite
- // @namespace    torn-company-management-suite
--// @version      1.3.66
-+// @version      1.3.67
- // @description  Local-only company management dashboard for Torn directors, embedded in the Jobs page. No company data ever leaves your browser; only your Torn User ID is checked against a public license list.
- // @author       DooBiiE
- // @homepageURL  https://github.com/DooBiiE/Torn-Company-Manager
-@@ -70,7 +70,7 @@
-   // TornPDA does not always expose the legacy GM_info object that desktop
-   // userscript managers provide. Try both common metadata APIs, then use the
-   // release version as a PDA-safe fallback so the UI never shows vunknown.
--  const TDS_VERSION_FALLBACK = '1.3.66';
-+  const TDS_VERSION_FALLBACK = '1.3.67';
-   const TDS_VERSION =
-     (typeof GM_info !== 'undefined' && GM_info?.script?.version) ||
-     (typeof GM !== 'undefined' && GM?.info?.script?.version) ||
-@@ -82,6 +82,7 @@
-   const STORAGE_KEY_HISTORY_BACKFILL_DAY = 'tds_history_backfill_day';
-   const STORAGE_KEY_HISTORY_BACKFILL_RESULT = 'tds_history_backfill_result';
-   const STORAGE_KEY_STAFFING_BENCHMARK_CACHE = 'tds_staffing_benchmark_cache_v1';
-+  const STORAGE_KEY_DIRECTOR_NAME_CACHE = 'tds_director_name_cache_v1';
-   const STORAGE_KEY_LAST_RESULTS = 'tds_last_results_cache';
-   const STORAGE_KEY_LAST_VERDICT = 'tds_last_verdict_cache';
-   const MIN_CALL_INTERVAL_MS = 800; // ~75 req/min ceiling, well under Torn's 100/min cap
-@@ -660,9 +661,6 @@
-       .tds-employee-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; }
-       .tds-employee-name { font-weight: 700; color: var(--tds-text-strong, #f0f0f0); font-size: 13px; }
-       .tds-employee-profile-link { cursor:pointer; text-decoration:underline; text-decoration-style:dotted; text-underline-offset:3px; }
--      .tds-profile-overlay { position:fixed; inset:0; z-index:2147483646; background:rgba(0,0,0,.58); display:flex; align-items:center; justify-content:center; padding:14px; }
--      .tds-profile-modal { width:min(560px,96vw); max-height:86vh; overflow:auto; background:var(--tds-bg-panel,#1f1f1f); border:1px solid var(--tds-border-strong,#4a4a4a); border-radius:10px; box-shadow:0 14px 40px rgba(0,0,0,.45); padding:14px; }
--      .tds-profile-head { display:flex; justify-content:space-between; gap:10px; align-items:flex-start; margin-bottom:10px; }
-       .tds-profile-actions { display:flex; flex-wrap:wrap; gap:6px; margin-top:12px; }
-       .tds-employee-deeplink-highlight {
-         outline: 2px solid var(--tds-accent, #3ddc84);
-@@ -1463,17 +1461,7 @@
-     setTimeout(() => tryFocus(), 0);
-   }
- 
--  function openEmployeeDetail(panel, id, name) {
--    const employee = findEmployeeByIdOrName(id, name);
--    if (!employee) return;
--    panel.querySelector('.tds-profile-overlay')?.remove();
--
--    const emp = employee.raw || {};
--    const ee = getEmployeeEffectiveness(emp);
--    const lastAction = emp.last_action && typeof emp.last_action === 'object' ? emp.last_action : null;
--    const onlineStatus = lastAction?.status || '—';
--    const onlineMeta = employeeOnlineStatusMeta(onlineStatus);
--    const lastActionText = lastAction?.relative || formatTimestampRelative(lastAction?.timestamp) || '—';
-+  function employeeRoleSummary(employee) {
-     let roleSummary = 'Open Employee Effectiveness for detailed role analysis.';
- 
-     try {
-@@ -1482,43 +1470,60 @@
-       const typeId = numericValue(findValueDeep(profile, ['company_type', 'type_id', 'type']));
-       const typeName = resolveCompanyTypeName(reference, typeId);
-       const positions = extractPositionRequirements(reference, typeId).map((position) => ({
--        ...position, resolvedSpecial: resolvePositionSpecial(position, typeId, typeName),
-+        ...position,
-+        resolvedSpecial: resolvePositionSpecial(position, typeId, typeName),
-       }));
--      const row = positions.length ? buildEmployeePositionMatrix([employee], positions)[0] : null;
-+
-+      const row = positions.length
-+        ? buildEmployeePositionMatrix([employee], positions)[0]
-+        : null;
-+
-       if (row?.best?.position?.name) {
--        roleSummary = `Best estimated role: ${row.best.position.name}${typeof row.best.estimate?.total === 'number' ? ` · ${formatNumber(row.best.estimate.total)} EE` : ''}`;
-+        roleSummary =
-+          `Best estimated role: ${row.best.position.name}` +
-+          `${typeof row.best.estimate?.total === 'number'
-+            ? ` · ${formatNumber(row.best.estimate.total)} EE`
-+            : ''}`;
-       }
--    } catch (err) { console.warn('[TDS] Employee summary role analysis unavailable:', err); }
-+    } catch (err) {
-+      console.warn('[TDS] Employee inline role summary unavailable:', err);
-+    }
- 
--    const overlay = document.createElement('div');
--    overlay.className = 'tds-profile-overlay';
--    overlay.innerHTML = `<div class="tds-profile-modal" role="dialog" aria-modal="true">
--      <div class="tds-profile-head"><div><div class="tds-employee-name" style="font-size:17px;">${escapeHtml(String(employee.name))}</div><div class="tds-employee-meta">${escapeHtml(String(employee.position || 'Employee'))}</div></div><button class="tds-btn" data-profile-close>Close</button></div>
--      <div class="tds-card">
--        <div class="tds-row"><span class="tds-row-label">Current EE</span><span class="tds-row-value">${ee?.total !== null && ee?.total !== undefined ? formatNumber(ee.total) : '—'}</span></div>
--        <div class="tds-row"><span class="tds-row-label">Days employed</span><span class="tds-row-value">${formatNumber(emp.days_in_company)}</span></div>
--        <div class="tds-row"><span class="tds-row-label">Online status</span><span class="tds-row-value ${onlineMeta.textClass}">${escapeHtml(String(onlineStatus))}</span></div>
--        <div class="tds-row"><span class="tds-row-label">Last action</span><span class="tds-row-value ${onlineMeta.textClass}">${escapeHtml(String(lastActionText))}</span></div>
--      </div>
--      <div class="tds-section-label">Working Stats</div>
--      <div class="tds-card">
--        <div class="tds-row"><span class="tds-row-label">Manual Labor</span><span class="tds-row-value">${formatNumber(emp.manual_labor)}</span></div>
--        <div class="tds-row"><span class="tds-row-label">Intelligence</span><span class="tds-row-value">${formatNumber(emp.intelligence)}</span></div>
--        <div class="tds-row"><span class="tds-row-label">Endurance</span><span class="tds-row-value">${formatNumber(emp.endurance)}</span></div>
--      </div>
--      <div class="tds-section-label">Role Summary</div><div class="tds-box tds-box-neutral">${escapeHtml(roleSummary)}</div>
--      <div class="tds-profile-actions"><button class="tds-btn" data-profile-tab="training">View in Training</button><button class="tds-btn" data-profile-tab="optimize">View in Employee Effectiveness</button></div>
--    </div>`;
--
--    const close = () => overlay.remove();
--    overlay.querySelector('[data-profile-close]')?.addEventListener('click', close);
--    overlay.addEventListener('click', (event) => { if (event.target === overlay) close(); });
--    overlay.querySelectorAll('[data-profile-tab]').forEach((button) => button.addEventListener('click', () => {
--      const tab = button.dataset.profileTab;
--      close();
--      focusEmployeeInTab(panel, tab, employee);
--    }));
--    panel.appendChild(overlay);
-+    return roleSummary;
-+  }
-+
-+  function openEmployeeDetail(panel, id, name) {
-+    const employee = findEmployeeByIdOrName(id, name);
-+    if (!employee) return;
-+
-+    // Employee details now live in the existing collapsible Overview row.
-+    // From any tab, jump to Overview and expand/highlight the selected employee.
-+    switchTab(panel, 'overview');
-+
-+    const selector = employeeDeepLinkSelector(employee.id, employee.name);
-+
-+    const tryOpen = (attempt = 0) => {
-+      const overview = panel.querySelector('[data-tabpanel="overview"]');
-+      const node = selector ? overview?.querySelector(selector) : null;
-+      const details = node?.closest('details.tds-employee-row') || node;
-+
-+      if (details) {
-+        if (details.tagName === 'DETAILS') details.open = true;
-+        details.classList.add('tds-employee-deeplink-highlight');
-+        details.scrollIntoView({ behavior: 'smooth', block: 'center' });
-+
-+        setTimeout(() => {
-+          details.classList.remove('tds-employee-deeplink-highlight');
-+        }, 5000);
-+        return;
-+      }
-+
-+      if (attempt < 12) {
-+        setTimeout(() => tryOpen(attempt + 1), 150);
-+      }
-+    };
-+
-+    setTimeout(() => tryOpen(), 0);
-   }
- 
-   function bindEmployeeProfileLinks(panel) {
-@@ -1619,7 +1624,15 @@
-           formatter = formatPercent;
-         }
- 
--        html += companyOverviewRow(label, value, formatter);
-+        if (label === 'Director') {
-+          html += `<div class="tds-row">
-+            <span class="tds-row-label">Director</span>
-+            <span class="tds-row-value" id="tds-director-value">${escapeHtml(formatter(value))}</span>
-+          </div>`;
-+          state.currentDirectorValue = value;
-+        } else {
-+          html += companyOverviewRow(label, value, formatter);
-+        }
-         if (row) shown.add(row.path);
-         shownFieldNames.add(normalizeFieldName(key));
-       }
-@@ -1739,6 +1752,21 @@
-                 <div class="tds-row"><span class="tds-row-label">Detail</span><span class="tds-row-value">${escapeHtml(String(stateDetail))}</span></div>
-                 <div class="tds-row"><span class="tds-row-label">Last action</span><span class="tds-row-value ${onlineMeta.textClass}">${escapeHtml(String(lastActionText))}</span></div>
-               ` : ''}
-+
-+              <div class="tds-section-label tds-employee-subheading" style="margin-top:10px;">Role Summary</div>
-+              <div class="tds-box tds-box-neutral">${escapeHtml(employeeRoleSummary(employee))}</div>
-+              <div class="tds-profile-actions">
-+                <button class="tds-btn" data-inline-employee-tab="training"
-+                  data-employee-id="${escapeHtml(String(employee.id))}"
-+                  data-employee-name="${escapeHtml(String(employee.name))}">
-+                  View in Training
-+                </button>
-+                <button class="tds-btn" data-inline-employee-tab="optimize"
-+                  data-employee-id="${escapeHtml(String(employee.id))}"
-+                  data-employee-name="${escapeHtml(String(employee.name))}">
-+                  View in Employee Effectiveness
-+                </button>
-+              </div>
-             </div>
-           </details>`;
-       });
-@@ -1753,6 +1781,31 @@
- 
-     el.innerHTML = html;
-     bindEmployeeProfileLinks(panel);
-+
-+    if (state.currentDirectorValue !== undefined) {
-+      refreshDirectorName(panel, state.currentDirectorValue).catch((err) =>
-+        console.warn('[TDS] Director name refresh failed:', err)
-+      );
-+    }
-+
-+    el.querySelectorAll('[data-inline-employee-tab]').forEach((button) => {
-+      button.addEventListener('click', (event) => {
-+        event.preventDefault();
-+        event.stopPropagation();
-+
-+        const employee = findEmployeeByIdOrName(
-+          button.dataset.employeeId,
-+          button.dataset.employeeName
-+        );
-+        if (!employee) return;
-+
-+        focusEmployeeInTab(
-+          panel,
-+          button.dataset.inlineEmployeeTab,
-+          employee
-+        );
-+      });
-+    });
-   }
- 
-   function escapeHtml(str) {
-@@ -2298,25 +2351,109 @@
-   }
- 
-   function formatDirectorName(value, employees, results) {
-+    let directorId = null;
-+    let directorName = null;
-+
-     if (value && typeof value === 'object') {
--      const objectName = findValueDeep(value, ['name', 'player_name', 'username']);
--      if (objectName) return String(objectName);
--      const objectId = findValueDeep(value, ['id', 'player_id', 'user_id']);
--      if (objectId !== null) value = objectId;
-+      directorName = findValueDeep(value, ['name', 'player_name', 'username']);
-+      directorId = findValueDeep(value, ['id', 'player_id', 'user_id']);
-+    } else {
-+      directorId = value;
-     }
- 
--    const directorId = String(value ?? '').trim();
--    if (!directorId) return '—';
-+    directorId = String(directorId ?? '').trim();
-+    if (!directorId) return directorName ? String(directorName) : '—';
- 
--    const rosterMatch = (employees || []).find((employee) => String(employee.id) === directorId);
--    if (rosterMatch?.name && !String(rosterMatch.name).startsWith('#')) return String(rosterMatch.name);
-+    if (!directorName) {
-+      const rosterMatch = (employees || []).find(
-+        (employee) => String(employee.id) === directorId
-+      );
-+      if (rosterMatch?.name && !String(rosterMatch.name).startsWith('#')) {
-+        directorName = String(rosterMatch.name);
-+      }
-+    }
- 
--    const basic = findRaw(results, 'user', 'basic');
--    const basicId = basic && findValueDeep(basic, ['player_id', 'user_id', 'id']);
--    const basicName = basic && findValueDeep(basic, ['name', 'player_name', 'username']);
--    if (basicId !== null && String(basicId) === directorId && basicName) return String(basicName);
-+    if (!directorName) {
-+      const basic = findRaw(results, 'user', 'basic');
-+      const basicId = basic && findValueDeep(basic, ['player_id', 'user_id', 'id']);
-+      const basicName = basic && findValueDeep(basic, ['name', 'player_name', 'username']);
-+      if (
-+        basicId !== null &&
-+        String(basicId) === directorId &&
-+        basicName
-+      ) {
-+        directorName = String(basicName);
-+      }
-+    }
- 
--    return String(value);
-+    if (!directorName) {
-+      const cached = GM_getValue(STORAGE_KEY_DIRECTOR_NAME_CACHE, null);
-+      if (
-+        cached &&
-+        String(cached.id || '') === directorId &&
-+        cached.name &&
-+        Date.now() - Number(cached.timestamp || 0) < 24 * 60 * 60 * 1000
-+      ) {
-+        directorName = String(cached.name);
-+      }
-+    }
-+
-+    return directorName
-+      ? `${directorName} [${directorId}]`
-+      : directorId;
-+  }
-+
-+  async function refreshDirectorName(panel, directorValue) {
-+    let directorId = directorValue;
-+
-+    if (directorValue && typeof directorValue === 'object') {
-+      const existingName = findValueDeep(
-+        directorValue,
-+        ['name', 'player_name', 'username']
-+      );
-+      const objectId = findValueDeep(
-+        directorValue,
-+        ['id', 'player_id', 'user_id']
-+      );
-+
-+      if (existingName && objectId !== null) return;
-+      directorId = objectId;
-+    }
-+
-+    directorId = String(directorId ?? '').trim();
-+    if (!directorId || !/^\d+$/.test(directorId)) return;
-+
-+    const current = panel.querySelector('#tds-director-value');
-+    if (!current || /\[\d+\]$/.test(current.textContent || '')) return;
-+
-+    const cached = GM_getValue(STORAGE_KEY_DIRECTOR_NAME_CACHE, null);
-+    if (
-+      cached &&
-+      String(cached.id || '') === directorId &&
-+      cached.name &&
-+      Date.now() - Number(cached.timestamp || 0) < 24 * 60 * 60 * 1000
-+    ) {
-+      current.textContent = `${cached.name} [${directorId}]`;
-+      return;
-+    }
-+
-+    try {
-+      const data = await ApiClient.call('user', 'basic', directorId);
-+      const name = findValueDeep(data, ['name', 'player_name', 'username']);
-+
-+      if (!name) return;
-+
-+      GM_setValue(STORAGE_KEY_DIRECTOR_NAME_CACHE, {
-+        id: directorId,
-+        name: String(name),
-+        timestamp: Date.now(),
-+      });
-+
-+      const target = panel.querySelector('#tds-director-value');
-+      if (target) target.textContent = `${name} [${directorId}]`;
-+    } catch (err) {
-+      console.warn('[TDS] Director name lookup unavailable:', err);
-+    }
-   }
- 
-   function formatCompanyType(value, results) {
-PATCH
-          git apply --check /tmp/v1367.patch
-          git apply /tmp/v1367.patch
+          python3 <<'PY'
+          from pathlib import Path
+          import re
+
+          p = Path('torn-company-manager.user.js')
+          text = p.read_text(encoding='utf-8')
+
+          text = text.replace('// @version      1.3.66', '// @version      1.3.67', 1)
+          text = text.replace("const TDS_VERSION_FALLBACK = '1.3.66';", "const TDS_VERSION_FALLBACK = '1.3.67';", 1)
+
+          storage_anchor = "  const STORAGE_KEY_STAFFING_BENCHMARK_CACHE = 'tds_staffing_benchmark_cache_v1';\n"
+          if "STORAGE_KEY_DIRECTOR_NAME_CACHE" not in text:
+              assert storage_anchor in text
+              text = text.replace(storage_anchor, storage_anchor + "  const STORAGE_KEY_DIRECTOR_NAME_CACHE = 'tds_director_name_cache_v1';\n", 1)
+
+          for css in [
+              "      .tds-profile-overlay { position:fixed; inset:0; z-index:2147483646; background:rgba(0,0,0,.58); display:flex; align-items:center; justify-content:center; padding:14px; }\n",
+              "      .tds-profile-modal { width:min(560px,96vw); max-height:86vh; overflow:auto; background:var(--tds-bg-panel,#1f1f1f); border:1px solid var(--tds-border-strong,#4a4a4a); border-radius:10px; box-shadow:0 14px 40px rgba(0,0,0,.45); padding:14px; }\n",
+              "      .tds-profile-head { display:flex; justify-content:space-between; gap:10px; align-items:flex-start; margin-bottom:10px; }\n",
+          ]:
+              text = text.replace(css, '', 1)
+
+          profile_block = r'''  function employeeRoleSummary(employee) {
+            let roleSummary = 'Open Employee Effectiveness for detailed role analysis.';
+
+            try {
+              const profile = findRaw(state.lastResults, 'company', 'profile');
+              const reference = findRaw(state.lastResults, 'torn', 'companies');
+              const typeId = numericValue(findValueDeep(profile, ['company_type', 'type_id', 'type']));
+              const typeName = resolveCompanyTypeName(reference, typeId);
+              const positions = extractPositionRequirements(reference, typeId).map((position) => ({
+                ...position,
+                resolvedSpecial: resolvePositionSpecial(position, typeId, typeName),
+              }));
+              const row = positions.length ? buildEmployeePositionMatrix([employee], positions)[0] : null;
+
+              if (row?.best?.position?.name) {
+                roleSummary = `Best estimated role: ${row.best.position.name}${typeof row.best.estimate?.total === 'number' ? ` · ${formatNumber(row.best.estimate.total)} EE` : ''}`;
+              }
+            } catch (err) {
+              console.warn('[TDS] Employee inline role summary unavailable:', err);
+            }
+
+            return roleSummary;
+          }
+
+          function openEmployeeDetail(panel, id, name) {
+            const employee = findEmployeeByIdOrName(id, name);
+            if (!employee) return;
+
+            switchTab(panel, 'overview');
+            const selector = employeeDeepLinkSelector(employee.id, employee.name);
+
+            const tryOpen = (attempt = 0) => {
+              const overview = panel.querySelector('[data-tabpanel="overview"]');
+              const node = selector ? overview?.querySelector(selector) : null;
+              const details = node?.closest('details.tds-employee-row') || node;
+
+              if (details) {
+                if (details.tagName === 'DETAILS') details.open = true;
+                details.classList.add('tds-employee-deeplink-highlight');
+                details.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                setTimeout(() => details.classList.remove('tds-employee-deeplink-highlight'), 5000);
+                return;
+              }
+
+              if (attempt < 12) setTimeout(() => tryOpen(attempt + 1), 150);
+            };
+
+            setTimeout(() => tryOpen(), 0);
+          }
+
+'''
+          pattern = r"  function openEmployeeDetail\(panel, id, name\) \{.*?\n  \}\n\n(?=  function bindEmployeeProfileLinks\(panel\))"
+          text, n = re.subn(pattern, profile_block, text, count=1, flags=re.S)
+          assert n == 1, 'Could not replace popup employee profile function'
+
+          overview_row = "        html += companyOverviewRow(label, value, formatter);\n        if (row) shown.add(row.path);\n"
+          overview_replacement = '''        if (label === 'Director') {
+          html += `<div class="tds-row">
+            <span class="tds-row-label">Director</span>
+            <span class="tds-row-value" id="tds-director-value">${escapeHtml(formatter(value))}</span>
+          </div>`;
+          state.currentDirectorValue = value;
+        } else {
+          html += companyOverviewRow(label, value, formatter);
+        }
+        if (row) shown.add(row.path);
+'''
+          assert overview_row in text, 'Director Overview row anchor missing'
+          text = text.replace(overview_row, overview_replacement, 1)
+
+          employee_status_end = '''              ${status || lastAction ? `
+                <div class="tds-section-label tds-employee-subheading" style="margin-top:10px;">Status</div>
+                <div class="tds-row"><span class="tds-row-label">Online Status</span><span class="tds-row-value ${onlineMeta.textClass}">${escapeHtml(String(onlineStatus))}</span></div>
+                <div class="tds-row"><span class="tds-row-label">State</span><span class="tds-row-value">${escapeHtml(String(playerState))}</span></div>
+                <div class="tds-row"><span class="tds-row-label">Detail</span><span class="tds-row-value">${escapeHtml(String(stateDetail))}</span></div>
+                <div class="tds-row"><span class="tds-row-label">Last action</span><span class="tds-row-value ${onlineMeta.textClass}">${escapeHtml(String(lastActionText))}</span></div>
+              ` : ''}
+            </div>
+'''
+          employee_status_new = '''              ${status || lastAction ? `
+                <div class="tds-section-label tds-employee-subheading" style="margin-top:10px;">Status</div>
+                <div class="tds-row"><span class="tds-row-label">Online Status</span><span class="tds-row-value ${onlineMeta.textClass}">${escapeHtml(String(onlineStatus))}</span></div>
+                <div class="tds-row"><span class="tds-row-label">State</span><span class="tds-row-value">${escapeHtml(String(playerState))}</span></div>
+                <div class="tds-row"><span class="tds-row-label">Detail</span><span class="tds-row-value">${escapeHtml(String(stateDetail))}</span></div>
+                <div class="tds-row"><span class="tds-row-label">Last action</span><span class="tds-row-value ${onlineMeta.textClass}">${escapeHtml(String(lastActionText))}</span></div>
+              ` : ''}
+
+              <div class="tds-section-label tds-employee-subheading" style="margin-top:10px;">Role Summary</div>
+              <div class="tds-box tds-box-neutral">${escapeHtml(employeeRoleSummary(employee))}</div>
+              <div class="tds-profile-actions">
+                <button class="tds-btn" data-inline-employee-tab="training" data-employee-id="${escapeHtml(String(employee.id))}" data-employee-name="${escapeHtml(String(employee.name))}">View in Training</button>
+                <button class="tds-btn" data-inline-employee-tab="optimize" data-employee-id="${escapeHtml(String(employee.id))}" data-employee-name="${escapeHtml(String(employee.name))}">View in Employee Effectiveness</button>
+              </div>
+            </div>
+'''
+          assert employee_status_end in text, 'Employee collapsible status anchor missing'
+          text = text.replace(employee_status_end, employee_status_new, 1)
+
+          overview_end = '''    el.innerHTML = html;
+    bindEmployeeProfileLinks(panel);
+  }
+
+  function escapeHtml(str) {
+'''
+          overview_end_new = '''    el.innerHTML = html;
+    bindEmployeeProfileLinks(panel);
+
+    if (state.currentDirectorValue !== undefined) {
+      refreshDirectorName(panel, state.currentDirectorValue).catch((err) =>
+        console.warn('[TDS] Director name refresh failed:', err)
+      );
+    }
+
+    el.querySelectorAll('[data-inline-employee-tab]').forEach((button) => {
+      button.addEventListener('click', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        const employee = findEmployeeByIdOrName(button.dataset.employeeId, button.dataset.employeeName);
+        if (employee) focusEmployeeInTab(panel, button.dataset.inlineEmployeeTab, employee);
+      });
+    });
+  }
+
+  function escapeHtml(str) {
+'''
+          assert overview_end in text, 'Overview post-render anchor missing'
+          text = text.replace(overview_end, overview_end_new, 1)
+
+          director_block = r'''  function formatDirectorName(value, employees, results) {
+            let directorId = null;
+            let directorName = null;
+
+            if (value && typeof value === 'object') {
+              directorName = findValueDeep(value, ['name', 'player_name', 'username']);
+              directorId = findValueDeep(value, ['id', 'player_id', 'user_id']);
+            } else {
+              directorId = value;
+            }
+
+            directorId = String(directorId ?? '').trim();
+            if (!directorId) return directorName ? String(directorName) : '—';
+
+            if (!directorName) {
+              const rosterMatch = (employees || []).find((employee) => String(employee.id) === directorId);
+              if (rosterMatch?.name && !String(rosterMatch.name).startsWith('#')) directorName = String(rosterMatch.name);
+            }
+
+            if (!directorName) {
+              const cached = GM_getValue(STORAGE_KEY_DIRECTOR_NAME_CACHE, null);
+              if (cached && String(cached.id || '') === directorId && cached.name && Date.now() - Number(cached.timestamp || 0) < 86400000) {
+                directorName = String(cached.name);
+              }
+            }
+
+            return directorName ? `${directorName} [${directorId}]` : directorId;
+          }
+
+          async function refreshDirectorName(panel, directorValue) {
+            let directorId = directorValue;
+            if (directorValue && typeof directorValue === 'object') {
+              const existingName = findValueDeep(directorValue, ['name', 'player_name', 'username']);
+              const objectId = findValueDeep(directorValue, ['id', 'player_id', 'user_id']);
+              if (existingName && objectId !== null) return;
+              directorId = objectId;
+            }
+
+            directorId = String(directorId ?? '').trim();
+            if (!directorId || !/^\d+$/.test(directorId)) return;
+
+            const target = panel.querySelector('#tds-director-value');
+            if (!target || /\[\d+\]$/.test(target.textContent || '')) return;
+
+            const cached = GM_getValue(STORAGE_KEY_DIRECTOR_NAME_CACHE, null);
+            if (cached && String(cached.id || '') === directorId && cached.name && Date.now() - Number(cached.timestamp || 0) < 86400000) {
+              target.textContent = `${cached.name} [${directorId}]`;
+              return;
+            }
+
+            try {
+              const data = await ApiClient.call('user', 'basic', directorId);
+              const name = findValueDeep(data, ['name', 'player_name', 'username']);
+              if (!name) return;
+              GM_setValue(STORAGE_KEY_DIRECTOR_NAME_CACHE, { id: directorId, name: String(name), timestamp: Date.now() });
+              const current = panel.querySelector('#tds-director-value');
+              if (current) current.textContent = `${name} [${directorId}]`;
+            } catch (err) {
+              console.warn('[TDS] Director name lookup unavailable:', err);
+            }
+          }
+
+'''
+          pattern = r"  function formatDirectorName\(value, employees, results\) \{.*?\n  \}\n\n(?=  function formatCompanyType\(value, results\))"
+          text, n = re.subn(pattern, director_block, text, count=1, flags=re.S)
+          assert n == 1, 'Could not replace Director formatter'
+
+          p.write_text(text, encoding='utf-8')
+          PY
+
           node --check torn-company-manager.user.js
           rm .github/workflows/apply-v1.3.67.yml
           git config user.name 'ChatGPT Release Bot'
