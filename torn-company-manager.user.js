@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Company Management Suite
 // @namespace    torn-company-management-suite
-// @version      1.5.0
+// @version      1.5.1
 // @description  Local-only company management dashboard for Torn directors, embedded in the Jobs page. No company data ever leaves your browser; only your Torn User ID is checked against a public license list.
 // @author       DooBiiE
 // @homepageURL  https://github.com/DooBiiE/Torn-Company-Manager
@@ -70,7 +70,7 @@
   // TornPDA does not always expose the legacy GM_info object that desktop
   // userscript managers provide. Try both common metadata APIs, then use the
   // release version as a PDA-safe fallback so the UI never shows vunknown.
-  const TDS_VERSION_FALLBACK = '1.5.0';
+  const TDS_VERSION_FALLBACK = '1.5.1';
   const TDS_VERSION =
     (typeof GM_info !== 'undefined' && GM_info?.script?.version) ||
     (typeof GM !== 'undefined' && GM?.info?.script?.version) ||
@@ -1423,6 +1423,40 @@
     badge.title = 'Access level determined by Diagnostics';
   }
 
+  function directorFeatureNotice(featureName = 'This feature') {
+    const verdict = state.lastVerdict || GM_getValue(STORAGE_KEY_LAST_VERDICT, null) || { level: 'unknown' };
+    const level = verdict?.level || 'unknown';
+
+    if (level === 'director') return '';
+
+    if (level === 'employee') {
+      return `<div class="tds-box tds-box-warn">
+        <strong>Director Feature</strong><br>
+        ${escapeHtml(featureName)} requires <strong>Director Access</strong> to display the full company data and calculations.<br>
+        You currently have <strong>Employee Access</strong>.
+      </div>`;
+    }
+
+    if (level === 'partial') {
+      return `<div class="tds-box tds-box-warn">
+        <strong>Director Feature — access not fully confirmed</strong><br>
+        ${escapeHtml(featureName)} needs director-only company data that is not currently available.
+        Check <strong>Diagnostics</strong> to see which company selections are accessible.
+      </div>`;
+    }
+
+    return `<div class="tds-box tds-box-warn">
+      <strong>Director Feature — access unknown</strong><br>
+      ${escapeHtml(featureName)} needs director-only company data.
+      Run <strong>Diagnostics</strong> so the suite can confirm your current access level.
+    </div>`;
+  }
+
+  function isDirectorAccess() {
+    const verdict = state.lastVerdict || GM_getValue(STORAGE_KEY_LAST_VERDICT, null);
+    return verdict?.level === 'director';
+  }
+
   function employeeOnlineStatusMeta(status) {
     const normalized = String(status || '').trim().toLowerCase();
 
@@ -1818,6 +1852,11 @@
   async function renderOverviewIntelligence(panel, results) {
     const target = panel.querySelector('#tds-overview-intelligence');
     if (!target) return;
+
+    if (!isDirectorAccess()) {
+      target.innerHTML = directorFeatureNotice('Attention Centre, What Changed? and Company Timeline');
+      return;
+    }
 
     try {
       const snapshots = collapseToDaily(await getSnapshotsSorted());
@@ -4032,6 +4071,11 @@
       el.innerHTML = `<div class="tds-box tds-box-neutral">Run the diagnostic first (Overview tab or the \u27f3 button) \u2014 Finance reads from that data plus your local snapshot history.</div>`;
       return;
     }
+    if (!isDirectorAccess()) {
+      el.innerHTML = directorFeatureNotice('Company Financials');
+      return;
+    }
+
 
     const profile = findRaw(results, 'company', 'profile');
     const detailed = findRaw(results, 'company', 'detailed');
@@ -5257,6 +5301,11 @@
       el.innerHTML = `<div class="tds-box tds-box-neutral">Run Diagnostics once so Stock Management can read your company stock.</div>`;
       return;
     }
+    if (!isDirectorAccess()) {
+      el.innerHTML = directorFeatureNotice('Stock Management');
+      return;
+    }
+
 
     const stockRaw = findRaw(results, 'company', 'stock');
     const blocked = findBlockedReason(results, 'company', 'stock');
@@ -6895,6 +6944,15 @@
     if (employees.length === 0) {
       html += `<div class="tds-box tds-box-danger">Employee roster unavailable, so there’s nothing to build a training queue from.</div>`;
       el.innerHTML = html;
+      return;
+    }
+
+    if (mode !== 'priority' && !isDirectorAccess()) {
+      html += directorFeatureNotice(
+        mode === 'planner' ? 'Training Planner and Training Forecast' : 'Rotational / Debt'
+      );
+      el.innerHTML = html;
+      bindTrainingModeButtons(panel);
       return;
     }
 
