@@ -27,3 +27,4 @@ jobs:
           git add torn-company-manager.user.js .github/workflows/apply-v1.3.67.yml
           git commit -m 'Release v1.3.67 inline employee profile and director name'
           git push
+
