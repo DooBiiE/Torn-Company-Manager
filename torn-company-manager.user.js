@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Company Management Suite
 // @namespace    torn-company-management-suite
-// @version      1.3.69
+// @version      1.3.70
 // @description  Local-only company management dashboard for Torn directors, embedded in the Jobs page. No company data ever leaves your browser; only your Torn User ID is checked against a public license list.
 // @author       DooBiiE
 // @homepageURL  https://github.com/DooBiiE/Torn-Company-Manager
@@ -70,7 +70,7 @@
   // TornPDA does not always expose the legacy GM_info object that desktop
   // userscript managers provide. Try both common metadata APIs, then use the
   // release version as a PDA-safe fallback so the UI never shows vunknown.
-  const TDS_VERSION_FALLBACK = '1.3.69';
+  const TDS_VERSION_FALLBACK = '1.3.70';
   const TDS_VERSION =
     (typeof GM_info !== 'undefined' && GM_info?.script?.version) ||
     (typeof GM !== 'undefined' && GM?.info?.script?.version) ||
@@ -1577,45 +1577,60 @@
         'employees_hired', 'employee_count', 'employees_count', 'num_employees'
       ]));
 
-      html += '<div class="tds-section-label">Company</div><div class="tds-card">';
-
-      // Put the most useful/common company fields first, then append every
-      // other scalar field returned by Torn that has not already been shown.
+      // Split high-level identity from operational metrics so Overview is
+      // easier to scan on both desktop and PDA.
       const preferred = [
-        ['name', 'Name'], ['company_name', 'Name'], ['type', 'Type'], ['company_type', 'Type'],
-        ['director', 'Director'], ['days_old', 'Company Age'], ['age', 'Company Age'],
+        ['name', 'Name'], ['company_name', 'Name'],
+        ['type', 'Type'], ['company_type', 'Type'],
+        ['director', 'Director'],
+        ['id', 'ID'], ['company_id', 'ID'],
+        ['rating', 'Rating'],
+        ['days_old', 'Company Age'], ['age', 'Company Age'],
         ['popularity', 'Popularity'], ['efficiency', 'Efficiency'], ['environment', 'Environment'],
-        ['rating', 'Rating'], ['trains_available', 'Trains Available'], ['trains', 'Trains'],
+        ['trains_available', 'Trains Available'], ['trains', 'Trains'],
         ['daily_income', 'Daily Income'], ['daily_customers', 'Daily Customers'],
         ['weekly_income', 'Weekly Income'], ['weekly_customers', 'Weekly Customers'],
         ['company_bank', 'Company Bank']
       ];
+
+      const infoLabels = new Set([
+        'Name', 'Type', 'Director', 'ID', 'Rating'
+      ]);
+
       const shown = new Set();
       const shownFieldNames = new Set();
 
       // Torn can expose these three health values at different nesting levels
-      // depending on the API response shape. Pull them explicitly from the
-      // full profile (and detailed data when available) rather than relying on
-      // them being top-level scalar fields.
+      // depending on the API response shape.
       const healthMetrics = {
         Popularity: findValueDeep(profile, ['popularity', 'company_popularity']) ?? findValueDeep(detailed, ['popularity', 'company_popularity']),
         Efficiency: findValueDeep(profile, ['efficiency', 'company_efficiency']) ?? findValueDeep(detailed, ['efficiency', 'company_efficiency']),
         Environment: findValueDeep(profile, ['environment', 'company_environment']) ?? findValueDeep(detailed, ['environment', 'company_environment'])
       };
 
+      const preferredRows = [];
+
       for (const [key, label] of preferred) {
         const row = profileRows.find((r) => normalizeFieldName(r.key) === normalizeFieldName(key));
         const explicitHealthValue = Object.prototype.hasOwnProperty.call(healthMetrics, label)
           ? healthMetrics[label]
           : null;
+
         if ((!row && explicitHealthValue === null) || (row && shown.has(row.path))) continue;
 
         let formatter = formatCompanyValue;
-        let value = row ? row.value : explicitHealthValue;
+        const value = row ? row.value : explicitHealthValue;
+
         if (label === 'Director') {
           formatter = (value) => formatDirectorName(value, employees, results);
         } else if (label === 'Type') {
           formatter = (value) => formatCompanyType(value, results);
+        } else if (label === 'ID') {
+          // IDs are identifiers, not quantities: never add thousands separators.
+          formatter = (value) => {
+            if (value === null || value === undefined || value === '') return '—';
+            return String(value).replace(/,/g, '');
+          };
         } else if (label === 'Company Age') {
           formatter = formatCompanyAge;
         } else if (label === 'Daily Income' || label === 'Weekly Income') {
@@ -1624,43 +1639,72 @@
           formatter = formatPercent;
         }
 
-        if (label === 'Director') {
-          html += `<div class="tds-row">
-            <span class="tds-row-label">Director</span>
-            <span class="tds-row-value" id="tds-director-value">${escapeHtml(formatter(value))}</span>
-          </div>`;
-          state.currentDirectorValue = value;
-        } else {
-          html += companyOverviewRow(label, value, formatter);
-        }
+        preferredRows.push({ key, label, value, formatter, row });
+
         if (row) shown.add(row.path);
         shownFieldNames.add(normalizeFieldName(key));
       }
 
-      // Always show roster size in the familiar current / capacity form when
-      // either side is known, even if Torn exposes those values under different
-      // field names.
+      html += '<div class="tds-section-label">Company Info</div><div class="tds-card">';
+
+      for (const item of preferredRows.filter((item) => infoLabels.has(item.label))) {
+        if (item.label === 'Director') {
+          html += `<div class="tds-row">
+            <span class="tds-row-label">Director</span>
+            <span class="tds-row-value" id="tds-director-value">${escapeHtml(item.formatter(item.value))}</span>
+          </div>`;
+          state.currentDirectorValue = item.value;
+        } else {
+          html += companyOverviewRow(item.label, item.value, item.formatter);
+        }
+      }
+
+      // Employee count belongs with the company's identity/size rather than
+      // the operational statistics below.
       if (employeeCount !== null || capacity !== null) {
-        html += companyOverviewRow('Employees', employeeCount, () => {
-          if (employeeCount !== null && capacity !== null) return `${formatNumber(employeeCount)} / ${formatNumber(capacity)}`;
+        html += companyOverviewRow('Number of Employees', employeeCount, () => {
+          if (employeeCount !== null && capacity !== null) {
+            return `${formatNumber(employeeCount)} / ${formatNumber(capacity)}`;
+          }
           if (employeeCount !== null) return formatNumber(employeeCount);
           return `— / ${formatNumber(capacity)}`;
         });
       }
 
+      html += '</div>';
+
+      html += '<div class="tds-section-label">Company Statistics</div><div class="tds-card">';
+
+      for (const item of preferredRows.filter((item) => !infoLabels.has(item.label))) {
+        html += companyOverviewRow(item.label, item.value, item.formatter);
+      }
+
+      // Preserve every other scalar Torn returns, but place it in Statistics.
       for (const row of profileRows) {
         if (shown.has(row.path)) continue;
         const nk = normalizeFieldName(row.key);
         if (shownFieldNames.has(nk)) continue;
-        // These are already represented by the combined Employees row.
+
+        // Already represented by Number of Employees.
         if (/^(employeeshired|employeecount|employeescount|numemployees|employeescapacity|employeecapacity|maxemployees|maximumemployees|capacity)$/.test(nk)) continue;
 
         let formatter = formatCompanyValue;
-        if (/^(dailyincome|weeklyincome)$/.test(nk)) formatter = formatCurrency;
-        if (/^(daysold|age)$/.test(nk)) formatter = formatCompanyAge;
+
+        if (/^(dailyincome|weeklyincome)$/.test(nk)) {
+          formatter = formatCurrency;
+        } else if (/^(daysold|age)$/.test(nk)) {
+          formatter = formatCompanyAge;
+        } else if (/^(id|companyid)$/.test(nk)) {
+          formatter = (value) => {
+            if (value === null || value === undefined || value === '') return '—';
+            return String(value).replace(/,/g, '');
+          };
+        }
+
         html += companyOverviewRow(row.label, row.value, formatter);
         shown.add(row.path);
       }
+
       html += '</div>';
     }
 
