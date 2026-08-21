@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Company Management Suite
 // @namespace    torn-company-management-suite
-// @version      1.3.67
+// @version      1.3.68
 // @description  Local-only company management dashboard for Torn directors, embedded in the Jobs page. No company data ever leaves your browser; only your Torn User ID is checked against a public license list.
 // @author       DooBiiE
 // @homepageURL  https://github.com/DooBiiE/Torn-Company-Manager
@@ -70,7 +70,7 @@
   // TornPDA does not always expose the legacy GM_info object that desktop
   // userscript managers provide. Try both common metadata APIs, then use the
   // release version as a PDA-safe fallback so the UI never shows vunknown.
-  const TDS_VERSION_FALLBACK = '1.3.67';
+  const TDS_VERSION_FALLBACK = '1.3.68';
   const TDS_VERSION =
     (typeof GM_info !== 'undefined' && GM_info?.script?.version) ||
     (typeof GM !== 'undefined' && GM?.info?.script?.version) ||
@@ -1716,7 +1716,7 @@
             <summary class="tds-employee-summary">
               <div class="tds-employee-top">
                 <div>
-                  <div class="tds-employee-name tds-employee-profile-link" data-employee-profile data-employee-id="${escapeHtml(String(employee.id))}" data-employee-name="${escapeHtml(String(employee.name))}" title="Open employee summary">${escapeHtml(String(employee.name))}</div>
+                  <div class="tds-employee-name" data-employee-id="${escapeHtml(String(employee.id))}" data-employee-name="${escapeHtml(String(employee.name))}">${escapeHtml(String(employee.name))}</div>
                   <div class="tds-employee-meta">
                     ${escapeHtml(String(employee.position || 'Employee'))}
                     <span class="${onlineMeta.textClass}" style="margin-left:6px;">· ${escapeHtml(String(lastActionText))}</span>
