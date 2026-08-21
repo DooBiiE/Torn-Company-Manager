@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Company Management Suite
 // @namespace    torn-company-management-suite
-// @version      1.4.1
+// @version      1.4.2
 // @description  Local-only company management dashboard for Torn directors, embedded in the Jobs page. No company data ever leaves your browser; only your Torn User ID is checked against a public license list.
 // @author       DooBiiE
 // @homepageURL  https://github.com/DooBiiE/Torn-Company-Manager
@@ -70,7 +70,7 @@
   // TornPDA does not always expose the legacy GM_info object that desktop
   // userscript managers provide. Try both common metadata APIs, then use the
   // release version as a PDA-safe fallback so the UI never shows vunknown.
-  const TDS_VERSION_FALLBACK = '1.4.1';
+  const TDS_VERSION_FALLBACK = '1.4.2';
   const TDS_VERSION =
     (typeof GM_info !== 'undefined' && GM_info?.script?.version) ||
     (typeof GM !== 'undefined' && GM?.info?.script?.version) ||
@@ -722,8 +722,8 @@
         width: 130px;
         white-space: normal;
       }
-      .tds-position-matrix th:not(:first-child):not(:nth-child(2)),
-      .tds-position-matrix td:not(:first-child):not(:nth-child(2)) {
+      .tds-position-matrix th:not(:first-child):not(:nth-child(2)):not(:nth-child(3)),
+      .tds-position-matrix td:not(:first-child):not(:nth-child(2)):not(:nth-child(3)) {
         min-width: 92px;
       }
       .tds-position-matrix tbody tr td {
@@ -1868,6 +1868,7 @@
                 <div class="tds-row"><span class="tds-row-label">Working Stats</span><span class="tds-row-value">${formatNumber(effectiveness.working_stats)}</span></div>
                 <div class="tds-row"><span class="tds-row-label">Settled In</span><span class="tds-row-value">${formatNumber(effectiveness.settled_in)}</span></div>
                 <div class="tds-row"><span class="tds-row-label">Director Education</span><span class="tds-row-value">${formatNumber(effectiveness.director_education)}</span></div>
+                <div class="tds-row"><span class="tds-row-label">EE Merits</span><span class="tds-row-value">${typeof getEmployeeEEMerits(emp) === 'number' ? formatNumber(getEmployeeEEMerits(emp)) : '—'}</span></div>
                 <div class="tds-row"><span class="tds-row-label">Addiction</span><span class="tds-row-value">${formatNumber(effectiveness.addiction)}</span></div>
                 <div class="tds-row"><span class="tds-row-label">Total</span><span class="tds-row-value">${formatNumber(effectiveness.total)}</span></div>
               ` : ''}
@@ -2682,16 +2683,28 @@
     if (!emp || typeof emp !== 'object') return null;
 
     // Current Torn company/employees responses expose effectiveness as an
-    // object. This is the same breakdown Torn shows in the employee table:
-    // working stats + settled in + director education + addiction = total.
+    // object. Read every explicit component Torn supplies. EE merits are read
+    // from the employee effectiveness breakdown only; they are never inferred
+    // from Total EE because other adjustments can also affect that total.
     const raw = emp.effectiveness;
     if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
       const total = numericValue(raw.total);
+      const merits = numericValue(
+        findValueDeep(raw, [
+          'merits',
+          'merit',
+          'employee_effectiveness_merits',
+          'employee_effectiveness_merit',
+          'ee_merits',
+          'effectiveness_merits'
+        ])
+      );
       return {
         source: 'effectiveness',
         workingStats: numericValue(raw.working_stats),
         settledIn: numericValue(raw.settled_in),
         directorEducation: numericValue(raw.director_education),
+        merits,
         addiction: numericValue(raw.addiction),
         total,
       };
@@ -2706,6 +2719,7 @@
       workingStats: null,
       settledIn: null,
       directorEducation: null,
+      merits: null,
       addiction: null,
       total: emp[key],
     };
@@ -2714,6 +2728,16 @@
   function findEffectivenessField(emp) {
     const ee = getEmployeeEffectiveness(emp);
     return ee && typeof ee.total === 'number' ? { key: ee.source, value: ee.total } : null;
+  }
+
+  function getEmployeeEEMerits(emp) {
+    const ee = getEmployeeEffectiveness(emp);
+    return ee && typeof ee.merits === 'number' ? ee.merits : null;
+  }
+
+  function formatEEMerits(emp) {
+    const merits = getEmployeeEEMerits(emp);
+    return merits !== null ? formatNumber(merits) : '—';
   }
 
   function formatMoney(n) {
@@ -5940,8 +5964,8 @@
     }));
 
     let html = `<div class="tds-box tds-box-info">
-      <strong>Employee Effectiveness:</strong> current Total EE is Torn's real value.
-      Position estimates change only the position-dependent Working Stats component and retain the employee's current non-position EE adjustment.
+      <strong>Employee Effectiveness:</strong> current Total EE and any explicitly returned EE Merit contribution are Torn values.
+      Position estimates change only the position-dependent Working Stats component and retain the employee's current non-position EE adjustment, including EE Merits when Torn supplies them.
       All recommendations are advisory only.
     </div>`;
 
@@ -6183,6 +6207,7 @@
               <th>Employee</th>
               <th>Current Role</th>
               <th>Balanced Recommendation</th>
+              <th>EE Merits</th>
               <th>Current EE</th>
               <th>Projected EE</th>
               <th>Gain</th>
@@ -6196,6 +6221,7 @@
           <td><strong>${escapeHtml(move.employee.name)}</strong></td>
           <td>${escapeHtml(move.from || '—')}</td>
           <td class="tds-v-good"><strong>${escapeHtml(move.to)}</strong></td>
+          <td>${formatEEMerits(move.employee.raw)}</td>
           <td>${typeof move.currentEE === 'number' ? formatNumber(move.currentEE) : '—'}</td>
           <td>${typeof move.newEE === 'number' ? formatNumber(move.newEE) : '—'}</td>
           <td class="tds-v-good"><strong>+${formatNumber(move.gain)}</strong></td>
@@ -6254,6 +6280,7 @@
             <th>Current Role</th>
             <th>Recommended Role</th>
             <th>Action</th>
+            <th>EE Merits</th>
             <th>Current EE</th>
             <th>Projected EE</th>
             <th>Change</th>
@@ -6284,6 +6311,7 @@
         <td>${escapeHtml(assignment.currentPosition || '—')}</td>
         <td class="${isMove ? 'tds-v-good' : ''}"><strong>${escapeHtml(assignment.assignedPosition || '—')}</strong></td>
         <td class="${actionClass}"><strong>${isMove ? 'MOVE' : 'KEEP'}</strong></td>
+        <td>${formatEEMerits(assignment.row.employee.raw)}</td>
         <td>${typeof assignment.currentEE === 'number' ? formatNumber(assignment.currentEE) : '—'}</td>
         <td>${typeof assignment.assignedEE === 'number' ? formatNumber(assignment.assignedEE) : '—'}</td>
         <td class="${changeClass}">
@@ -6351,6 +6379,7 @@
           <tr>
             <th>Employee</th>
             <th>Current Position</th>
+            <th>EE Merits</th>
             <th>Current EE</th>
             <th>Best Position</th>
             <th>Est. New EE</th>
@@ -6380,6 +6409,7 @@
       html += `<tr data-employee-id="${escapeHtml(String(row.employee.id))}" data-employee-name="${escapeHtml(String(row.employee.name))}">
         <td><strong class="tds-employee-profile-link" data-employee-profile data-employee-id="${escapeHtml(String(row.employee.id))}" data-employee-name="${escapeHtml(String(row.employee.name))}" title="Open employee summary">${escapeHtml(row.employee.name)}</strong></td>
         <td>${escapeHtml(row.employee.position || '—')}</td>
+        <td>${formatEEMerits(row.employee.raw)}</td>
         <td>${currentTotal !== null ? formatNumber(currentTotal) : '—'}</td>
         <td>${row.best ? escapeHtml(row.best.position.name) : '—'}</td>
         <td>${estimatedTotal !== null ? formatNumber(estimatedTotal) : '—'}</td>
@@ -6401,7 +6431,8 @@
       <table class="tds-table tds-position-matrix">
         <thead><tr>
           <th>Employee</th>
-          <th>Current</th>`;
+          <th>Current</th>
+          <th>EE Merits</th>`;
 
     for (const position of positions) {
       html += `<th>${escapeHtml(position.name)}</th>`;
@@ -6412,7 +6443,8 @@
     for (const row of matrix) {
       html += `<tr data-employee-id="${escapeHtml(String(row.employee.id))}" data-employee-name="${escapeHtml(String(row.employee.name))}">
         <td><strong class="tds-employee-profile-link" data-employee-profile data-employee-id="${escapeHtml(String(row.employee.id))}" data-employee-name="${escapeHtml(String(row.employee.name))}" title="Open employee summary">${escapeHtml(row.employee.name)}</strong></td>
-        <td>${escapeHtml(row.employee.position || '—')}</td>`;
+        <td>${escapeHtml(row.employee.position || '—')}</td>
+        <td>${formatEEMerits(row.employee.raw)}</td>`;
 
       for (const cell of row.cells) {
         const estimated = cell.estimate?.total ?? null;
@@ -6530,7 +6562,11 @@
         Sorted by <strong>current effectiveness, lowest first</strong>. This is the EE-priority view. Use <strong>Training Planner</strong> for a forward-looking fair-rotation plan based on recorded training history.
       </div>`;
 
-      const withEE = employees.map((e) => ({ ...e, ee: findEffectivenessField(e.raw) }));
+      const withEE = employees.map((e) => ({
+        ...e,
+        ee: findEffectivenessField(e.raw),
+        eeMerits: getEmployeeEEMerits(e.raw)
+      }));
       withEE.sort((a, b) => (a.ee?.value ?? Infinity) - (b.ee?.value ?? Infinity));
 
       html += '<div class="tds-section-label">Priority queue</div><div class="tds-card">';
@@ -6542,7 +6578,10 @@
                 <div class="tds-employee-name tds-employee-profile-link" data-employee-profile data-employee-id="${escapeHtml(String(e.id))}" data-employee-name="${escapeHtml(String(e.name))}" title="Open employee summary">${i === 0 ? '▶ ' : ''}${escapeHtml(String(e.name))}</div>
                 <div class="tds-employee-meta">${escapeHtml(String(e.position))}</div>
               </div>
-              <div class="tds-row-value">${e.ee ? e.ee.value : '<span class="tds-v-dim">no EE field</span>'}</div>
+              <div style="text-align:right;">
+                <div class="tds-row-value">${e.ee ? formatNumber(e.ee.value) : '<span class="tds-v-dim">no EE field</span>'}</div>
+                <div class="tds-v-dim" style="font-size:10px;">EE Merits: ${e.eeMerits !== null ? formatNumber(e.eeMerits) : '—'}</div>
+              </div>
             </div>
           </div>`;
       });
@@ -7039,7 +7078,7 @@
           <span>
             <span class="tds-training-plan-rank">#${step.number}</span>
             <strong>${escapeHtml(String(step.employee.name))}</strong>
-            <span class="tds-v-dim"> · ${escapeHtml(String(step.employee.position || 'Employee'))}</span>
+            <span class="tds-v-dim"> · ${escapeHtml(String(step.employee.position || 'Employee'))} · EE Merits ${formatEEMerits(step.employee.raw)}</span>
           </span>
           <span class="tds-v-dim">
             debt before train ${step.debtBefore.toFixed(2)}
@@ -7055,6 +7094,7 @@
             <tr>
               <th>Employee</th>
               <th>Position</th>
+              <th>EE Merits</th>
               <th>Planned Trains</th>
             </tr>
           </thead>
@@ -7065,6 +7105,7 @@
         <tr>
           <td><strong>${escapeHtml(String(row.employee.name))}</strong></td>
           <td>${escapeHtml(String(row.employee.position || '—'))}</td>
+          <td>${formatEEMerits(row.employee.raw)}</td>
           <td>${formatNumber(row.planned)}</td>
         </tr>`;
     }
@@ -7176,6 +7217,7 @@
               <th>#</th>
               <th>Employee</th>
               <th>Position</th>
+              <th>EE Merits</th>
               <th>Eligible Days*</th>
               <th>Received</th>
               <th>Fair Share</th>
@@ -7202,6 +7244,7 @@
           <td>${index + 1}</td>
           <td><strong>${index === 0 ? '▶ ' : ''}${escapeHtml(String(row.employee.name))}</strong></td>
           <td>${escapeHtml(String(row.employee.position || '—'))}</td>
+          <td>${formatEEMerits(row.employee.raw)}</td>
           <td>${row.eligibleWeight.toFixed(1)}</td>
           <td>${formatNumber(row.actual)}</td>
           <td>${row.expected.toFixed(2)}</td>
