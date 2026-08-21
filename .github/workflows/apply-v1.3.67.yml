@@ -13,13 +13,360 @@ jobs:
   apply:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Apply tested v1.3.67 patch
         shell: bash
         run: |
-          echo 'LS0tIC9tbnQvZGF0YS9Ub3JuLUNvbXBhbnktTWFuYWdlbWVudC1TdWl0ZS12MS4zLjY2LWVmZmVjdGl2ZW5lc3MtZGVlcGxpbmstZml4LnR4dAkyMDI2LTA4LTIxIDEwOjI0OjE1LjA5Njg4Njg3OSArMDAwMAorKysgL21udC9kYXRhL1Rvcm4tQ29tcGFueS1NYW5hZ2VtZW50LVN1aXRlLXYxLjMuNjctaW5saW5lLXByb2ZpbGUtZGlyZWN0b3ItbmFtZS50eHQJMjAyNi0wOC0yMSAxMDoyNTozMi43NTE0NzMwMzIgKzAwMDAKQEAgLTEsNyArMSw3IEBACiAvLyA9PVVzZXJTY3JpcHQ9PQogLy8gQG5hbWUgICAgICAgICBUb3JuIENvbXBhbnkgTWFuYWdlbWVudCBTdWl0ZQogLy8gQG5hbWVzcGFjZSAgICB0b3JuLWNvbXBhbnktbWFuYWdlbWVudC1zdWl0ZQotLy8gQHZlcnNpb24gICAgICAxLjMuNjYKKy8vIEB2ZXJzaW9uICAgICAgMS4zLjY3CiAvLyBAZGVzY3JpcHRpb24gIExvY2FsLW9ubHkgY29tcGFueSBtYW5hZ2VtZW50IGRhc2hib2FyZCBmb3IgVG9ybiBkaXJlY3RvcnMsIGVtYmVkZGVkIGluIHRoZSBKb2JzIHBhZ2UuIE5vIGNvbXBhbnkgZGF0YSBldmVyIGxlYXZlcyB5b3VyIGJyb3dzZXI7IG9ubHkgeW91ciBUb3JuIFVzZXIgSUQgaXMgY2hlY2tlZCBhZ2FpbnN0IGEgcHVibGljIGxpY2Vuc2UgbGlzdC4KIC8vIEBhdXRob3IgICAgICAgRG9vQmlpRQogLy8gQGhvbWVwYWdlVVJMICBodHRwczovL2dpdGh1Yi5jb20vRG9vQmlpRS9Ub3JuLUNvbXBhbnktTWFuYWdlcgpAQCAtNzAsNyArNzAsNyBAQAogICAvLyBUb3JuUERBIGRvZXMgbm90IGFsd2F5cyBleHBvc2UgdGhlIGxlZ2FjeSBHTV9pbmZvIG9iamVjdCB0aGF0IGRlc2t0b3AKICAgLy8gdXNlcnNjcmlwdCBtYW5hZ2VycyBwcm92aWRlLiBUcnkgYm90aCBjb21tb24gbWV0YWRhdGEgQVBJcywgdGhlbiB1c2UgdGhlCiAgIC8vIHJlbGVhc2UgdmVyc2lvbiBhcyBhIFBEQS1zYWZlIGZhbGxiYWNrIHNvIHRoZSBVSSBuZXZlciBzaG93cyB2dW5rbm93bi4KLSAgY29uc3QgVERTX1ZFUlNJT05fRkFMTEJBQ0sgPSAnMS4zLjY2JzsKKyAgY29uc3QgVERTX1ZFUlNJT05fRkFMTEJBQ0sgPSAnMS4zLjY3JzsKICAgY29uc3QgVERTX1ZFUlNJT04gPQogICAgICh0eXBlb2YgR01faW5mbyAhPT0gJ3VuZGVmaW5lZCcgJiYgR01faW5mbz8uc2NyaXB0Py52ZXJzaW9uKSB8fAogICAgICh0eXBlb2YgR00gIT09ICd1bmRlZmluZWQnICYmIEdNPy5pbmZvPy5zY3JpcHQ/LnZlcnNpb24pIHx8CkBAIC04Miw2ICs4Miw3IEBACiAgIGNvbnN0IFNUT1JBR0VfS0VZX0hJU1RPUllfQkFDS0ZJTExfREFZID0gJ3Rkc19oaXN0b3J5X2JhY2tmaWxsX2RheSc7CiAgIGNvbnN0IFNUT1JBR0VfS0VZX0hJU1RPUllfQkFDS0ZJTExfUkVTVUxUID0gJ3Rkc19oaXN0b3J5X2JhY2tmaWxsX3Jlc3VsdCc7CiAgIGNvbnN0IFNUT1JBR0VfS0VZX1NUQUZGSU5HX0JFTkNITUFSS19DQUNIRSA9ICd0ZHNfc3RhZmZpbmdfYmVuY2htYXJrX2NhY2hlX3YxJzsKKyAgY29uc3QgU1RPUkFHRV9LRVlfRElSRUNUT1JfTkFNRV9DQUNIRSA9ICd0ZHNfZGlyZWN0b3JfbmFtZV9jYWNoZV92MSc7CiAgIGNvbnN0IFNUT1JBR0VfS0VZX0xBU1RfUkVTVUxUUyA9ICd0ZHNfbGFzdF9yZXN1bHRzX2NhY2hlJzsKICAgY29uc3QgU1RPUkFHRV9LRVlfTEFTVF9WRVJESUNUID0gJ3Rkc19sYXN0X3ZlcmRpY3RfY2FjaGUnOwogICBjb25zdCBNSU5fQ0FMTF9JTlRFUlZBTF9NUyA9IDgwMDsgLy8gfjc1IHJlcS9taW4gY2VpbGluZywgd2VsbCB1bmRlciBUb3JuJ3MgMTAwL21pbiBjYXAKQEAgLTY2MCw5ICs2NjEsNiBAQAogICAgICAgLnRkcy1lbXBsb3llZS10b3AgeyBkaXNwbGF5OiBmbGV4OyBqdXN0aWZ5LWNvbnRlbnQ6IHNwYWNlLWJldHdlZW47IGFsaWduLWl0ZW1zOiBmbGV4LXN0YXJ0OyBnYXA6IDEwcHg7IH0KICAgICAgIC50ZHMtZW1wbG95ZWUtbmFtZSB7IGZvbnQtd2VpZ2h0OiA3MDA7IGNvbG9yOiB2YXIoLS10ZHMtdGV4dC1zdHJvbmcsICNmMGYwZjApOyBmb250LXNpemU6IDEzcHg7IH0KICAgICAgIC50ZHMtZW1wbG95ZWUtcHJvZmlsZS1saW5rIHsgY3Vyc29yOnBvaW50ZXI7IHRleHQtZGVjb3JhdGlvbjp1bmRlcmxpbmU7IHRleHQtZGVjb3JhdGlvbi1zdHlsZTpkb3R0ZWQ7IHRleHQtdW5kZXJsaW5lLW9mZnNldDozcHg7IH0KLSAgICAgIC50ZHMtcHJvZmlsZS1vdmVybGF5IHsgcG9zaXRpb246Zml4ZWQ7IGluc2V0OjA7IHotaW5kZXg6MjE0NzQ4MzY0NjsgYmFja2dyb3VuZDpyZ2JhKDAsMCwwLC41OCk7IGRpc3BsYXk6ZmxleDsgYWxpZ24taXRlbXM6Y2VudGVyOyBqdXN0aWZ5LWNvbnRlbnQ6Y2VudGVyOyBwYWRkaW5nOjE0cHg7IH0KLSAgICAgIC50ZHMtcHJvZmlsZS1tb2RhbCB7IHdpZHRoOm1pbig1NjBweCw5NnZ3KTsgbWF4LWhlaWdodDo4NnZoOyBvdmVyZmxvdzphdXRvOyBiYWNrZ3JvdW5kOnZhcigtLXRkcy1iZy1wYW5lbCwjMWYxZjFmKTsgYm9yZGVyOjFweCBzb2xpZCB2YXIoLS10ZHMtYm9yZGVyLXN0cm9uZywjNGE0YTRhKTsgYm9yZGVyLXJhZGl1czoxMHB4OyBib3gtc2hhZG93OjAgMTRweCA0MHB4IHJnYmEoMCwwLDAsLjQ1KTsgcGFkZGluZzoxNHB4OyB9Ci0gICAgICAudGRzLXByb2ZpbGUtaGVhZCB7IGRpc3BsYXk6ZmxleDsganVzdGlmeS1jb250ZW50OnNwYWNlLWJldHdlZW47IGdhcDoxMHB4OyBhbGlnbi1pdGVtczpmbGV4LXN0YXJ0OyBtYXJnaW4tYm90dG9tOjEwcHg7IH0KICAgICAgIC50ZHMtcHJvZmlsZS1hY3Rpb25zIHsgZGlzcGxheTpmbGV4OyBmbGV4LXdyYXA6d3JhcDsgZ2FwOjZweDsgbWFyZ2luLXRvcDoxMnB4OyB9CiAgICAgICAudGRzLWVtcGxveWVlLWRlZXBsaW5rLWhpZ2hsaWdodCB7CiAgICAgICAgIG91dGxpbmU6IDJweCBzb2xpZCB2YXIoLS10ZHMtYWNjZW50LCAjM2RkYzg0KTsKQEAgLTE0NjMsMTcgKzE0NjEsNyBAQAogICAgIHNldFRpbWVvdXQoKCkgPT4gdHJ5Rm9jdXMoKSwgMCk7CiAgIH0KIAotICBmdW5jdGlvbiBvcGVuRW1wbG95ZWVEZXRhaWwocGFuZWwsIGlkLCBuYW1lKSB7Ci0gICAgY29uc3QgZW1wbG95ZWUgPSBmaW5kRW1wbG95ZWVCeUlkT3JOYW1lKGlkLCBuYW1lKTsKLSAgICBpZiAoIWVtcGxveWVlKSByZXR1cm47Ci0gICAgcGFuZWwucXVlcnlTZWxlY3RvcignLnRkcy1wcm9maWxlLW92ZXJsYXknKT8ucmVtb3ZlKCk7Ci0KLSAgICBjb25zdCBlbXAgPSBlbXBsb3llZS5yYXcgfHwge307Ci0gICAgY29uc3QgZWUgPSBnZXRFbXBsb3llZUVmZmVjdGl2ZW5lc3MoZW1wKTsKLSAgICBjb25zdCBsYXN0QWN0aW9uID0gZW1wLmxhc3RfYWN0aW9uICYmIHR5cGVvZiBlbXAubGFzdF9hY3Rpb24gPT09ICdvYmplY3QnID8gZW1wLmxhc3RfYWN0aW9uIDogbnVsbDsKLSAgICBjb25zdCBvbmxpbmVTdGF0dXMgPSBsYXN0QWN0aW9uPy5zdGF0dXMgfHwgJ+KAlCc7Ci0gICAgY29uc3Qgb25saW5lTWV0YSA9IGVtcGxveWVlT25saW5lU3RhdHVzTWV0YShvbmxpbmVTdGF0dXMpOwotICAgIGNvbnN0IGxhc3RBY3Rpb25UZXh0ID0gbGFzdEFjdGlvbj8ucmVsYXRpdmUgfHwgZm9ybWF0VGltZXN0YW1wUmVsYXRpdmUobGFzdEFjdGlvbj8udGltZXN0YW1wKSB8fCAn4oCUJzsKKyAgZnVuY3Rpb24gZW1wbG95ZWVSb2xlU3VtbWFyeShlbXBsb3llZSkgewogICAgIGxldCByb2xlU3VtbWFyeSA9ICdPcGVuIEVtcGxveWVlIEVmZmVjdGl2ZW5lc3MgZm9yIGRldGFpbGVkIHJvbGUgYW5hbHlzaXMuJzsKIAogICAgIHRyeSB7CkBAIC0xNDgyLDQzICsxNDcwLDYwIEBACiAgICAgICBjb25zdCB0eXBlSWQgPSBudW1lcmljVmFsdWUoZmluZFZhbHVlRGVlcChwcm9maWxlLCBbJ2NvbXBhbnlfdHlwZScsICd0eXBlX2lkJywgJ3R5cGUnXSkpOwogICAgICAgY29uc3QgdHlwZU5hbWUgPSByZXNvbHZlQ29tcGFueVR5cGVOYW1lKHJlZmVyZW5jZSwgdHlwZUlkKTsKICAgICAgIGNvbnN0IHBvc2l0aW9ucyA9IGV4dHJhY3RQb3NpdGlvblJlcXVpcmVtZW50cyhyZWZlcmVuY2UsIHR5cGVJZCkubWFwKChwb3NpdGlvbikgPT4gKHsKLSAgICAgICAgLi4ucG9zaXRpb24sIHJlc29sdmVkU3BlY2lhbDogcmVzb2x2ZVBvc2l0aW9uU3BlY2lhbChwb3NpdGlvbiwgdHlwZUlkLCB0eXBlTmFtZSksCisgICAgICAgIC4uLnBvc2l0aW9uLAorICAgICAgICByZXNvbHZlZFNwZWNpYWw6IHJlc29sdmVQb3NpdGlvblNwZWNpYWwocG9zaXRpb24sIHR5cGVJZCwgdHlwZU5hbWUpLAogICAgICAgfSkpOwotICAgICAgY29uc3Qgcm93ID0gcG9zaXRpb25zLmxlbmd0aCA/IGJ1aWxkRW1wbG95ZWVQb3NpdGlvbk1hdHJpeChbZW1wbG95ZWVdLCBwb3NpdGlvbnMpWzBdIDogbnVsbDsKKworICAgICAgY29uc3Qgcm93ID0gcG9zaXRpb25zLmxlbmd0aAorICAgICAgICA/IGJ1aWxkRW1wbG95ZWVQb3NpdGlvbk1hdHJpeChbZW1wbG95ZWVdLCBwb3NpdGlvbnMpWzBdCisgICAgICAgIDogbnVsbDsKKwogICAgICAgaWYgKHJvdz8uYmVzdD8ucG9zaXRpb24/Lm5hbWUpIHsKLSAgICAgICAgcm9sZVN1bW1hcnkgPSBgQmVzdCBlc3RpbWF0ZWQgcm9sZTogJHtyb3cuYmVzdC5wb3NpdGlvbi5uYW1lfSR7dHlwZW9mIHJvdy5iZXN0LmVzdGltYXRlPy50b3RhbCA9PT0gJ251bWJlcicgPyBgIMK3ICR7Zm9ybWF0TnVtYmVyKHJvdy5iZXN0LmVzdGltYXRlLnRvdGFsKX0gRUVgIDogJyd9YDsKKyAgICAgICAgcm9sZVN1bW1hcnkgPQorICAgICAgICAgIGBCZXN0IGVzdGltYXRlZCByb2xlOiAke3Jvdy5iZXN0LnBvc2l0aW9uLm5hbWV9YCArCisgICAgICAgICAgYCR7dHlwZW9mIHJvdy5iZXN0LmVzdGltYXRlPy50b3RhbCA9PT0gJ251bWJlcicKKyAgICAgICAgICAgID8gYCDCtyAke2Zvcm1hdE51bWJlcihyb3cuYmVzdC5lc3RpbWF0ZS50b3RhbCl9IEVFYAorICAgICAgICAgICAgOiAnJ31gOwogICAgICAgfQotICAgIH0gY2F0Y2ggKGVycikgeyBjb25zb2xlLndhcm4oJ1tURFNdIEVtcGxveWVlIHN1bW1hcnkgcm9sZSBhbmFseXNpcyB1bmF2YWlsYWJsZTonLCBlcnIpOyB9CisgICAgfSBjYXRjaCAoZXJyKSB7CisgICAgICBjb25zb2xlLndhcm4oJ1tURFNdIEVtcGxveWVlIGlubGluZSByb2xlIHN1bW1hcnkgdW5hdmFpbGFibGU6JywgZXJyKTsKKyAgICB9CiAKLSAgICBjb25zdCBvdmVybGF5ID0gZG9jdW1lbnQuY3JlYXRlRWxlbWVudCgnZGl2Jyk7Ci0gICAgb3ZlcmxheS5jbGFzc05hbWUgPSAndGRzLXByb2ZpbGUtb3ZlcmxheSc7Ci0gICAgb3ZlcmxheS5pbm5lckhUTUwgPSBgPGRpdiBjbGFzcz0idGRzLXByb2ZpbGUtbW9kYWwiIHJvbGU9ImRpYWxvZyIgYXJpYS1tb2RhbD0idHJ1ZSI+Ci0gICAgICA8ZGl2IGNsYXNzPSJ0ZHMtcHJvZmlsZS1oZWFkIj48ZGl2PjxkaXYgY2xhc3M9InRkcy1lbXBsb3llZS1uYW1lIiBzdHlsZT0iZm9udC1zaXplOjE3cHg7Ij4ke2VzY2FwZUh0bWwoU3RyaW5nKGVtcGxveWVlLm5hbWUpKX08L2Rpdj48ZGl2IGNsYXNzPSJ0ZHMtZW1wbG95ZWUtbWV0YSI+JHtlc2NhcGVIdG1sKFN0cmluZyhlbXBsb3llZS5wb3NpdGlvbiB8fCAnRW1wbG95ZWUnKSl9PC9kaXY+PC9kaXY+PGJ1dHRvbiBjbGFzcz0idGRzLWJ0biIgZGF0YS1wcm9maWxlLWNsb3NlPkNsb3NlPC9idXR0b24+PC9kaXY+Ci0gICAgICA8ZGl2IGNsYXNzPSJ0ZHMtY2FyZCI+Ci0gICAgICAgIDxkaXYgY2xhc3M9InRkcy1yb3ciPjxzcGFuIGNsYXNzPSJ0ZHMtcm93LWxhYmVsIj5DdXJyZW50IEVFPC9zcGFuPjxzcGFuIGNsYXNzPSJ0ZHMtcm93LXZhbHVlIj4ke2VlPy50b3RhbCAhPT0gbnVsbCAmJiBlZT8udG90YWwgIT09IHVuZGVmaW5lZCA/IGZvcm1hdE51bWJlcihlZS50b3RhbCkgOiAn4oCUJ308L3NwYW4+PC9kaXY+Ci0gICAgICAgIDxkaXYgY2xhc3M9InRkcy1yb3ciPjxzcGFuIGNsYXNzPSJ0ZHMtcm93LWxhYmVsIj5EYXlzIGVtcGxveWVkPC9zcGFuPjxzcGFuIGNsYXNzPSJ0ZHMtcm93LXZhbHVlIj4ke2Zvcm1hdE51bWJlcihlbXAuZGF5c19pbl9jb21wYW55KX08L3NwYW4+PC9kaXY+Ci0gICAgICAgIDxkaXYgY2xhc3M9InRkcy1yb3ciPjxzcGFuIGNsYXNzPSJ0ZHMtcm93LWxhYmVsIj5PbmxpbmUgc3RhdHVzPC9zcGFuPjxzcGFuIGNsYXNzPSJ0ZHMtcm93LXZhbHVlICR7b25saW5lTWV0YS50ZXh0Q2xhc3N9Ij4ke2VzY2FwZUh0bWwoU3RyaW5nKG9ubGluZVN0YXR1cykpfTwvc3Bhbj48L2Rpdj4KLSAgICAgICAgPGRpdiBjbGFzcz0idGRzLXJvdyI+PHNwYW4gY2xhc3M9InRkcy1yb3ctbGFiZWwiPkxhc3QgYWN0aW9uPC9zcGFuPjxzcGFuIGNsYXNzPSJ0ZHMtcm93LXZhbHVlICR7b25saW5lTWV0YS50ZXh0Q2xhc3N9Ij4ke2VzY2FwZUh0bWwoU3RyaW5nKGxhc3RBY3Rpb25UZXh0KSl9PC9zcGFuPjwvZGl2PgotICAgICAgPC9kaXY+Ci0gICAgICA8ZGl2IGNsYXNzPSJ0ZHMtc2VjdGlvbi1sYWJlbCI+V29ya2luZyBTdGF0czwvZGl2PgotICAgICAgPGRpdiBjbGFzcz0idGRzLWNhcmQiPgotICAgICAgICA8ZGl2IGNsYXNzPSJ0ZHMtcm93Ij48c3BhbiBjbGFzcz0idGRzLXJvdy1sYWJlbCI+TWFudWFsIExhYm9yPC9zcGFuPjxzcGFuIGNsYXNzPSJ0ZHMtcm93LXZhbHVlIj4ke2Zvcm1hdE51bWJlcihlbXAubWFudWFsX2xhYm9yKX08L3NwYW4+PC9kaXY+Ci0gICAgICAgIDxkaXYgY2xhc3M9InRkcy1yb3ciPjxzcGFuIGNsYXNzPSJ0ZHMtcm93LWxhYmVsIj5JbnRlbGxpZ2VuY2U8L3NwYW4+PHNwYW4gY2xhc3M9InRkcy1yb3ctdmFsdWUiPiR7Zm9ybWF0TnVtYmVyKGVtcC5pbnRlbGxpZ2VuY2UpfTwvc3Bhbj48L2Rpdj4KLSAgICAgICAgPGRpdiBjbGFzcz0idGRzLXJvdyI+PHNwYW4gY2xhc3M9InRkcy1yb3ctbGFiZWwiPkVuZHVyYW5jZTwvc3Bhbj48c3BhbiBjbGFzcz0idGRzLXJvdy12YWx1ZSI+JHtmb3JtYXROdW1iZXIoZW1wLmVuZHVyYW5jZSl9PC9zcGFuPjwvZGl2PgotICAgICAgPC9kaXY+Ci0gICAgICA8ZGl2IGNsYXNzPSJ0ZHMtc2VjdGlvbi1sYWJlbCI+Um9sZSBTdW1tYXJ5PC9kaXY+PGRpdiBjbGFzcz0idGRzLWJveCB0ZHMtYm94LW5ldXRyYWwiPiR7ZXNjYXBlSHRtbChyb2xlU3VtbWFyeSl9PC9kaXY+Ci0gICAgICA8ZGl2IGNsYXNzPSJ0ZHMtcHJvZmlsZS1hY3Rpb25zIj48YnV0dG9uIGNsYXNzPSJ0ZHMtYnRuIiBkYXRhLXByb2ZpbGUtdGFiPSJ0cmFpbmluZyI+VmlldyBpbiBUcmFpbmluZzwvYnV0dG9uPjxidXR0b24gY2xhc3M9InRkcy1idG4iIGRhdGEtcHJvZmlsZS10YWI9Im9wdGltaXplIj5WaWV3IGluIEVtcGxveWVlIEVmZmVjdGl2ZW5lc3M8L2J1dHRvbj48L2Rpdj4KLSAgICA8L2Rpdj5gOwotCi0gICAgY29uc3QgY2xvc2UgPSAoKSA9PiBvdmVybGF5LnJlbW92ZSgpOwotICAgIG92ZXJsYXkucXVlcnlTZWxlY3RvcignW2RhdGEtcHJvZmlsZS1jbG9zZV0nKT8uYWRkRXZlbnRMaXN0ZW5lcignY2xpY2snLCBjbG9zZSk7Ci0gICAgb3ZlcmxheS5hZGRFdmVudExpc3RlbmVyKCdjbGljaycsIChldmVudCkgPT4geyBpZiAoZXZlbnQudGFyZ2V0ID09PSBvdmVybGF5KSBjbG9zZSgpOyB9KTsKLSAgICBvdmVybGF5LnF1ZXJ5U2VsZWN0b3JBbGwoJ1tkYXRhLXByb2ZpbGUtdGFiXScpLmZvckVhY2goKGJ1dHRvbi' | base64 -d > /tmp/v1.3.67.patch
-          patch torn-company-manager.user.js < /tmp/v1.3.67.patch
+          cat > /tmp/v1367.patch <<'PATCH'
+--- a/torn-company-manager.user.js
++++ b/torn-company-manager.user.js
+@@ -1,7 +1,7 @@
+ // ==UserScript==
+ // @name         Torn Company Management Suite
+ // @namespace    torn-company-management-suite
+-// @version      1.3.66
++// @version      1.3.67
+ // @description  Local-only company management dashboard for Torn directors, embedded in the Jobs page. No company data ever leaves your browser; only your Torn User ID is checked against a public license list.
+ // @author       DooBiiE
+ // @homepageURL  https://github.com/DooBiiE/Torn-Company-Manager
+@@ -70,7 +70,7 @@
+   // TornPDA does not always expose the legacy GM_info object that desktop
+   // userscript managers provide. Try both common metadata APIs, then use the
+   // release version as a PDA-safe fallback so the UI never shows vunknown.
+-  const TDS_VERSION_FALLBACK = '1.3.66';
++  const TDS_VERSION_FALLBACK = '1.3.67';
+   const TDS_VERSION =
+     (typeof GM_info !== 'undefined' && GM_info?.script?.version) ||
+     (typeof GM !== 'undefined' && GM?.info?.script?.version) ||
+@@ -82,6 +82,7 @@
+   const STORAGE_KEY_HISTORY_BACKFILL_DAY = 'tds_history_backfill_day';
+   const STORAGE_KEY_HISTORY_BACKFILL_RESULT = 'tds_history_backfill_result';
+   const STORAGE_KEY_STAFFING_BENCHMARK_CACHE = 'tds_staffing_benchmark_cache_v1';
++  const STORAGE_KEY_DIRECTOR_NAME_CACHE = 'tds_director_name_cache_v1';
+   const STORAGE_KEY_LAST_RESULTS = 'tds_last_results_cache';
+   const STORAGE_KEY_LAST_VERDICT = 'tds_last_verdict_cache';
+   const MIN_CALL_INTERVAL_MS = 800; // ~75 req/min ceiling, well under Torn's 100/min cap
+@@ -660,9 +661,6 @@
+       .tds-employee-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; }
+       .tds-employee-name { font-weight: 700; color: var(--tds-text-strong, #f0f0f0); font-size: 13px; }
+       .tds-employee-profile-link { cursor:pointer; text-decoration:underline; text-decoration-style:dotted; text-underline-offset:3px; }
+-      .tds-profile-overlay { position:fixed; inset:0; z-index:2147483646; background:rgba(0,0,0,.58); display:flex; align-items:center; justify-content:center; padding:14px; }
+-      .tds-profile-modal { width:min(560px,96vw); max-height:86vh; overflow:auto; background:var(--tds-bg-panel,#1f1f1f); border:1px solid var(--tds-border-strong,#4a4a4a); border-radius:10px; box-shadow:0 14px 40px rgba(0,0,0,.45); padding:14px; }
+-      .tds-profile-head { display:flex; justify-content:space-between; gap:10px; align-items:flex-start; margin-bottom:10px; }
+       .tds-profile-actions { display:flex; flex-wrap:wrap; gap:6px; margin-top:12px; }
+       .tds-employee-deeplink-highlight {
+         outline: 2px solid var(--tds-accent, #3ddc84);
+@@ -1463,17 +1461,7 @@
+     setTimeout(() => tryFocus(), 0);
+   }
+ 
+-  function openEmployeeDetail(panel, id, name) {
+-    const employee = findEmployeeByIdOrName(id, name);
+-    if (!employee) return;
+-    panel.querySelector('.tds-profile-overlay')?.remove();
+-
+-    const emp = employee.raw || {};
+-    const ee = getEmployeeEffectiveness(emp);
+-    const lastAction = emp.last_action && typeof emp.last_action === 'object' ? emp.last_action : null;
+-    const onlineStatus = lastAction?.status || '—';
+-    const onlineMeta = employeeOnlineStatusMeta(onlineStatus);
+-    const lastActionText = lastAction?.relative || formatTimestampRelative(lastAction?.timestamp) || '—';
++  function employeeRoleSummary(employee) {
+     let roleSummary = 'Open Employee Effectiveness for detailed role analysis.';
+ 
+     try {
+@@ -1482,43 +1470,60 @@
+       const typeId = numericValue(findValueDeep(profile, ['company_type', 'type_id', 'type']));
+       const typeName = resolveCompanyTypeName(reference, typeId);
+       const positions = extractPositionRequirements(reference, typeId).map((position) => ({
+-        ...position, resolvedSpecial: resolvePositionSpecial(position, typeId, typeName),
++        ...position,
++        resolvedSpecial: resolvePositionSpecial(position, typeId, typeName),
+       }));
+-      const row = positions.length ? buildEmployeePositionMatrix([employee], positions)[0] : null;
++
++      const row = positions.length
++        ? buildEmployeePositionMatrix([employee], positions)[0]
++        : null;
++
+       if (row?.best?.position?.name) {
+-        roleSummary = `Best estimated role: ${row.best.position.name}${typeof row.best.estimate?.total === 'number' ? ` · ${formatNumber(row.best.estimate.total)} EE` : ''}`;
++        roleSummary =
++          `Best estimated role: ${row.best.position.name}` +
++          `${typeof row.best.estimate?.total === 'number'
++            ? ` · ${formatNumber(row.best.estimate.total)} EE`
++            : ''}`;
+       }
+-    } catch (err) { console.warn('[TDS] Employee summary role analysis unavailable:', err); }
++    } catch (err) {
++      console.warn('[TDS] Employee inline role summary unavailable:', err);
++    }
+ 
+-    const overlay = document.createElement('div');
+-    overlay.className = 'tds-profile-overlay';
+-    overlay.innerHTML = `<div class="tds-profile-modal" role="dialog" aria-modal="true">
+-      <div class="tds-profile-head"><div><div class="tds-employee-name" style="font-size:17px;">${escapeHtml(String(employee.name))}</div><div class="tds-employee-meta">${escapeHtml(String(employee.position || 'Employee'))}</div></div><button class="tds-btn" data-profile-close>Close</button></div>
+-      <div class="tds-card">
+-        <div class="tds-row"><span class="tds-row-label">Current EE</span><span class="tds-row-value">${ee?.total !== null && ee?.total !== undefined ? formatNumber(ee.total) : '—'}</span></div>
+-        <div class="tds-row"><span class="tds-row-label">Days employed</span><span class="tds-row-value">${formatNumber(emp.days_in_company)}</span></div>
+-        <div class="tds-row"><span class="tds-row-label">Online status</span><span class="tds-row-value ${onlineMeta.textClass}">${escapeHtml(String(onlineStatus))}</span></div>
+-        <div class="tds-row"><span class="tds-row-label">Last action</span><span class="tds-row-value ${onlineMeta.textClass}">${escapeHtml(String(lastActionText))}</span></div>
+-      </div>
+-      <div class="tds-section-label">Working Stats</div>
+-      <div class="tds-card">
+-        <div class="tds-row"><span class="tds-row-label">Manual Labor</span><span class="tds-row-value">${formatNumber(emp.manual_labor)}</span></div>
+-        <div class="tds-row"><span class="tds-row-label">Intelligence</span><span class="tds-row-value">${formatNumber(emp.intelligence)}</span></div>
+-        <div class="tds-row"><span class="tds-row-label">Endurance</span><span class="tds-row-value">${formatNumber(emp.endurance)}</span></div>
+-      </div>
+-      <div class="tds-section-label">Role Summary</div><div class="tds-box tds-box-neutral">${escapeHtml(roleSummary)}</div>
+-      <div class="tds-profile-actions"><button class="tds-btn" data-profile-tab="training">View in Training</button><button class="tds-btn" data-profile-tab="optimize">View in Employee Effectiveness</button></div>
+-    </div>`;
+-
+-    const close = () => overlay.remove();
+-    overlay.querySelector('[data-profile-close]')?.addEventListener('click', close);
+-    overlay.addEventListener('click', (event) => { if (event.target === overlay) close(); });
+-    overlay.querySelectorAll('[data-profile-tab]').forEach((button) => button.addEventListener('click', () => {
+-      const tab = button.dataset.profileTab;
+-      close();
+-      focusEmployeeInTab(panel, tab, employee);
+-    }));
+-    panel.appendChild(overlay);
++    return roleSummary;
++  }
++
++  function openEmployeeDetail(panel, id, name) {
++    const employee = findEmployeeByIdOrName(id, name);
++    if (!employee) return;
++
++    // Employee details now live in the existing collapsible Overview row.
++    // From any tab, jump to Overview and expand/highlight the selected employee.
++    switchTab(panel, 'overview');
++
++    const selector = employeeDeepLinkSelector(employee.id, employee.name);
++
++    const tryOpen = (attempt = 0) => {
++      const overview = panel.querySelector('[data-tabpanel="overview"]');
++      const node = selector ? overview?.querySelector(selector) : null;
++      const details = node?.closest('details.tds-employee-row') || node;
++
++      if (details) {
++        if (details.tagName === 'DETAILS') details.open = true;
++        details.classList.add('tds-employee-deeplink-highlight');
++        details.scrollIntoView({ behavior: 'smooth', block: 'center' });
++
++        setTimeout(() => {
++          details.classList.remove('tds-employee-deeplink-highlight');
++        }, 5000);
++        return;
++      }
++
++      if (attempt < 12) {
++        setTimeout(() => tryOpen(attempt + 1), 150);
++      }
++    };
++
++    setTimeout(() => tryOpen(), 0);
+   }
+ 
+   function bindEmployeeProfileLinks(panel) {
+@@ -1619,7 +1624,15 @@
+           formatter = formatPercent;
+         }
+ 
+-        html += companyOverviewRow(label, value, formatter);
++        if (label === 'Director') {
++          html += `<div class="tds-row">
++            <span class="tds-row-label">Director</span>
++            <span class="tds-row-value" id="tds-director-value">${escapeHtml(formatter(value))}</span>
++          </div>`;
++          state.currentDirectorValue = value;
++        } else {
++          html += companyOverviewRow(label, value, formatter);
++        }
+         if (row) shown.add(row.path);
+         shownFieldNames.add(normalizeFieldName(key));
+       }
+@@ -1739,6 +1752,21 @@
+                 <div class="tds-row"><span class="tds-row-label">Detail</span><span class="tds-row-value">${escapeHtml(String(stateDetail))}</span></div>
+                 <div class="tds-row"><span class="tds-row-label">Last action</span><span class="tds-row-value ${onlineMeta.textClass}">${escapeHtml(String(lastActionText))}</span></div>
+               ` : ''}
++
++              <div class="tds-section-label tds-employee-subheading" style="margin-top:10px;">Role Summary</div>
++              <div class="tds-box tds-box-neutral">${escapeHtml(employeeRoleSummary(employee))}</div>
++              <div class="tds-profile-actions">
++                <button class="tds-btn" data-inline-employee-tab="training"
++                  data-employee-id="${escapeHtml(String(employee.id))}"
++                  data-employee-name="${escapeHtml(String(employee.name))}">
++                  View in Training
++                </button>
++                <button class="tds-btn" data-inline-employee-tab="optimize"
++                  data-employee-id="${escapeHtml(String(employee.id))}"
++                  data-employee-name="${escapeHtml(String(employee.name))}">
++                  View in Employee Effectiveness
++                </button>
++              </div>
+             </div>
+           </details>`;
+       });
+@@ -1753,6 +1781,31 @@
+ 
+     el.innerHTML = html;
+     bindEmployeeProfileLinks(panel);
++
++    if (state.currentDirectorValue !== undefined) {
++      refreshDirectorName(panel, state.currentDirectorValue).catch((err) =>
++        console.warn('[TDS] Director name refresh failed:', err)
++      );
++    }
++
++    el.querySelectorAll('[data-inline-employee-tab]').forEach((button) => {
++      button.addEventListener('click', (event) => {
++        event.preventDefault();
++        event.stopPropagation();
++
++        const employee = findEmployeeByIdOrName(
++          button.dataset.employeeId,
++          button.dataset.employeeName
++        );
++        if (!employee) return;
++
++        focusEmployeeInTab(
++          panel,
++          button.dataset.inlineEmployeeTab,
++          employee
++        );
++      });
++    });
+   }
+ 
+   function escapeHtml(str) {
+@@ -2298,25 +2351,109 @@
+   }
+ 
+   function formatDirectorName(value, employees, results) {
++    let directorId = null;
++    let directorName = null;
++
+     if (value && typeof value === 'object') {
+-      const objectName = findValueDeep(value, ['name', 'player_name', 'username']);
+-      if (objectName) return String(objectName);
+-      const objectId = findValueDeep(value, ['id', 'player_id', 'user_id']);
+-      if (objectId !== null) value = objectId;
++      directorName = findValueDeep(value, ['name', 'player_name', 'username']);
++      directorId = findValueDeep(value, ['id', 'player_id', 'user_id']);
++    } else {
++      directorId = value;
+     }
+ 
+-    const directorId = String(value ?? '').trim();
+-    if (!directorId) return '—';
++    directorId = String(directorId ?? '').trim();
++    if (!directorId) return directorName ? String(directorName) : '—';
+ 
+-    const rosterMatch = (employees || []).find((employee) => String(employee.id) === directorId);
+-    if (rosterMatch?.name && !String(rosterMatch.name).startsWith('#')) return String(rosterMatch.name);
++    if (!directorName) {
++      const rosterMatch = (employees || []).find(
++        (employee) => String(employee.id) === directorId
++      );
++      if (rosterMatch?.name && !String(rosterMatch.name).startsWith('#')) {
++        directorName = String(rosterMatch.name);
++      }
++    }
+ 
+-    const basic = findRaw(results, 'user', 'basic');
+-    const basicId = basic && findValueDeep(basic, ['player_id', 'user_id', 'id']);
+-    const basicName = basic && findValueDeep(basic, ['name', 'player_name', 'username']);
+-    if (basicId !== null && String(basicId) === directorId && basicName) return String(basicName);
++    if (!directorName) {
++      const basic = findRaw(results, 'user', 'basic');
++      const basicId = basic && findValueDeep(basic, ['player_id', 'user_id', 'id']);
++      const basicName = basic && findValueDeep(basic, ['name', 'player_name', 'username']);
++      if (
++        basicId !== null &&
++        String(basicId) === directorId &&
++        basicName
++      ) {
++        directorName = String(basicName);
++      }
++    }
+ 
+-    return String(value);
++    if (!directorName) {
++      const cached = GM_getValue(STORAGE_KEY_DIRECTOR_NAME_CACHE, null);
++      if (
++        cached &&
++        String(cached.id || '') === directorId &&
++        cached.name &&
++        Date.now() - Number(cached.timestamp || 0) < 24 * 60 * 60 * 1000
++      ) {
++        directorName = String(cached.name);
++      }
++    }
++
++    return directorName
++      ? `${directorName} [${directorId}]`
++      : directorId;
++  }
++
++  async function refreshDirectorName(panel, directorValue) {
++    let directorId = directorValue;
++
++    if (directorValue && typeof directorValue === 'object') {
++      const existingName = findValueDeep(
++        directorValue,
++        ['name', 'player_name', 'username']
++      );
++      const objectId = findValueDeep(
++        directorValue,
++        ['id', 'player_id', 'user_id']
++      );
++
++      if (existingName && objectId !== null) return;
++      directorId = objectId;
++    }
++
++    directorId = String(directorId ?? '').trim();
++    if (!directorId || !/^\d+$/.test(directorId)) return;
++
++    const current = panel.querySelector('#tds-director-value');
++    if (!current || /\[\d+\]$/.test(current.textContent || '')) return;
++
++    const cached = GM_getValue(STORAGE_KEY_DIRECTOR_NAME_CACHE, null);
++    if (
++      cached &&
++      String(cached.id || '') === directorId &&
++      cached.name &&
++      Date.now() - Number(cached.timestamp || 0) < 24 * 60 * 60 * 1000
++    ) {
++      current.textContent = `${cached.name} [${directorId}]`;
++      return;
++    }
++
++    try {
++      const data = await ApiClient.call('user', 'basic', directorId);
++      const name = findValueDeep(data, ['name', 'player_name', 'username']);
++
++      if (!name) return;
++
++      GM_setValue(STORAGE_KEY_DIRECTOR_NAME_CACHE, {
++        id: directorId,
++        name: String(name),
++        timestamp: Date.now(),
++      });
++
++      const target = panel.querySelector('#tds-director-value');
++      if (target) target.textContent = `${name} [${directorId}]`;
++    } catch (err) {
++      console.warn('[TDS] Director name lookup unavailable:', err);
++    }
+   }
+ 
+   function formatCompanyType(value, results) {
+PATCH
+          git apply --check /tmp/v1367.patch
+          git apply /tmp/v1367.patch
           node --check torn-company-manager.user.js
           rm .github/workflows/apply-v1.3.67.yml
           git config user.name 'ChatGPT Release Bot'
@@ -27,4 +374,3 @@ jobs:
           git add torn-company-manager.user.js .github/workflows/apply-v1.3.67.yml
           git commit -m 'Release v1.3.67 inline employee profile and director name'
           git push
-
