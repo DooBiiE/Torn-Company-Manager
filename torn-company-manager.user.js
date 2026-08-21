@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Company Management Suite
 // @namespace    torn-company-management-suite
-// @version      1.3.71
+// @version      1.4.0
 // @description  Local-only company management dashboard for Torn directors, embedded in the Jobs page. No company data ever leaves your browser; only your Torn User ID is checked against a public license list.
 // @author       DooBiiE
 // @homepageURL  https://github.com/DooBiiE/Torn-Company-Manager
@@ -70,7 +70,7 @@
   // TornPDA does not always expose the legacy GM_info object that desktop
   // userscript managers provide. Try both common metadata APIs, then use the
   // release version as a PDA-safe fallback so the UI never shows vunknown.
-  const TDS_VERSION_FALLBACK = '1.3.71';
+  const TDS_VERSION_FALLBACK = '1.4.0';
   const TDS_VERSION =
     (typeof GM_info !== 'undefined' && GM_info?.script?.version) ||
     (typeof GM !== 'undefined' && GM?.info?.script?.version) ||
@@ -807,6 +807,31 @@
         padding-bottom: 8px;
       }
       .tds-training-debt-table tbody tr:last-child td { border-bottom: none; }
+      .tds-training-plan {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+        gap: 8px;
+        margin: 10px 0;
+      }
+      .tds-training-plan-card {
+        border: 1px solid var(--tds-border, #444);
+        border-radius: 6px;
+        padding: 10px;
+        background: var(--tds-panel-2, rgba(255,255,255,0.03));
+      }
+      .tds-training-plan-step {
+        display: flex;
+        justify-content: space-between;
+        gap: 10px;
+        padding: 7px 0;
+        border-bottom: 1px solid var(--tds-border-soft, rgba(255,255,255,.08));
+      }
+      .tds-training-plan-step:last-child { border-bottom: none; }
+      .tds-training-plan-rank {
+        display: inline-block;
+        min-width: 28px;
+        font-weight: 700;
+      }
       .tds-stock-table th,
       .tds-stock-table td {
         text-align: center !important;
@@ -6501,7 +6526,7 @@
 
     if (mode === 'priority') {
       html += `<div class="tds-box tds-box-info">
-        Sorted by <strong>current effectiveness, lowest first</strong>. This mode answers “who currently needs EE help most?”; Rotational / Debt answers “who has received less than their fair share of actual trains?”
+        Sorted by <strong>current effectiveness, lowest first</strong>. This is an EE-priority view, not the Training Planner. The planner lives under Rotational / Debt because that mode has enough historical evidence to simulate a fair future queue.
       </div>`;
 
       const withEE = employees.map((e) => ({ ...e, ee: findEffectivenessField(e.raw) }));
@@ -6818,6 +6843,243 @@
     return { rows, totalObserved, totalWeight };
   }
 
+  function resolveAvailableCompanyTrains(results) {
+    const sources = [
+      findRaw(results, 'company', 'profile'),
+      findRaw(results, 'company', 'detailed'),
+    ].filter(Boolean);
+
+    const aliases = [
+      'trains_available', 'available_trains', 'trains', 'train_count',
+      'trains_remaining', 'company_trains'
+    ];
+
+    for (const source of sources) {
+      const value = numericValue(findValueDeep(source, aliases));
+      if (value !== null && value >= 0) return Math.floor(value);
+    }
+
+    return null;
+  }
+
+  function buildRotationalTrainingPlan(debt, requestedCount) {
+    const eligibleRows = (debt?.rows || [])
+      .filter((row) => Number(row.eligibleWeight) > 0)
+      .map((row) => ({
+        employee: row.employee,
+        eligibleWeight: Number(row.eligibleWeight) || 0,
+        actual: Number(row.actual) || 0,
+        planned: 0,
+      }));
+
+    const totalWeight = eligibleRows.reduce(
+      (sum, row) => sum + row.eligibleWeight,
+      0
+    );
+    const observedTotal = eligibleRows.reduce(
+      (sum, row) => sum + row.actual,
+      0
+    );
+
+    if (!eligibleRows.length || totalWeight <= 0 || requestedCount <= 0) {
+      return { steps: [], allocations: [], count: 0 };
+    }
+
+    const steps = [];
+
+    for (let i = 0; i < requestedCount; i += 1) {
+      const projectedTotal = observedTotal + i + 1;
+
+      const ranked = eligibleRows
+        .map((row) => {
+          const expectedAfterTrain =
+            projectedTotal * (row.eligibleWeight / totalWeight);
+          const receivedBeforeChoice = row.actual + row.planned;
+          const projectedDebt = expectedAfterTrain - receivedBeforeChoice;
+
+          return {
+            row,
+            projectedDebt,
+            receivedBeforeChoice,
+          };
+        })
+        .sort((a, b) => {
+          if (b.projectedDebt !== a.projectedDebt) {
+            return b.projectedDebt - a.projectedDebt;
+          }
+
+          const aLast = Number(
+            debt.rows.find(
+              (source) =>
+                String(source.employee.id) === String(a.row.employee.id)
+            )?.lastTrain || 0
+          );
+          const bLast = Number(
+            debt.rows.find(
+              (source) =>
+                String(source.employee.id) === String(b.row.employee.id)
+            )?.lastTrain || 0
+          );
+
+          if (aLast !== bLast) return aLast - bLast;
+
+          return String(a.row.employee.name).localeCompare(
+            String(b.row.employee.name)
+          );
+        });
+
+      const chosen = ranked[0];
+      if (!chosen) break;
+
+      chosen.row.planned += 1;
+
+      steps.push({
+        number: i + 1,
+        employee: chosen.row.employee,
+        debtBefore: chosen.projectedDebt,
+      });
+    }
+
+    const allocations = eligibleRows
+      .filter((row) => row.planned > 0)
+      .sort((a, b) => {
+        if (b.planned !== a.planned) return b.planned - a.planned;
+        return String(a.employee.name).localeCompare(
+          String(b.employee.name)
+        );
+      });
+
+    return {
+      steps,
+      allocations,
+      count: steps.length,
+    };
+  }
+
+  function renderTrainingPlanner(debt, results) {
+    const availableTrains = resolveAvailableCompanyTrains(results);
+
+    // If Torn tells us the exact saved balance, plan that balance. Limit the
+    // visible simulation to 50 trains so a very large saved pool does not
+    // create an enormous mobile page. Without a readable balance, preview 5.
+    const requestedCount =
+      availableTrains !== null
+        ? Math.min(Math.max(availableTrains, 0), 50)
+        : 5;
+
+    const plan = buildRotationalTrainingPlan(debt, requestedCount);
+
+    let html = `
+      <div class="tds-section-label">Training Planner</div>
+      <div class="tds-box tds-box-info">
+        <strong>Fair Rotation Plan:</strong>
+        this is a read-only forecast built from the same observed training
+        history and eligibility weighting used by Rotational / Debt.
+        After every planned train, the suite recalculates the queue before
+        choosing the next employee.
+      </div>`;
+
+    if (availableTrains !== null) {
+      html += `
+        <div class="tds-training-plan">
+          <div class="tds-training-plan-card">
+            <div class="tds-stock-summary-label">Trains Available</div>
+            <div class="tds-stock-summary-value">${formatNumber(availableTrains)}</div>
+          </div>
+          <div class="tds-training-plan-card">
+            <div class="tds-stock-summary-label">Planned Now</div>
+            <div class="tds-stock-summary-value">${formatNumber(plan.count)}</div>
+          </div>
+          <div class="tds-training-plan-card">
+            <div class="tds-stock-summary-label">Eligible Staff</div>
+            <div class="tds-stock-summary-value">${formatNumber(
+              debt.rows.filter((row) => row.eligibleWeight > 0).length
+            )}</div>
+          </div>
+        </div>`;
+
+      if (availableTrains > 50) {
+        html += `
+          <div class="tds-box tds-box-neutral">
+            You currently have ${formatNumber(availableTrains)} trains available.
+            To keep the page manageable on PDA, the visible planner previews
+            the first <strong>50</strong>. Reopening the planner after trains
+            are assigned will recalculate from the latest history.
+          </div>`;
+      }
+    } else {
+      html += `
+        <div class="tds-box tds-box-neutral">
+          Torn did not expose a readable current train balance in the cached
+          company data, so the planner is previewing the <strong>next 5</strong>
+          fair-rotation assignments.
+        </div>`;
+    }
+
+    if (!plan.steps.length) {
+      html += `
+        <div class="tds-box tds-box-neutral">
+          ${availableTrains === 0
+            ? 'There are currently no company trains available to plan.'
+            : 'There is not enough eligible training-history data to build a queue yet.'}
+        </div>`;
+      return html;
+    }
+
+    html += `
+      <div class="tds-card">
+        <div class="tds-card-title">Planned train order</div>`;
+
+    for (const step of plan.steps) {
+      html += `
+        <div class="tds-training-plan-step">
+          <span>
+            <span class="tds-training-plan-rank">#${step.number}</span>
+            <strong>${escapeHtml(String(step.employee.name))}</strong>
+            <span class="tds-v-dim"> · ${escapeHtml(String(step.employee.position || 'Employee'))}</span>
+          </span>
+          <span class="tds-v-dim">
+            debt before train ${step.debtBefore.toFixed(2)}
+          </span>
+        </div>`;
+    }
+
+    html += `</div>
+      <div class="tds-section-label">Planned Allocation Summary</div>
+      <div style="overflow-x:auto;">
+        <table class="tds-table tds-training-debt-table">
+          <thead>
+            <tr>
+              <th>Employee</th>
+              <th>Position</th>
+              <th>Planned Trains</th>
+            </tr>
+          </thead>
+          <tbody>`;
+
+    for (const row of plan.allocations) {
+      html += `
+        <tr>
+          <td><strong>${escapeHtml(String(row.employee.name))}</strong></td>
+          <td>${escapeHtml(String(row.employee.position || '—'))}</td>
+          <td>${formatNumber(row.planned)}</td>
+        </tr>`;
+    }
+
+    html += `
+          </tbody>
+        </table>
+      </div>
+      <div class="tds-box tds-box-neutral">
+        <strong>Planner scope:</strong> this planner optimises fairness of
+        company-train distribution. It does not claim to predict the exact
+        working-stat gain from a train, and it never performs a training action
+        in Torn.
+      </div>`;
+
+    return html;
+  }
+
   async function renderRotationalDebt(panel, employees, results) {
     const el = panel.querySelector('[data-tabpanel="training"]');
     if (!el || state.trainingMode !== 'rotational') return;
@@ -6871,7 +7133,10 @@
     const debt = calculateRotationalDebt(employees, events, coverageStart);
     const next = debt.rows.find((row) => row.eligibleWeight > 0) || null;
 
-    let html = `
+    let html = renderTrainingPlanner(debt, results);
+
+    html += `
+      <div class="tds-section-label">Rotational / Debt Evidence</div>
       <div class="tds-box tds-box-info">
         <strong>Rotational / Debt is live.</strong>
         It found <strong>${formatNumber(events.reduce((sum, event) => sum + event.quantity, 0))}</strong> train(s) across
