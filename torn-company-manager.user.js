@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Company Management Suite
 // @namespace    torn-company-management-suite
-// @version      1.5.1
+// @version      1.5.2
 // @description  Local-only company management dashboard for Torn directors, embedded in the Jobs page. No company data ever leaves your browser; only your Torn User ID is checked against a public license list.
 // @author       DooBiiE
 // @homepageURL  https://github.com/DooBiiE/Torn-Company-Manager
@@ -70,7 +70,7 @@
   // TornPDA does not always expose the legacy GM_info object that desktop
   // userscript managers provide. Try both common metadata APIs, then use the
   // release version as a PDA-safe fallback so the UI never shows vunknown.
-  const TDS_VERSION_FALLBACK = '1.5.1';
+  const TDS_VERSION_FALLBACK = '1.5.2';
   const TDS_VERSION =
     (typeof GM_info !== 'undefined' && GM_info?.script?.version) ||
     (typeof GM !== 'undefined' && GM?.info?.script?.version) ||
@@ -1452,6 +1452,14 @@
     </div>`;
   }
 
+  function directorDataAdvisory(featureName = 'This section') {
+    if (isDirectorAccess()) return '';
+    return `<div class="tds-box tds-box-info">
+      <strong>Access note:</strong> ${escapeHtml(featureName)} shows all information available to your current API key and company role.
+      Some additional company information may only be returned to the company director.
+    </div>`;
+  }
+
   function isDirectorAccess() {
     const verdict = state.lastVerdict || GM_getValue(STORAGE_KEY_LAST_VERDICT, null);
     return verdict?.level === 'director';
@@ -1852,11 +1860,8 @@
   async function renderOverviewIntelligence(panel, results) {
     const target = panel.querySelector('#tds-overview-intelligence');
     if (!target) return;
+    const accessAdvisory = directorDataAdvisory('Overview company intelligence');
 
-    if (!isDirectorAccess()) {
-      target.innerHTML = directorFeatureNotice('Attention Centre, What Changed? and Company Timeline');
-      return;
-    }
 
     try {
       const snapshots = collapseToDaily(await getSnapshotsSorted());
@@ -1930,13 +1935,13 @@
         They describe changes observed together and do not claim that one change caused another.
       </div></details>`;
 
-      target.innerHTML = html;
+      target.innerHTML = accessAdvisory + html;
 
       target.querySelectorAll('[data-attention-tab]').forEach((node) => {
         node.addEventListener('click', () => switchTab(panel, node.dataset.attentionTab));
       });
     } catch (err) {
-      target.innerHTML = `<div class="tds-box tds-box-warn">Company change intelligence could not be calculated: ${escapeHtml(String(err?.message || err))}</div>`;
+      target.innerHTML = accessAdvisory + `<div class="tds-box tds-box-warn">Company change intelligence could not be calculated: ${escapeHtml(String(err?.message || err))}</div>`;
     }
   }
 
@@ -4071,11 +4076,9 @@
       el.innerHTML = `<div class="tds-box tds-box-neutral">Run the diagnostic first (Overview tab or the \u27f3 button) \u2014 Finance reads from that data plus your local snapshot history.</div>`;
       return;
     }
-    if (!isDirectorAccess()) {
-      el.innerHTML = directorFeatureNotice('Company Financials');
-      return;
-    }
 
+
+    let accessAdvisory = directorDataAdvisory('Company Financials');
 
     const profile = findRaw(results, 'company', 'profile');
     const detailed = findRaw(results, 'company', 'detailed');
@@ -4083,7 +4086,7 @@
     const blockedProfile = findBlockedReason(results, 'company', 'profile');
     const blockedDetailed = findBlockedReason(results, 'company', 'detailed');
 
-    let html = '';
+    let html = accessAdvisory;
 
     if (!profile && !detailed) {
       html += `<div class="tds-box tds-box-danger"><strong>Company profile unavailable.</strong> ${blockedProfile || 'No data returned.'} Finance needs at least this to show anything.</div>`;
@@ -5301,10 +5304,6 @@
       el.innerHTML = `<div class="tds-box tds-box-neutral">Run Diagnostics once so Stock Management can read your company stock.</div>`;
       return;
     }
-    if (!isDirectorAccess()) {
-      el.innerHTML = directorFeatureNotice('Stock Management');
-      return;
-    }
 
 
     const stockRaw = findRaw(results, 'company', 'stock');
@@ -5315,19 +5314,21 @@
       return;
     }
 
+    const accessAdvisory = directorDataAdvisory('Stock Management');
+
     const items = extractStockItems(stockRaw);
 
     if (el.hidden && !refresh) {
-      el.innerHTML = `<div class="tds-box tds-box-neutral">Stock data is ready. Open this tab to load recent sales history, restock targets, margins and read-only pricing recommendations.</div>`;
+      el.innerHTML = accessAdvisory + `<div class="tds-box tds-box-neutral">Stock data is ready. Open this tab to load recent sales history, restock targets, margins and read-only pricing recommendations.</div>`;
       return;
     }
 
     if (!items.length) {
-      el.innerHTML = `<div class="tds-box tds-box-warn"><strong>Stock data was returned, but no product rows could be recognised.</strong><br>The suite supports Torn's current <code>company_stock → product name → { cost, in_stock, on_order, price, rrp, sold_amount, sold_worth }</code> structure as well as older field-based shapes. If this still appears, please send the Company stock field names from Diagnostics.</div>`;
+      el.innerHTML = accessAdvisory + `<div class="tds-box tds-box-warn"><strong>Stock data was returned, but no product rows could be recognised.</strong><br>The suite supports Torn's current <code>company_stock → product name → { cost, in_stock, on_order, price, rrp, sold_amount, sold_worth }</code> structure as well as older field-based shapes. If this still appears, please send the Company stock field names from Diagnostics.</div>`;
       return;
     }
 
-    el.innerHTML = `<div class="tds-box tds-box-neutral">Loading recent sales and pricing history…</div>`;
+    el.innerHTML = accessAdvisory + `<div class="tds-box tds-box-neutral">Loading recent sales and pricing history…</div>`;
 
     let sales = { totals: new Map(), parsedEvents: 0, newsEntries: 0, oldestTimestamp: null };
     let newsError = null;
@@ -5344,7 +5345,7 @@
       newsError = err;
     }
 
-    let html = `
+    let html = accessAdvisory + `
       <div class="tds-box tds-box-info">
         <strong>Read-only pricing assistant:</strong> this tab does <strong>not</strong> submit prices or interact with Torn's Pricing form.
         It only analyses data Torn returns and suggests <strong>Hold / Consider raising / Consider lowering</strong>.
