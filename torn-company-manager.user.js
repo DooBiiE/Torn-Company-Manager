@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Company Management Suite
 // @namespace    torn-company-management-suite
-// @version      1.5.2
+// @version      1.6.0
 // @description  Local-only company management dashboard for Torn directors, embedded in the Jobs page. No company data ever leaves your browser; only your Torn User ID is checked against a public license list.
 // @author       DooBiiE
 // @homepageURL  https://github.com/DooBiiE/Torn-Company-Manager
@@ -70,7 +70,7 @@
   // TornPDA does not always expose the legacy GM_info object that desktop
   // userscript managers provide. Try both common metadata APIs, then use the
   // release version as a PDA-safe fallback so the UI never shows vunknown.
-  const TDS_VERSION_FALLBACK = '1.5.2';
+  const TDS_VERSION_FALLBACK = '1.6.0';
   const TDS_VERSION =
     (typeof GM_info !== 'undefined' && GM_info?.script?.version) ||
     (typeof GM !== 'undefined' && GM?.info?.script?.version) ||
@@ -1116,7 +1116,7 @@
     lastRunAt: null,
     diagnosticRunning: false,
     panel: null,
-    benchmark: { tier: 'same', cache: {}, snapshot: null, staffingCache: {} }, // compare + on-demand staffing cache
+    benchmark: { tier: 'same', cache: {}, snapshot: null, staffingCache: {}, nextStarCache: {} }, // compare + on-demand staffing cache
     stock: { loading: false, newsCache: null, newsCacheAt: 0 },
   };
 
@@ -1963,10 +1963,11 @@
       html += `<div class="tds-box tds-box-danger">Access level could not be confirmed yet. Run Diagnostics to refresh it.</div>`;
     }
 
-    const profile = findRaw(results, 'company', 'profile');
-    const detailed = findRaw(results, 'company', 'detailed');
-    const employeesRaw = findRaw(results, 'company', 'employees');
-    const employees = extractEmployeesEntries(employeesRaw);
+    const companyData = normalizeCompanyData(results);
+    const profile = companyData.raw.profile;
+    const detailed = companyData.raw.detailed;
+    const employeesRaw = companyData.raw.employees;
+    const employees = companyData.employees.rows;
 
     html += `<div id="tds-overview-intelligence">
       <div class="tds-section-label">Attention Centre</div>
@@ -1982,13 +1983,8 @@
         skipObjectKeys: ['employees', 'employee', 'positions']
       });
 
-      const capacity = numericValue(findValueDeep(profile, [
-        'employees_capacity', 'employee_capacity', 'max_employees',
-        'maximum_employees', 'capacity'
-      ]));
-      const employeeCount = employees.length || numericValue(findValueDeep(profile, [
-        'employees_hired', 'employee_count', 'employees_count', 'num_employees'
-      ]));
+      const capacity = companyData.company.employeeCapacity;
+      const employeeCount = companyData.employees.count;
 
       // Split high-level identity from operational metrics so Overview is
       // easier to scan on both desktop and PDA.
@@ -2030,31 +2026,24 @@
       };
 
       const explicitMetrics = {
-        Rating: findCompanyMetric(['rating', 'stars', 'star_rating', 'company_rating']),
-        Popularity: findCompanyMetric(['popularity', 'company_popularity']),
-        Efficiency: findCompanyMetric(['efficiency', 'company_efficiency']),
-        Environment: findCompanyMetric(['environment', 'company_environment']),
-        'Trains Available': findCompanyMetric([
-          'trains_available', 'available_trains', 'trains', 'train_count',
-          'trains_remaining', 'company_trains'
-        ]),
-        'Daily Income': findCompanyMetric(['daily_income', 'income_daily']),
-        'Daily Customers': findCompanyMetric(['daily_customers', 'customers_daily']),
-        'Weekly Income': findCompanyMetric(['weekly_income', 'income_weekly']),
-        'Weekly Customers': findCompanyMetric(['weekly_customers', 'customers_weekly']),
-        'Company Bank': findCompanyMetric(['company_bank', 'bank', 'company_funds']),
-        'Advertising Budget': findCompanyMetric([
-          'advertising_budget', 'advertising', 'ad_budget', 'daily_advertising'
-        ]),
-        'Company Value': findCompanyMetric([
-          'company_value', 'value', 'market_value', 'sell_value'
-        ]),
-        'Storage': findCompanyMetric([
-          'storage', 'storage_space', 'storage_size', 'warehouse_size'
-        ]),
-        'Applications Allowed': findCompanyMetric([
-          'applications_allowed', 'applications_open', 'accepting_applications'
-        ])
+        Name: companyData.identity.name,
+        Type: companyData.identity.typeName || companyData.identity.typeId,
+        Director: companyData.identity.director,
+        ID: companyData.identity.id,
+        Rating: companyData.company.rating,
+        Popularity: companyData.company.popularity,
+        Efficiency: companyData.company.efficiency,
+        Environment: companyData.company.environment,
+        'Trains Available': companyData.company.trains,
+        'Daily Income': companyData.financial.dailyIncome,
+        'Daily Customers': companyData.financial.dailyCustomers,
+        'Weekly Income': companyData.financial.weeklyIncome,
+        'Weekly Customers': companyData.financial.weeklyCustomers,
+        'Company Bank': companyData.financial.companyBank,
+        'Advertising Budget': companyData.financial.advertisingBudget,
+        'Company Value': companyData.financial.companyValue,
+        'Storage': companyData.company.storage,
+        'Applications Allowed': companyData.company.applicationsAllowed
       };
 
       const preferredRows = [];
@@ -2772,6 +2761,230 @@
     return null;
   }
 
+
+  // ---------------------------------------------------------------------
+  // CENTRAL COMPANY DATA NORMALIZATION
+  // ---------------------------------------------------------------------
+  // Torn has changed/wrapped company response fields over time. Every major
+  // tab should read the same normalized shape rather than maintaining its own
+  // slightly different alias list. Raw payloads remain available for
+  // diagnostics and fields that the normalizer does not explicitly model.
+  const companyDataCache = new WeakMap();
+
+  function firstCompanyValue(sources, aliases) {
+    for (const source of sources || []) {
+      if (!source || typeof source !== 'object') continue;
+      const value = findValueDeep(source, aliases);
+      if (value !== null && value !== undefined && value !== '') return value;
+    }
+    return null;
+  }
+
+  function firstCompanyNumber(sources, aliases) {
+    const value = firstCompanyValue(sources, aliases);
+    return numericValue(value);
+  }
+
+  function companyProfileCandidates(profile) {
+    if (!profile || typeof profile !== 'object') return [];
+
+    const candidates = [profile];
+    for (const key of ['company', 'profile', 'data']) {
+      const value = profile[key];
+      if (value && typeof value === 'object' && !Array.isArray(value)) {
+        candidates.push(value);
+      }
+    }
+    return candidates;
+  }
+
+  function normalizeCompanyCore(profile, detailed, employeesRaw, results = null) {
+    const sources = [profile, detailed].filter(Boolean);
+    const candidates = companyProfileCandidates(profile);
+    const employees = extractEmployeesEntries(employeesRaw);
+
+    let id = null;
+    let name = null;
+    let typeId = null;
+    let typeName = null;
+    let rating = null;
+    let director = null;
+
+    for (const obj of candidates) {
+      if (id === null) {
+        id = numericValue(obj.company_id ?? obj.companyId ?? obj.id);
+      }
+
+      if (!name) {
+        const value = obj.company_name ?? obj.companyName ?? obj.name;
+        if (value !== null && value !== undefined && String(value).trim()) {
+          name = String(value).trim();
+        }
+      }
+
+      if (rating === null) {
+        rating = numericValue(obj.rating ?? obj.star_rating ?? obj.stars ?? obj.company_rating);
+      }
+
+      if (director === null || director === undefined || director === '') {
+        const value = obj.director ?? obj.director_name ?? obj.directorName;
+        if (value !== null && value !== undefined && value !== '') director = value;
+      }
+
+      const typeValue = obj.company_type ?? obj.companyType ?? obj.type_id ?? obj.type;
+      if (typeValue && typeof typeValue === 'object' && !Array.isArray(typeValue)) {
+        if (typeId === null) {
+          typeId = numericValue(typeValue.id ?? typeValue.type_id ?? typeValue.typeId ?? typeValue.type);
+        }
+        if (!typeName) {
+          const value = typeValue.name ?? typeValue.type_name ?? typeValue.typeName;
+          if (value !== null && value !== undefined && String(value).trim()) {
+            typeName = String(value).trim();
+          }
+        }
+      } else if (typeId === null) {
+        typeId = numericValue(typeValue);
+      }
+    }
+
+    if (rating === null) {
+      rating = firstCompanyNumber(sources, ['rating', 'star_rating', 'stars', 'company_rating']);
+    }
+    if (typeId === null) {
+      typeId = firstCompanyNumber(sources, ['type_id', 'company_type_id', 'companyTypeId']);
+    }
+    if (!typeName && typeId !== null && results) {
+      typeName = resolveCompanyTypeName(findRaw(results, 'torn', 'companies'), typeId);
+    }
+    if (director === null || director === undefined || director === '') {
+      director = firstCompanyValue(sources, ['director', 'director_name', 'directorName']);
+    }
+
+    const wageFields = employees.map((employee) => findWageField(employee.raw)).filter(Boolean);
+    let totalSalary = wageFields.length
+      ? wageFields.reduce((sum, wage) => sum + wage.value, 0)
+      : null;
+    let salaryFieldName = wageFields[0]?.key || null;
+
+    if (totalSalary === null) {
+      for (const source of sources) {
+        if (!source || typeof source !== 'object') continue;
+        const aggregate = Object.entries(source)
+          .find(([key, value]) => typeof value === 'number' && /wage|salar/i.test(key));
+        if (aggregate) {
+          totalSalary = aggregate[1];
+          salaryFieldName = aggregate[0];
+          break;
+        }
+      }
+    }
+
+    return {
+      identity: {
+        id,
+        name,
+        typeId,
+        typeName,
+        director,
+      },
+      company: {
+        rating,
+        age: firstCompanyNumber(sources, ['days_old', 'age', 'company_age']),
+        popularity: firstCompanyNumber(sources, ['popularity', 'company_popularity']),
+        efficiency: firstCompanyNumber(sources, ['efficiency', 'company_efficiency']),
+        environment: firstCompanyNumber(sources, ['environment', 'company_environment']),
+        trains: firstCompanyNumber(sources, [
+          'trains_available', 'available_trains', 'trains', 'train_count',
+          'trains_remaining', 'company_trains'
+        ]),
+        employeeCapacity: firstCompanyNumber(sources, [
+          'employees_capacity', 'employee_capacity', 'max_employees',
+          'maximum_employees', 'capacity'
+        ]),
+        applicationsAllowed: firstCompanyValue(sources, [
+          'applications_allowed', 'applications_open', 'accepting_applications'
+        ]),
+        storage: firstCompanyValue(sources, [
+          'storage', 'storage_space', 'storage_size', 'warehouse_size'
+        ]),
+      },
+      financial: {
+        dailyIncome: firstCompanyNumber(sources, ['daily_income', 'dailyIncome', 'income_daily', 'daily_profit']),
+        weeklyIncome: firstCompanyNumber(sources, ['weekly_income', 'weeklyIncome', 'income_weekly', 'weekly_profit']),
+        dailyCustomers: firstCompanyNumber(sources, ['daily_customers', 'dailyCustomers', 'customers_daily']),
+        weeklyCustomers: firstCompanyNumber(sources, ['weekly_customers', 'weeklyCustomers', 'customers_weekly']),
+        companyBank: firstCompanyNumber(sources, ['company_bank', 'bank', 'company_funds']),
+        advertisingBudget: firstCompanyNumber(sources, [
+          'advertising_budget', 'advertising', 'ad_budget', 'daily_advertising'
+        ]),
+        companyValue: firstCompanyNumber(sources, [
+          'company_value', 'value', 'market_value', 'sell_value'
+        ]),
+      },
+      employees: {
+        raw: employeesRaw,
+        rows: employees,
+        count: employees.length || firstCompanyNumber(sources, [
+          'employees_hired', 'employee_count', 'employees_count', 'num_employees'
+        ]),
+        totalSalary,
+        salaryFieldName,
+      },
+    };
+  }
+
+  function normalizeCompanyData(results) {
+    if (!Array.isArray(results)) {
+      return {
+        raw: {},
+        blocked: {},
+        identity: {},
+        company: {},
+        financial: {},
+        employees: { raw: null, rows: [], count: 0, totalSalary: null, salaryFieldName: null },
+      };
+    }
+
+    if (companyDataCache.has(results)) return companyDataCache.get(results);
+
+    const raw = {
+      profile: findRaw(results, 'company', 'profile'),
+      detailed: findRaw(results, 'company', 'detailed'),
+      employees: findRaw(results, 'company', 'employees'),
+      stock: findRaw(results, 'company', 'stock'),
+      applications: findRaw(results, 'company', 'applications'),
+      news: findRaw(results, 'company', 'news'),
+      snapshot: findRaw(results, 'company', 'snapshot'),
+      userBasic: findRaw(results, 'user', 'basic'),
+      userWorkstats: findRaw(results, 'user', 'workstats'),
+      userLog: findRaw(results, 'user', 'log'),
+      companyReference: findRaw(results, 'torn', 'companies'),
+    };
+
+    const core = normalizeCompanyCore(
+      raw.profile,
+      raw.detailed,
+      raw.employees,
+      results
+    );
+
+    const normalized = {
+      ...core,
+      raw,
+      blocked: {
+        profile: findBlockedReason(results, 'company', 'profile'),
+        detailed: findBlockedReason(results, 'company', 'detailed'),
+        employees: findBlockedReason(results, 'company', 'employees'),
+        stock: findBlockedReason(results, 'company', 'stock'),
+        applications: findBlockedReason(results, 'company', 'applications'),
+        news: findBlockedReason(results, 'company', 'news'),
+      },
+    };
+
+    companyDataCache.set(results, normalized);
+    return normalized;
+  }
+
   function displayValue(value) {
     if (value === undefined || value === null || value === '') return '—';
     if (typeof value === 'number') return formatNumber(value);
@@ -3254,12 +3467,30 @@
   function performanceRecordFromResults(results, timestamp = Date.now()) {
     if (!results) return null;
 
-    return buildPerformanceRecord(
-      findRaw(results, 'company', 'profile'),
-      findRaw(results, 'company', 'detailed'),
-      findRaw(results, 'company', 'employees'),
-      timestamp
-    );
+    const companyData = normalizeCompanyData(results);
+    const roles = performanceRoleSummary(companyData.raw.employees);
+
+    return {
+      day: isoDayKey(timestamp),
+      timestamp,
+      source: 'local',
+      observed: {
+        dailyIncome: companyData.financial.dailyIncome,
+        weeklyIncome: companyData.financial.weeklyIncome,
+        dailyCustomers: companyData.financial.dailyCustomers,
+        weeklyCustomers: companyData.financial.weeklyCustomers,
+        popularity: companyData.company.popularity,
+        efficiency: companyData.company.efficiency,
+        environment: companyData.company.environment,
+        employeeCount: roles.employeeCount,
+      },
+      calculated: {
+        totalEE: roles.employeesWithEE ? roles.totalEE : null,
+        salesEE: salesCapacityFromRoleEE(roles.roleEE),
+        roleEE: roles.roleEE,
+        roleHeadcount: roles.roleHeadcount,
+      },
+    };
   }
 
   function performanceRecordFromSnapshot(snapshot) {
@@ -4080,11 +4311,12 @@
 
     let accessAdvisory = directorDataAdvisory('Company Financials');
 
-    const profile = findRaw(results, 'company', 'profile');
-    const detailed = findRaw(results, 'company', 'detailed');
-    const employeesRaw = findRaw(results, 'company', 'employees');
-    const blockedProfile = findBlockedReason(results, 'company', 'profile');
-    const blockedDetailed = findBlockedReason(results, 'company', 'detailed');
+    const companyData = normalizeCompanyData(results);
+    const profile = companyData.raw.profile;
+    const detailed = companyData.raw.detailed;
+    const employeesRaw = companyData.raw.employees;
+    const blockedProfile = companyData.blocked.profile;
+    const blockedDetailed = companyData.blocked.detailed;
 
     let html = accessAdvisory;
 
@@ -4125,22 +4357,13 @@
 
     const dailyField = findNumericFieldDeep(combined, ['daily_income', 'daily_profit'], /daily[_ ]?(income|profit)/i);
     const weeklyField = findNumericFieldDeep(combined, ['weekly_income', 'weekly_profit'], /weekly[_ ]?(income|profit)/i);
+    const normalizedWeeklyIncome = companyData.financial.weeklyIncome;
 
-    const employees = extractEmployeesEntries(employeesRaw);
-    const wageFields = employees.map((e) => findWageField(e.raw)).filter(Boolean);
-    let totalSalary = wageFields.length > 0 ? wageFields.reduce((sum, w) => sum + w.value, 0) : null;
-    let salaryFieldName = wageFields[0]?.key;
-    // Fallback: some responses may only expose an aggregate wage/salary
-    // figure at the company level rather than per employee.
-    if (totalSalary === null) {
-      const aggregateWage = Object.entries(combined).find(([k, v]) => typeof v === 'number' && /wage|salar/i.test(k));
-      if (aggregateWage) {
-        totalSalary = aggregateWage[1];
-        salaryFieldName = aggregateWage[0];
-      }
-    }
+    const employees = companyData.employees.rows;
+    const totalSalary = companyData.employees.totalSalary;
+    const salaryFieldName = companyData.employees.salaryFieldName;
 
-    const todayGross = dailyField ? dailyField.value : null;
+    const todayGross = companyData.financial.dailyIncome ?? (dailyField ? dailyField.value : null);
     const todayNet = todayGross !== null && totalSalary !== null ? todayGross - totalSalary : null;
 
     // --- Today snapshot card ---
@@ -4148,8 +4371,9 @@
     html += `<div class="tds-row"><span class="tds-row-label">Daily Income</span><span class="tds-row-value">${todayGross !== null ? formatMoney(todayGross) : '<span class="tds-v-dim">Unavailable</span>'}</span></div>`;
     html += `<div class="tds-row"><span class="tds-row-label">Salaries</span><span class="tds-row-value tds-v-bad">${totalSalary !== null ? '-' + formatMoney(totalSalary) : '<span class="tds-v-dim">Unavailable</span>'}</span></div>`;
     html += `<div class="tds-row"><span class="tds-row-label">Income after Salaries</span><span class="tds-row-value ${todayNet !== null ? (todayNet >= 0 ? 'tds-v-good' : 'tds-v-bad') : ''}">${todayNet !== null ? formatMoney(todayNet) : '<span class="tds-v-dim">Unavailable</span>'}</span></div>`;
-    if (weeklyField) {
-      html += `<div class="tds-row"><span class="tds-row-label">Weekly Income</span><span class="tds-row-value">${formatMoney(weeklyField.value)}</span></div>`;
+    if (normalizedWeeklyIncome !== null || weeklyField) {
+      const weeklyIncomeValue = normalizedWeeklyIncome ?? weeklyField.value;
+      html += `<div class="tds-row"><span class="tds-row-label">Weekly Income</span><span class="tds-row-value">${formatMoney(weeklyIncomeValue)}</span></div>`;
     }
     html += '</div>';
     if (todayGross === null) {
@@ -5306,8 +5530,9 @@
     }
 
 
-    const stockRaw = findRaw(results, 'company', 'stock');
-    const blocked = findBlockedReason(results, 'company', 'stock');
+    const companyData = normalizeCompanyData(results);
+    const stockRaw = companyData.raw.stock;
+    const blocked = companyData.blocked.stock;
 
     if (!stockRaw) {
       el.innerHTML = `<div class="tds-box tds-box-danger"><strong>Company stock unavailable.</strong> ${escapeHtml(blocked || 'No company/stock data was returned.')}</div>`;
@@ -6930,9 +7155,10 @@
       return;
     }
 
-    const employeesRaw = findRaw(results, 'company', 'employees');
-    const employees = extractEmployeesEntries(employeesRaw);
-    const profile = findRaw(results, 'company', 'profile');
+    const companyData = normalizeCompanyData(results);
+    const employeesRaw = companyData.raw.employees;
+    const employees = companyData.employees.rows;
+    const profile = companyData.raw.profile;
     const mode = state.trainingMode || 'priority';
 
     let html = `
@@ -6957,7 +7183,7 @@
       return;
     }
 
-    const ratingValue = numericValue(findValueDeep(profile, ['rating', 'star_rating', 'stars']));
+    const ratingValue = companyData.company.rating;
     html += `<div class="tds-box tds-box-neutral">
       ${ratingValue !== null ? `Current company rating: <strong>${escapeHtml(String(ratingValue))}★</strong>. ` : ''}
       Rotational debt below is based on <strong>observed trains actually given</strong>, not an assumed star-rating budget. This keeps the queue fair if ratings, staffing, saved trains or training-role bonuses changed during the period.
@@ -7767,71 +7993,16 @@
   const BENCHMARK_MAX_PAGES = 10;
 
   function getOwnCompanyCompareInfo(profile, results) {
-    if (!profile || typeof profile !== 'object') {
-      return { id: null, name: null, typeId: null, typeName: null, rating: null };
-    }
-
-    // Prefer direct/wrapped company fields before doing a broad recursive
-    // search; this avoids accidentally treating a director/player ID as the
-    // company ID when Torn returns nested objects.
-    const candidates = [profile];
-    for (const key of ['company', 'profile', 'data']) {
-      if (profile[key] && typeof profile[key] === 'object' && !Array.isArray(profile[key])) {
-        candidates.push(profile[key]);
-      }
-    }
-
-    let id = null;
-    let name = null;
-    let typeId = null;
-    let typeName = null;
-    let rating = null;
-
-    for (const obj of candidates) {
-      if (id === null) {
-        id = numericValue(obj.id ?? obj.company_id ?? obj.companyId);
-      }
-
-      if (!name) {
-        const nameValue = obj.name ?? obj.company_name ?? obj.companyName;
-        if (nameValue !== null && nameValue !== undefined && String(nameValue).trim()) {
-          name = String(nameValue).trim();
-        }
-      }
-
-      if (rating === null) {
-        rating = numericValue(obj.rating ?? obj.star_rating ?? obj.stars);
-      }
-
-      const typeValue = obj.company_type ?? obj.type_id ?? obj.companyType ?? obj.type;
-      if (typeValue && typeof typeValue === 'object') {
-        if (typeId === null) typeId = numericValue(typeValue.id ?? typeValue.type_id ?? typeValue.type);
-        if (!typeName) typeName = typeValue.name ?? typeValue.type_name ?? null;
-      } else if (typeId === null) {
-        typeId = numericValue(typeValue);
-      }
-    }
-
-    if (typeId === null) {
-      typeId = numericValue(findValueDeep(profile, ['company_type', 'type_id', 'companyType']));
-    }
-    if (rating === null) {
-      rating = numericValue(findValueDeep(profile, ['rating', 'star_rating', 'stars']));
-    }
-
-    if (!name) {
-      const deepName = findValueDeep(profile, ['name', 'company_name', 'companyName']);
-      if (deepName !== null && deepName !== undefined && String(deepName).trim()) {
-        name = String(deepName).trim();
-      }
-    }
-
-    if (typeId !== null && !typeName) {
-      typeName = resolveCompanyTypeName(findRaw(results, 'torn', 'companies'), typeId);
-    }
-
-    return { id, name, typeId, typeName, rating };
+    const companyData = normalizeCompanyData(results || state.lastResults || []);
+    return {
+      id: companyData.identity.id ?? null,
+      name: companyData.identity.name ?? null,
+      typeId: companyData.identity.typeId ?? null,
+      typeName: companyData.identity.typeName ?? null,
+      rating: companyData.company.rating ?? null,
+    };
   }
+
 
   function buildBenchmarkSearchFilters(typeId, tier, ownRating) {
     const filters = [`type:Equal:${typeId}`];
@@ -7950,6 +8121,197 @@
     return null;
   }
 
+
+  const NEXT_STAR_CACHE_TTL_MS = 4 * 60 * 60 * 1000;
+
+  function normalizeCompareCompanyRow(row) {
+    return {
+      raw: row,
+      id: numericValue(compareField(row, ['id', 'company_id', 'companyId'], /^id$|company.*id/i)),
+      name: compareField(row, ['name', 'company_name', 'companyName'], /^name$|company.*name/i),
+      rating: numericValue(compareField(row, ['rating', 'stars', 'star_rating'], /rating|stars/i)),
+      dailyIncome: numericValue(compareField(row, ['daily_income', 'dailyIncome'], /daily.*income/i)),
+      weeklyIncome: numericValue(compareField(row, ['weekly_income', 'weeklyIncome'], /weekly.*income/i)),
+      dailyCustomers: numericValue(compareField(row, ['daily_customers', 'dailyCustomers'], /daily.*customer/i)),
+      weeklyCustomers: numericValue(compareField(row, ['weekly_customers', 'weeklyCustomers'], /weekly.*customer/i)),
+    };
+  }
+
+  async function buildNextStarEvidence(own, { force = false } = {}) {
+    if (!own || own.typeId === null || own.rating === null) {
+      throw new Error('Company type or current star rating is unavailable.');
+    }
+
+    const currentRating = Number(own.rating);
+    if (!Number.isFinite(currentRating)) {
+      throw new Error('Current star rating could not be read.');
+    }
+
+    if (currentRating >= 10) {
+      return {
+        currentRating,
+        nextRating: null,
+        maxRating: true,
+      };
+    }
+
+    const nextRating = currentRating + 1;
+    const cacheKey = `${own.typeId}:${nextRating}`;
+    const cached = state.benchmark.nextStarCache[cacheKey];
+
+    if (!force && cached && Date.now() - cached.timestamp < NEXT_STAR_CACHE_TTL_MS) {
+      return { ...cached.data, fromCache: true };
+    }
+
+    // Search only the next-star band. This is factual peer evidence, not a
+    // guessed promotion threshold.
+    const data = await fetchBenchmarkCompanies(own.typeId, 'same', nextRating);
+    let rows = extractCompareCompanies(data).map(normalizeCompareCompanyRow);
+
+    let snapshotUsed = false;
+    try {
+      const snapshotMap = await getCompareSnapshotFinancialMap();
+      rows = mergeSnapshotFinancials(rows, snapshotMap);
+      snapshotUsed = true;
+    } catch (err) {
+      console.warn('[TDS] Next Star Snapshot enrichment unavailable:', err);
+    }
+
+    const nextStarRows = rows.filter((row) =>
+      row.rating === null || Number(row.rating) === nextRating
+    );
+
+    const weeklyValues = nextStarRows
+      .map((row) => row.weeklyIncome)
+      .filter((value) => typeof value === 'number' && Number.isFinite(value))
+      .sort((a, b) => a - b);
+
+    const ownData = normalizeCompanyData(state.lastResults || []);
+    let ownWeeklyIncome = ownData.financial.weeklyIncome;
+
+    if (ownWeeklyIncome === null && own.id !== null) {
+      try {
+        const snapshotMap = await getCompareSnapshotFinancialMap();
+        ownWeeklyIncome = snapshotMap.get(String(own.id))?.weeklyIncome ?? null;
+      } catch (_) {}
+    }
+
+    const result = {
+      currentRating,
+      nextRating,
+      maxRating: false,
+      companiesReturned: nextStarRows.length,
+      companiesWithWeeklyIncome: weeklyValues.length,
+      ownWeeklyIncome,
+      lowestObservedWeeklyIncome: weeklyValues.length ? weeklyValues[0] : null,
+      medianObservedWeeklyIncome: weeklyValues.length ? medianNumeric(weeklyValues) : null,
+      highestObservedWeeklyIncome: weeklyValues.length ? weeklyValues[weeklyValues.length - 1] : null,
+      snapshotUsed,
+      pagesFetched: data?._tdsPagination?.pagesFetched || 1,
+      fromCache: false,
+    };
+
+    state.benchmark.nextStarCache[cacheKey] = {
+      timestamp: Date.now(),
+      data: result,
+    };
+
+    return result;
+  }
+
+  function nextStarEvidenceHtml(evidence) {
+    if (!evidence) return '';
+
+    if (evidence.maxRating) {
+      return `<div class="tds-box tds-box-info">
+        <strong>Maximum rating:</strong> your company is already <strong>10★</strong>, so there is no next star to evaluate.
+      </div>`;
+    }
+
+    const nextRating = evidence.nextRating;
+    let html = `<div class="tds-card">
+      <div class="tds-row"><span class="tds-row-label">Current rating</span><span class="tds-row-value">${formatNumber(evidence.currentRating)}★</span></div>
+      <div class="tds-row"><span class="tds-row-label">Next rating</span><span class="tds-row-value">${formatNumber(nextRating)}★</span></div>`;
+
+    if (typeof evidence.ownWeeklyIncome === 'number') {
+      html += `<div class="tds-row"><span class="tds-row-label">Your weekly income</span><span class="tds-row-value">${formatMoney(evidence.ownWeeklyIncome)}</span></div>`;
+    }
+
+    if (typeof evidence.lowestObservedWeeklyIncome === 'number') {
+      html += `<div class="tds-row"><span class="tds-row-label">Lowest observed ${formatNumber(nextRating)}★ weekly income</span><span class="tds-row-value">${formatMoney(evidence.lowestObservedWeeklyIncome)}</span></div>`;
+      html += `<div class="tds-row"><span class="tds-row-label">Median observed ${formatNumber(nextRating)}★ weekly income</span><span class="tds-row-value">${formatMoney(evidence.medianObservedWeeklyIncome)}</span></div>`;
+
+      if (typeof evidence.ownWeeklyIncome === 'number') {
+        const delta = evidence.ownWeeklyIncome - evidence.lowestObservedWeeklyIncome;
+        const cls = delta >= 0 ? 'tds-v-good' : 'tds-v-bad';
+        const relation = delta >= 0 ? 'above' : 'below';
+        html += `<div class="tds-row"><span class="tds-row-label">Income comparison</span><span class="tds-row-value ${cls}">${formatMoney(Math.abs(delta))} ${relation} lowest observed ${formatNumber(nextRating)}★ company</span></div>`;
+      }
+    }
+
+    html += `<div class="tds-row"><span class="tds-row-label">${formatNumber(nextRating)}★ companies fetched</span><span class="tds-row-value">${formatNumber(evidence.companiesReturned)}</span></div>`;
+    html += `<div class="tds-row"><span class="tds-row-label">With weekly-income data</span><span class="tds-row-value">${formatNumber(evidence.companiesWithWeeklyIncome)}</span></div>`;
+    html += `</div>`;
+
+    if (typeof evidence.lowestObservedWeeklyIncome === 'number' && typeof evidence.ownWeeklyIncome === 'number') {
+      const gap = evidence.lowestObservedWeeklyIncome - evidence.ownWeeklyIncome;
+      if (gap > 0) {
+        html += `<div class="tds-box tds-box-warn">
+          <strong>Measurable income gap:</strong> your current weekly income is ${formatMoney(gap)} below the lowest weekly income observed among the fetched ${formatNumber(nextRating)}★ companies.
+          Closing this gap would only match that observed peer value; it is <strong>not</strong> presented as Torn's promotion threshold.
+        </div>`;
+      } else {
+        html += `<div class="tds-box tds-box-info">
+          <strong>Income evidence:</strong> your current weekly income is already above the lowest observed weekly income in the fetched ${formatNumber(nextRating)}★ group.
+          This confirms only the income comparison shown here; it does <strong>not</strong> confirm promotion readiness.
+        </div>`;
+      }
+    }
+
+    html += `<div class="tds-box tds-box-neutral">
+      <strong>What can be verified:</strong> Torn's company rating system uses weekly performance relative to competing companies of the same type, and company experience is a separate hidden requirement.
+      Ratings are processed weekly on Sunday around 18:00 TCT.
+      <br><br>
+      <strong>What cannot be verified:</strong> Torn does not expose the required company experience or an exact promotion-progress percentage through the API.
+      The suite therefore does <strong>not</strong> show a made-up “chance to star up”, readiness score, or guaranteed threshold.
+      <br><br>
+      <span class="tds-v-dim">Source basis: Torn's official company rating-system announcement. Peer income figures above come from the current Torn company search / Snapshot data fetched by this suite.</span>
+    </div>`;
+
+    if (evidence.fromCache) {
+      html += `<div class="tds-v-dim" style="margin-top:6px;">Next-star peer evidence loaded from the local 4-hour cache.</div>`;
+    }
+
+    return html;
+  }
+
+  async function loadNextStarEvidence(panel, own, { force = false } = {}) {
+    const target = panel.querySelector('#tds-next-star-evidence');
+    const button = panel.querySelector('#tds-next-star-check');
+    if (!target) return;
+
+    if (button) {
+      button.disabled = true;
+      button.textContent = 'Checking Next Star…';
+    }
+
+    target.innerHTML = `<div class="tds-box tds-box-neutral">Reading the ${own.rating !== null && own.rating < 10 ? `${Number(own.rating) + 1}★` : 'next-star'} peer group and current Snapshot income data…</div>`;
+
+    try {
+      const evidence = await buildNextStarEvidence(own, { force });
+      target.innerHTML = nextStarEvidenceHtml(evidence);
+      if (button) button.textContent = evidence.maxRating ? '10★ Maximum' : 'Refresh Next Star Evidence';
+    } catch (err) {
+      target.innerHTML = `<div class="tds-box tds-box-warn">
+        <strong>Next Star evidence unavailable:</strong>
+        ${escapeHtml(String(err?.reason || err?.message || err || 'Unknown error'))}
+      </div>`;
+      if (button) button.textContent = 'Retry Next Star Evidence';
+    } finally {
+      if (button) button.disabled = false;
+    }
+  }
+
   function renderBenchmarkTab(panel) {
     const el = panel.querySelector('[data-tabpanel="benchmark"]');
     const results = state.lastResults;
@@ -7975,6 +8337,14 @@
         ${own.rating !== null ? `<div class="tds-row"><span class="tds-row-label">Your rating</span><span class="tds-row-value">${escapeHtml(String(own.rating))}★</span></div>` : ''}
       </div>
 
+      <div class="tds-section-label">Next Star Evidence</div>
+      <div class="tds-box tds-box-neutral">
+        Compare your current weekly income with companies already at the next star level.
+        This section uses only measurable Torn data and deliberately does not guess hidden company experience.
+      </div>
+      <button class="tds-btn" id="tds-next-star-check">${own.rating !== null && own.rating >= 10 ? '10★ Maximum' : 'Check Next Star Evidence'}</button>
+      <div id="tds-next-star-evidence" style="margin-top:10px;"></div>
+
       <div class="tds-segmented">
         <div class="tds-segment ${state.benchmark.tier === 'same' ? 'tds-segment-active' : ''}" data-tier="same">SAME RATING${own.rating !== null ? ` (${own.rating}★)` : ''}</div>
         <div class="tds-segment ${state.benchmark.tier === 'mid' ? 'tds-segment-active' : ''}" data-tier="mid">3–5★</div>
@@ -7986,6 +8356,27 @@
       <div id="tds-bench-results" style="margin-top:10px;"></div>
     `;
     el.innerHTML = html;
+
+    const nextStarButton = el.querySelector('#tds-next-star-check');
+    if (nextStarButton) {
+      if (own.rating !== null && own.rating >= 10) {
+        const target = el.querySelector('#tds-next-star-evidence');
+        if (target) target.innerHTML = nextStarEvidenceHtml({ currentRating: own.rating, maxRating: true });
+        nextStarButton.disabled = true;
+      } else {
+        nextStarButton.addEventListener('click', () => loadNextStarEvidence(panel, own, { force: true }));
+
+        if (own.typeId !== null && own.rating !== null) {
+          const cacheKey = `${own.typeId}:${Number(own.rating) + 1}`;
+          const cached = state.benchmark.nextStarCache[cacheKey];
+          if (cached && Date.now() - cached.timestamp < NEXT_STAR_CACHE_TTL_MS) {
+            const target = el.querySelector('#tds-next-star-evidence');
+            if (target) target.innerHTML = nextStarEvidenceHtml({ ...cached.data, fromCache: true });
+            nextStarButton.textContent = 'Refresh Next Star Evidence';
+          }
+        }
+      }
+    }
 
     el.querySelectorAll('[data-tier]').forEach((seg) => {
       seg.addEventListener('click', () => {
@@ -8240,14 +8631,6 @@
     return nums.reduce((sum, value) => sum + value, 0) / nums.length;
   }
 
-  function medianNumeric(values) {
-    const nums = values
-      .filter((v) => typeof v === 'number' && Number.isFinite(v))
-      .sort((a, b) => a - b);
-    if (!nums.length) return null;
-    const mid = Math.floor(nums.length / 2);
-    return nums.length % 2 ? nums[mid] : (nums[mid - 1] + nums[mid]) / 2;
-  }
 
   function percentDiff(value, baseline) {
     if (typeof value !== 'number' || typeof baseline !== 'number' || baseline === 0) return null;
@@ -9079,16 +9462,7 @@
       return;
     }
 
-    let normalized = rows.map((row) => ({
-      raw: row,
-      id: numericValue(compareField(row, ['id', 'company_id', 'companyId'], /^id$|company.*id/i)),
-      name: compareField(row, ['name', 'company_name', 'companyName'], /^name$|company.*name/i),
-      rating: numericValue(compareField(row, ['rating', 'stars', 'star_rating'], /rating|stars/i)),
-      dailyIncome: numericValue(compareField(row, ['daily_income', 'dailyIncome'], /daily.*income/i)),
-      weeklyIncome: numericValue(compareField(row, ['weekly_income', 'weeklyIncome'], /weekly.*income/i)),
-      dailyCustomers: numericValue(compareField(row, ['daily_customers', 'dailyCustomers'], /daily.*customer/i)),
-      weeklyCustomers: numericValue(compareField(row, ['weekly_customers', 'weeklyCustomers'], /weekly.*customer/i)),
-    }));
+    let normalized = rows.map(normalizeCompareCompanyRow);
 
     let snapshotUsed = false;
     let snapshotError = null;
@@ -9142,18 +9516,16 @@
 
     if (!ownRow) {
       const currentResults = state.lastResults;
-      const ownProfile = currentResults ? findRaw(currentResults, 'company', 'profile') : null;
-      const ownDetailed = currentResults ? findRaw(currentResults, 'company', 'detailed') : null;
-      const ownCombined = { ...(ownProfile || {}), ...(ownDetailed || {}) };
+      const ownCompanyData = normalizeCompanyData(currentResults || []);
 
       ownRow = {
         id: own.id,
         name: own.name,
         rating: own.rating,
-        dailyIncome: numericValue(findValueDeep(ownCombined, ['daily_income', 'dailyIncome'])),
-        weeklyIncome: numericValue(findValueDeep(ownCombined, ['weekly_income', 'weeklyIncome'])),
-        dailyCustomers: numericValue(findValueDeep(ownCombined, ['daily_customers', 'dailyCustomers'])),
-        weeklyCustomers: numericValue(findValueDeep(ownCombined, ['weekly_customers', 'weeklyCustomers'])),
+        dailyIncome: ownCompanyData.financial.dailyIncome,
+        weeklyIncome: ownCompanyData.financial.weeklyIncome,
+        dailyCustomers: ownCompanyData.financial.dailyCustomers,
+        weeklyCustomers: ownCompanyData.financial.weeklyCustomers,
       };
 
       // Fill missing own-company financials from Snapshot too.
