@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Company Management Suite
 // @namespace    torn-company-management-suite
-// @version      1.6.0
+// @version      1.7.0
 // @description  Local-only company management dashboard for Torn directors, embedded in the Jobs page. No company data ever leaves your browser; only your Torn User ID is checked against a public license list.
 // @author       DooBiiE
 // @homepageURL  https://github.com/DooBiiE/Torn-Company-Manager
@@ -70,7 +70,7 @@
   // TornPDA does not always expose the legacy GM_info object that desktop
   // userscript managers provide. Try both common metadata APIs, then use the
   // release version as a PDA-safe fallback so the UI never shows vunknown.
-  const TDS_VERSION_FALLBACK = '1.6.0';
+  const TDS_VERSION_FALLBACK = '1.7.0';
   const TDS_VERSION =
     (typeof GM_info !== 'undefined' && GM_info?.script?.version) ||
     (typeof GM !== 'undefined' && GM?.info?.script?.version) ||
@@ -85,6 +85,11 @@
   const STORAGE_KEY_DIRECTOR_NAME_CACHE = 'tds_director_name_cache_v1';
   const STORAGE_KEY_LAST_RESULTS = 'tds_last_results_cache';
   const STORAGE_KEY_LAST_VERDICT = 'tds_last_verdict_cache';
+  const STORAGE_KEY_PANEL_COLLAPSED = 'tds_panel_collapsed';
+  const STORAGE_KEY_LAST_DAILY_TCT_DAY = 'tds_last_daily_tct_day';
+  const STORAGE_KEY_LAST_NEXT_STAR_TCT_DAY = 'tds_last_next_star_tct_day';
+  const STORAGE_KEY_NEXT_STAR_EVIDENCE = 'tds_next_star_evidence_v1';
+  const DAILY_DIAGNOSTIC_TCT_HOUR = 12; // Torn City Time (TCT) = UTC
   const MIN_CALL_INTERVAL_MS = 800; // ~75 req/min ceiling, well under Torn's 100/min cap
   const DB_NAME = 'torn_director_system';
   const DB_VERSION = 2;
@@ -604,6 +609,12 @@
         cursor: pointer; font-size: 12px; padding: 0 8px;
       }
       #tds-header-icons button:hover { background: var(--tds-bg-hover, #404040); color: var(--tds-fg, #d8d8d8); }
+      #tds-panel.tds-panel-collapsed #tds-tabs,
+      #tds-panel.tds-panel-collapsed #tds-body,
+      #tds-panel.tds-panel-collapsed #tds-footer { display: none !important; }
+      #tds-panel.tds-panel-collapsed #tds-header { border-bottom: none; }
+      #tds-panel.tds-panel-collapsed { margin-bottom: 10px; }
+      #tds-collapse-toggle { font-size: 15px !important; font-weight: 800; }
 
       #tds-tabs {
         display: flex; flex-wrap: wrap; gap: 2px; padding: 9px 12px 0;
@@ -1118,6 +1129,8 @@
     panel: null,
     benchmark: { tier: 'same', cache: {}, snapshot: null, staffingCache: {}, nextStarCache: {} }, // compare + on-demand staffing cache
     stock: { loading: false, newsCache: null, newsCacheAt: 0 },
+    autoRefreshTimer: null,
+    autoRefreshRunning: false,
   };
 
   function isJobsPage() {
@@ -1141,9 +1154,29 @@
   }
 
   function removePanel() {
+    if (state.autoRefreshTimer) {
+      clearTimeout(state.autoRefreshTimer);
+      state.autoRefreshTimer = null;
+    }
     const panel = document.getElementById('tds-panel');
     if (panel) panel.remove();
     state.panel = null;
+  }
+
+  function setPanelCollapsed(panel, collapsed, { persist = true } = {}) {
+    if (!panel) return;
+    const isCollapsed = Boolean(collapsed);
+    panel.classList.toggle('tds-panel-collapsed', isCollapsed);
+
+    const button = panel.querySelector('#tds-collapse-toggle');
+    if (button) {
+      button.textContent = isCollapsed ? '▾' : '▴';
+      button.title = isCollapsed ? 'Expand Company Management Suite' : 'Collapse Company Management Suite';
+      button.setAttribute('aria-label', button.title);
+      button.setAttribute('aria-expanded', String(!isCollapsed));
+    }
+
+    if (persist) GM_setValue(STORAGE_KEY_PANEL_COLLAPSED, isCollapsed);
   }
 
   function buildPanel(mount) {
@@ -1162,6 +1195,7 @@
         <div id="tds-header-icons">
           <button data-action="refresh" title="Run Diagnostics Again">\u27f3</button>
           <button data-action="tab-settings" title="Settings">\u2699</button>
+          <button id="tds-collapse-toggle" data-action="collapse" title="Collapse Company Management Suite" aria-label="Collapse Company Management Suite" aria-expanded="true">▴</button>
         </div>
       </div>
       <div id="tds-tabs">
@@ -1197,7 +1231,11 @@
     updateHeaderAccessBadge(panel, { level: cachedAccessLevel });
 
     applyTheme(panel, GM_getValue(STORAGE_KEY_THEME, 'green'));
+    setPanelCollapsed(panel, Boolean(GM_getValue(STORAGE_KEY_PANEL_COLLAPSED, false)), { persist: false });
 
+    panel.querySelector('[data-action="collapse"]').addEventListener('click', () => {
+      setPanelCollapsed(panel, !panel.classList.contains('tds-panel-collapsed'));
+    });
     panel.querySelector('[data-action="tab-settings"]').addEventListener('click', () => switchTab(panel, 'settings'));
     panel.querySelector('[data-action="refresh"]').addEventListener('click', () => runFullDiagnostic(panel, { force: true }));
     panel.querySelectorAll('.tds-tab').forEach((btn) => {
@@ -1236,6 +1274,13 @@
     const currentTheme = GM_getValue(STORAGE_KEY_THEME, 'green');
 
     el.innerHTML = `
+      <div class="tds-section-label">Automatic Updates</div>
+      <div class="tds-box tds-box-info">
+        <strong>Daily refresh:</strong> Diagnostics runs once per TCT day at <strong>12:00 TCT</strong> while Torn is open.
+        If this page was closed at 12:00, the refresh runs the first time the company page is opened after 12:00.
+        The same daily cycle updates the saved <strong>Next Star Suggestion</strong>.
+      </div>
+
       <div class="tds-section-label">API Key</div>
       <div class="tds-box tds-box-neutral">Stored only in this browser (Tampermonkey local storage). Never sent anywhere except api.torn.com.</div>
       <div class="tds-box tds-box-warn">
@@ -1974,6 +2019,11 @@
       <div class="tds-box tds-box-neutral">Analysing recent local company changes…</div>
     </div>`;
 
+    html += `<div id="tds-overview-next-star">
+      <div class="tds-section-label">Next Star Suggestion</div>
+      <div class="tds-box tds-box-neutral">Loading saved next-star guidance…</div>
+    </div>`;
+
     // Show every usable scalar value returned by company/profile, rather than
     // maintaining a small hard-coded list. This means new fields Torn adds to
     // the profile automatically appear here too. Employee objects/collections
@@ -2289,6 +2339,7 @@
     renderOverviewIntelligence(panel, results).catch((err) =>
       console.warn('[TDS] Overview intelligence render failed:', err)
     );
+    renderOverviewNextStarSuggestion(panel);
 
     if (state.currentDirectorValue !== undefined) {
       refreshDirectorName(panel, state.currentDirectorValue).catch((err) =>
@@ -8285,6 +8336,137 @@
     return html;
   }
 
+  function saveNextStarEvidence(evidence, own = null) {
+    if (!evidence) return;
+    GM_setValue(STORAGE_KEY_NEXT_STAR_EVIDENCE, {
+      timestamp: Date.now(),
+      evidence,
+      own: own ? {
+        id: own.id ?? null,
+        typeId: own.typeId ?? null,
+        rating: own.rating ?? null,
+      } : null,
+    });
+  }
+
+  function getSavedNextStarEvidence() {
+    const saved = GM_getValue(STORAGE_KEY_NEXT_STAR_EVIDENCE, null);
+    if (!saved || typeof saved !== 'object' || !saved.evidence) return null;
+    return saved;
+  }
+
+  function nextStarSuggestionText(evidence) {
+    if (!evidence) {
+      return {
+        title: 'Next Star Suggestion',
+        className: 'tds-box-neutral',
+        text: 'No next-star comparison has been saved yet.',
+      };
+    }
+
+    if (evidence.maxRating) {
+      return {
+        title: 'Next Star Suggestion',
+        className: 'tds-box-info',
+        text: 'Your company is already at 10★, so there is no higher star rating to target.',
+      };
+    }
+
+    const nextRating = Number(evidence.nextRating);
+    const ownIncome = evidence.ownWeeklyIncome;
+    const lowest = evidence.lowestObservedWeeklyIncome;
+    const median = evidence.medianObservedWeeklyIncome;
+
+    if (typeof ownIncome !== 'number' || typeof lowest !== 'number') {
+      return {
+        title: `Next Star Suggestion — ${formatNumber(nextRating)}★`,
+        className: 'tds-box-neutral',
+        text: 'There is not enough comparable weekly-income data yet to give a useful peer-based suggestion.',
+      };
+    }
+
+    if (ownIncome < lowest) {
+      const gap = lowest - ownIncome;
+      return {
+        title: `Next Star Suggestion — ${formatNumber(nextRating)}★`,
+        className: 'tds-box-warn',
+        text: `Your weekly income is ${formatMoney(gap)} below the lowest observed ${formatNumber(nextRating)}★ peer. A sensible measurable target is to close that income gap first. This is peer evidence, not a guaranteed Torn promotion threshold.`,
+      };
+    }
+
+    if (typeof median === 'number' && ownIncome < median) {
+      const gap = median - ownIncome;
+      return {
+        title: `Next Star Suggestion — ${formatNumber(nextRating)}★`,
+        className: 'tds-box-info',
+        text: `Your weekly income is already above the lowest observed ${formatNumber(nextRating)}★ peer, but remains ${formatMoney(gap)} below the observed median. Moving toward the median gives you a stronger measurable position, while hidden company experience may still affect promotion.`,
+      };
+    }
+
+    return {
+      title: `Next Star Suggestion — ${formatNumber(nextRating)}★`,
+      className: 'tds-box-info',
+      text: `Your weekly income is at or above the observed median for the fetched ${formatNumber(nextRating)}★ peer group. Income is not the obvious measurable gap right now; hidden company experience can still prevent a star increase.`,
+    };
+  }
+
+  function renderOverviewNextStarSuggestion(panel) {
+    const target = panel?.querySelector('#tds-overview-next-star');
+    if (!target) return;
+
+    const saved = getSavedNextStarEvidence();
+    if (!saved) {
+      target.innerHTML = `
+        <div class="tds-section-label">Next Star Suggestion</div>
+        <div class="tds-box tds-box-neutral">
+          Next-star guidance will refresh automatically with the daily <strong>12:00 TCT</strong> company update.
+          You can also update it immediately from <strong>Compare → Next Star Evidence</strong>.
+        </div>`;
+      return;
+    }
+
+    const suggestion = nextStarSuggestionText(saved.evidence);
+    target.innerHTML = `
+      <div class="tds-section-label">${escapeHtml(suggestion.title)}</div>
+      <div class="tds-box ${suggestion.className}">
+        ${escapeHtml(suggestion.text)}
+        <div class="tds-v-dim" style="margin-top:6px;">Peer evidence updated ${escapeHtml(formatTimestampRelative(saved.timestamp))}.</div>
+      </div>`;
+  }
+
+  async function refreshNextStarSuggestion(panel, { force = true, markDaily = false } = {}) {
+    const results = state.lastResults;
+    if (!Array.isArray(results) || !results.length) return false;
+
+    const profile = findRaw(results, 'company', 'profile');
+    const own = getOwnCompanyCompareInfo(profile, results);
+    if (own.typeId === null || own.rating === null) return false;
+
+    try {
+      const evidence = await buildNextStarEvidence(own, { force });
+      saveNextStarEvidence(evidence, own);
+
+      if (markDaily) {
+        GM_setValue(STORAGE_KEY_LAST_NEXT_STAR_TCT_DAY, tctDayKey(Date.now()));
+      }
+
+      renderOverviewNextStarSuggestion(panel);
+
+      const target = panel?.querySelector('#tds-next-star-evidence');
+      if (target) target.innerHTML = nextStarEvidenceHtml(evidence);
+
+      const button = panel?.querySelector('#tds-next-star-check');
+      if (button) {
+        button.textContent = evidence.maxRating ? '10★ Maximum' : 'Refresh Next Star Evidence';
+      }
+
+      return true;
+    } catch (err) {
+      console.warn('[TDS] Automatic Next Star refresh failed:', err);
+      return false;
+    }
+  }
+
   async function loadNextStarEvidence(panel, own, { force = false } = {}) {
     const target = panel.querySelector('#tds-next-star-evidence');
     const button = panel.querySelector('#tds-next-star-check');
@@ -8299,6 +8481,8 @@
 
     try {
       const evidence = await buildNextStarEvidence(own, { force });
+      saveNextStarEvidence(evidence, own);
+      renderOverviewNextStarSuggestion(panel);
       target.innerHTML = nextStarEvidenceHtml(evidence);
       if (button) button.textContent = evidence.maxRating ? '10★ Maximum' : 'Refresh Next Star Evidence';
     } catch (err) {
@@ -10234,6 +10418,117 @@
     }
   }
 
+  function tctDayKey(timestamp = Date.now()) {
+    return new Date(timestamp).toISOString().slice(0, 10);
+  }
+
+  function tctNoonTimestampFor(timestamp = Date.now()) {
+    const date = new Date(timestamp);
+    return Date.UTC(
+      date.getUTCFullYear(),
+      date.getUTCMonth(),
+      date.getUTCDate(),
+      DAILY_DIAGNOSTIC_TCT_HOUR,
+      0,
+      0,
+      0
+    );
+  }
+
+  function dailyDiagnosticIsDue(timestamp = Date.now()) {
+    const lastDay = String(GM_getValue(STORAGE_KEY_LAST_DAILY_TCT_DAY, '') || '');
+    return timestamp >= tctNoonTimestampFor(timestamp) && lastDay !== tctDayKey(timestamp);
+  }
+
+  function markDailyDiagnosticSatisfied(timestamp = Date.now()) {
+    if (timestamp >= tctNoonTimestampFor(timestamp)) {
+      GM_setValue(STORAGE_KEY_LAST_DAILY_TCT_DAY, tctDayKey(timestamp));
+    }
+  }
+
+  function nextDailyCheckTimestamp(timestamp = Date.now()) {
+    const noon = tctNoonTimestampFor(timestamp);
+    return timestamp < noon ? noon : noon + (24 * 60 * 60 * 1000);
+  }
+
+  async function runScheduledDailyRefresh(panel) {
+    if (!panel || !document.contains(panel)) return;
+
+    const apiKey = GM_getValue(STORAGE_KEY_APIKEY, '');
+    if (!apiKey) {
+      scheduleDailyRefresh(panel);
+      return;
+    }
+
+    if (state.autoRefreshRunning || state.diagnosticRunning) {
+      if (state.autoRefreshTimer) clearTimeout(state.autoRefreshTimer);
+      state.autoRefreshTimer = setTimeout(() => {
+        runScheduledDailyRefresh(panel).catch((err) =>
+          console.warn('[TDS] Deferred daily refresh failed:', err)
+        );
+      }, 60 * 1000);
+      return;
+    }
+
+    state.autoRefreshRunning = true;
+    let retrySoon = false;
+
+    try {
+      if (dailyDiagnosticIsDue()) {
+        try {
+          await runFullDiagnostic(panel, { force: false });
+          markDailyDiagnosticSatisfied(Date.now());
+        } catch (err) {
+          retrySoon = true;
+          console.warn('[TDS] Scheduled 12:00 TCT diagnostic failed:', err);
+        }
+      }
+
+      const now = Date.now();
+      const today = tctDayKey(now);
+      const lastNextStarDay = String(GM_getValue(STORAGE_KEY_LAST_NEXT_STAR_TCT_DAY, '') || '');
+      const dailyDiagnosticDone = String(GM_getValue(STORAGE_KEY_LAST_DAILY_TCT_DAY, '') || '') === today;
+
+      if (!retrySoon &&
+          now >= tctNoonTimestampFor(now) &&
+          dailyDiagnosticDone &&
+          lastNextStarDay !== today) {
+        const ok = await refreshNextStarSuggestion(panel, { force: true, markDaily: true });
+        if (!ok) retrySoon = true;
+      }
+    } finally {
+      state.autoRefreshRunning = false;
+    }
+
+    if (retrySoon) {
+      if (state.autoRefreshTimer) clearTimeout(state.autoRefreshTimer);
+      state.autoRefreshTimer = setTimeout(() => {
+        runScheduledDailyRefresh(panel).catch((err) =>
+          console.warn('[TDS] Daily refresh retry failed:', err)
+        );
+      }, 15 * 60 * 1000);
+      return;
+    }
+
+    scheduleDailyRefresh(panel);
+  }
+
+  function scheduleDailyRefresh(panel) {
+    if (state.autoRefreshTimer) clearTimeout(state.autoRefreshTimer);
+    if (!panel || !document.contains(panel)) return;
+
+    const now = Date.now();
+    const delay = dailyDiagnosticIsDue()
+      ? 1500
+      : Math.max(1500, nextDailyCheckTimestamp(now) - now + 1500);
+
+    state.autoRefreshTimer = setTimeout(() => {
+      runScheduledDailyRefresh(panel).catch((err) =>
+        console.warn('[TDS] Daily refresh scheduler failed:', err)
+      );
+    }, delay);
+  }
+
   async function runFullDiagnostic(panel, { force = false } = {}) {
     if (state.diagnosticRunning) return;
 
@@ -10277,6 +10572,7 @@
       state.lastResults = results;
       state.lastVerdict = verdict;
       state.lastRunAt = completedAt;
+      markDailyDiagnosticSatisfied(completedAt);
 
       state.diagnosticRunning = false;
       startFooterTicker(panel);
@@ -10341,11 +10637,21 @@
     // Hydrate the UI from the last persisted diagnostic first. This means a
     // Torn navigation/refresh does not trigger another API diagnostic.
     const hydrated = await loadPersistedDiagnostic(panel);
-    if (hydrated) return;
+    scheduleDailyRefresh(panel);
+    if (hydrated) {
+      runScheduledDailyRefresh(panel).catch((err) =>
+        console.warn('[TDS] Daily refresh check after hydrate failed:', err)
+      );
+      return;
+    }
 
     if (GM_getValue(STORAGE_KEY_APIKEY, '')) {
       try {
         await runFullDiagnostic(panel);
+        scheduleDailyRefresh(panel);
+        runScheduledDailyRefresh(panel).catch((err) =>
+          console.warn('[TDS] Daily Next Star refresh after startup failed:', err)
+        );
       } catch (err) {
         const status = panel.querySelector('#tds-footer-status');
         if (status) status.textContent = 'Last run: Never';
